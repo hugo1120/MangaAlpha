@@ -18,7 +18,6 @@ import { Route, Routes, useNavigate, useParams, useSearchParams } from 'react-ro
 import { AwaitableComponent } from 'awaitable-component';
 import { loadable } from 'react-lazily/loadable';
 import { AppContext } from '@/base/contexts/AppContext.tsx';
-import { lazyLoadFallback } from '@/base/utils/LazyLoad.tsx';
 import { ErrorBoundary } from '@/base/components/feedback/ErrorBoundary.tsx';
 import { LoadingPlaceholder } from '@/base/components/feedback/LoadingPlaceholder.tsx';
 import { ReactRouter } from '@/lib/react-router/ReactRouter.ts';
@@ -27,7 +26,15 @@ import { useNavBarContext } from '@/features/navigation-bar/NavbarContext.tsx';
 import { ReaderResumeMode } from '@/features/reader/Reader.types.ts';
 import { KomgaHostBridge } from '@/host/KomgaHostBridge.ts';
 
-const { Reader } = loadable(() => import('@/features/reader/screens/Reader.tsx'), lazyLoadFallback);
+const blackLoadingFallback = {
+    fallback: (
+        <Box sx={{ height: '100vh', width: '100vw', display: 'grid', placeItems: 'center', bgcolor: '#000' }}>
+            <LoadingPlaceholder />
+        </Box>
+    ),
+};
+
+const { Reader } = loadable(() => import('@/features/reader/screens/Reader.tsx'), blackLoadingFallback);
 
 const ReactRouterSetter = () => {
     const navigate = useNavigate();

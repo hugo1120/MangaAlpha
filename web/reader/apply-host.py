@@ -301,6 +301,37 @@ export class SubpathUtil {
     exitMode: ReaderExitMode.MANGA,
     backgroundColor: ReaderBackgroundColor.BLACK,""",
     )
+    replace_exact(
+        reader_consts,
+        """    shouldShowReadingModePreview: true,
+    shouldShowTapZoneLayoutPreview: true,""",
+        """    shouldShowReadingModePreview: false,
+    shouldShowTapZoneLayoutPreview: false,""",
+    )
+
+    # 8b. Never auto-pop tap-zone overlay or reading-mode toast on initial reader open
+    preview_hook = root / "src" / "features" / "reader" / "hooks" / "useReaderShowSettingPreviewOnChange.ts"
+    replace_exact(
+        preview_hook,
+        """        if (isLoading || error || !areSettingsSet) {
+            return;
+        }
+
+        const didReadingModeChange = JSON.stringify(readingMode) !== JSON.stringify(previousReadingMode.current);""",
+        """        if (isLoading || error || !areSettingsSet) {
+            return;
+        }
+
+        if (isInitialPreview.current) {
+            previousReadingMode.current = readingMode;
+            previousTapZoneLayout.current = tapZoneLayout;
+            previousTapZoneInvertMode.current = tapZoneInvertMode;
+            isInitialPreview.current = false;
+            return;
+        }
+
+        const didReadingModeChange = JSON.stringify(readingMode) !== JSON.stringify(previousReadingMode.current);""",
+    )
 
     # 9. ReaderService.useExit: return cleanly to /series/{seriesId} on fake-komga-115 Bookshelf
     reader_svc = root / "src" / "features" / "reader" / "services" / "ReaderService.ts"
@@ -368,6 +399,42 @@ export class SubpathUtil {
         spinner_img,
         "{isVisible && !!isLoading && <CircularProgress thickness={5} />}",
         "{isVisible && !!isLoading && <PageLoadProgress src={src} small={small} />}",
+    )
+
+    # 11. Keep reader loading screens & page placeholders consistent with pure black canvas
+    reader_screen = root / "src" / "features" / "reader" / "screens" / "Reader.tsx"
+    replace_exact(
+        reader_screen,
+        """            <Box
+                sx={{
+                    height: '100vh',
+                    width: '100vw',
+                    display: 'grid',
+                    placeItems: 'center',
+                }}
+            >
+                <LoadingPlaceholder />
+            </Box>""",
+        """            <Box
+                sx={{
+                    height: '100vh',
+                    width: '100vw',
+                    display: 'grid',
+                    placeItems: 'center',
+                    bgcolor: '#000',
+                }}
+            >
+                <LoadingPlaceholder />
+            </Box>""",
+    )
+
+    reader_page = root / "src" / "features" / "reader" / "viewer" / "components" / "ReaderPage.tsx"
+    replace_exact(
+        reader_page,
+        """            spinnerStyle={{
+                backgroundColor: 'background.paper',""",
+        """            spinnerStyle={{
+                backgroundColor: 'transparent',""",
     )
 
 

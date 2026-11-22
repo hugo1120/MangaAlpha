@@ -13,6 +13,8 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import React, { useEffect, useState } from 'react';
+import { ReaderBackgroundColor } from '@/features/reader/Reader.types.ts';
+import { useReaderSettingsStore } from '@/features/reader/stores/ReaderStore.ts';
 
 export interface BookLoadProgress {
     active: boolean;
@@ -154,8 +156,33 @@ function computeProgressPercent(status: BookLoadProgress | null): number | null 
     return Math.max(1, Math.min(99, Math.round((loaded / total) * 100)));
 }
 
+function useLoadTextColors(): { primary: string; secondary: string; trackBg: string; chipBg: string; chipColor: string; chipBorder: string } {
+    const backgroundColor = useReaderSettingsStore('backgroundColor');
+    const isLightCanvas =
+        backgroundColor === ReaderBackgroundColor.WHITE || backgroundColor === ReaderBackgroundColor.GRAY;
+    if (isLightCanvas) {
+        return {
+            primary: '#111827',
+            secondary: 'rgba(17, 24, 39, 0.72)',
+            trackBg: 'rgba(17, 24, 39, 0.14)',
+            chipBg: 'rgba(79, 70, 229, 0.12)',
+            chipColor: '#3730a3',
+            chipBorder: 'rgba(79, 70, 229, 0.28)',
+        };
+    }
+    return {
+        primary: '#f8fafc',
+        secondary: 'rgba(226, 232, 240, 0.74)',
+        trackBg: 'rgba(255, 255, 255, 0.14)',
+        chipBg: 'rgba(99, 102, 241, 0.22)',
+        chipColor: '#c7d2fe',
+        chipBorder: 'rgba(129, 140, 248, 0.35)',
+    };
+}
+
 export const BookIndexProgress: React.FC<{ bookId?: string }> = ({ bookId }) => {
     const { status, elapsedMs } = useBookLoadStatus(bookId, 0, Boolean(bookId), 120);
+    const colors = useLoadTextColors();
     const pct = computeProgressPercent(status);
     const provText = providerLabel(status?.provider);
     const stageText = (status?.active && status.message) || stageFallbackLabel(status?.stage, 'index');
@@ -182,15 +209,12 @@ export const BookIndexProgress: React.FC<{ bookId?: string }> = ({ bookId }) => 
             spacing={1.5}
             alignItems="center"
             sx={{
-                width: 'min(340px, 86vw)',
-                px: 3,
-                py: 2.5,
-                borderRadius: 2.5,
-                bgcolor: 'rgba(15, 18, 26, 0.86)',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                color: '#eef1f7',
+                width: 'min(320px, 84vw)',
+                px: 2,
+                py: 2,
+                bgcolor: 'transparent',
+                color: colors.primary,
                 textAlign: 'center',
-                backdropFilter: 'blur(8px)',
             }}
         >
             <CircularProgress
@@ -206,13 +230,13 @@ export const BookIndexProgress: React.FC<{ bookId?: string }> = ({ bookId }) => 
                     sx={{
                         height: 22,
                         fontSize: '0.72rem',
-                        bgcolor: 'rgba(99, 102, 241, 0.24)',
-                        color: '#c7d2fe',
-                        border: '1px solid rgba(129, 140, 248, 0.35)',
+                        bgcolor: colors.chipBg,
+                        color: colors.chipColor,
+                        border: `1px solid ${colors.chipBorder}`,
                     }}
                 />
             )}
-            <Typography variant="body2" sx={{ fontWeight: 500, color: '#f8fafc', lineHeight: 1.45 }}>
+            <Typography variant="body2" sx={{ fontWeight: 500, color: colors.primary, lineHeight: 1.45 }}>
                 {stageText}
             </Typography>
             <Box sx={{ width: '100%' }}>
@@ -222,12 +246,12 @@ export const BookIndexProgress: React.FC<{ bookId?: string }> = ({ bookId }) => 
                     sx={{
                         height: 6,
                         borderRadius: 99,
-                        bgcolor: 'rgba(255, 255, 255, 0.12)',
+                        bgcolor: colors.trackBg,
                     }}
                 />
             </Box>
             {metaParts.length > 0 && (
-                <Typography variant="caption" sx={{ color: 'rgba(226, 232, 240, 0.78)' }}>
+                <Typography variant="caption" sx={{ color: colors.secondary }}>
                     {metaParts.join(' · ')}
                 </Typography>
             )}
@@ -238,6 +262,7 @@ export const BookIndexProgress: React.FC<{ bookId?: string }> = ({ bookId }) => 
 export const PageLoadProgress: React.FC<{ src: string; small?: boolean }> = ({ src, small }) => {
     const parsed = parseKomgaPageUrl(src);
     const shouldTrack = !small && parsed !== null;
+    const colors = useLoadTextColors();
     const { status, elapsedMs, detailVisible } = useBookLoadStatus(
         parsed?.bookId,
         parsed?.pageNumber ?? 0,
@@ -276,13 +301,11 @@ export const PageLoadProgress: React.FC<{ src: string; small?: boolean }> = ({ s
             spacing={1}
             alignItems="center"
             sx={{
-                px: 2.5,
-                py: 2,
-                borderRadius: 2,
-                bgcolor: 'rgba(15, 18, 26, 0.78)',
-                border: '1px solid rgba(255, 255, 255, 0.1)',
-                color: '#eef1f7',
-                maxWidth: 'min(300px, 82vw)',
+                px: 2,
+                py: 1.5,
+                bgcolor: 'transparent',
+                color: colors.primary,
+                maxWidth: 'min(280px, 82vw)',
                 textAlign: 'center',
             }}
         >
@@ -292,7 +315,7 @@ export const PageLoadProgress: React.FC<{ src: string; small?: boolean }> = ({ s
                 variant={pct !== null ? 'determinate' : 'indeterminate'}
                 value={pct ?? undefined}
             />
-            <Typography variant="caption" sx={{ color: '#f8fafc', fontWeight: 500, lineHeight: 1.4 }}>
+            <Typography variant="caption" sx={{ color: colors.primary, fontWeight: 500, lineHeight: 1.4 }}>
                 {label}
             </Typography>
             <Box sx={{ width: 170, maxWidth: '100%' }}>
@@ -302,12 +325,12 @@ export const PageLoadProgress: React.FC<{ src: string; small?: boolean }> = ({ s
                     sx={{
                         height: 5,
                         borderRadius: 99,
-                        bgcolor: 'rgba(255, 255, 255, 0.14)',
+                        bgcolor: colors.trackBg,
                     }}
                 />
             </Box>
             {subParts.length > 0 && (
-                <Typography variant="caption" sx={{ color: 'rgba(226, 232, 240, 0.75)', fontSize: '0.7rem' }}>
+                <Typography variant="caption" sx={{ color: colors.secondary, fontSize: '0.7rem' }}>
                     {subParts.join(' · ')}
                 </Typography>
             )}

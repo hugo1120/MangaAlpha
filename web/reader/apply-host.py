@@ -37,7 +37,7 @@ def main() -> None:
     pkg_path = root / "package.json"
     pkg = json.loads(pkg_path.read_text(encoding="utf-8"))
     pkg.pop("engines", None)
-    pkg["scripts"]["build"] = "tsx tools/scripts/setupEnvFiles.ts && vite build"
+    pkg["scripts"]["build"] = "tsx tools/scripts/setupEnvFiles.ts && tsc --noEmit && vite build"
     pkg["scripts"]["prepare"] = "node -e ''"
     pkg_path.write_text(json.dumps(pkg, indent=2) + "\n", encoding="utf-8")
 
@@ -156,6 +156,18 @@ export default defineConfig(() => ({
 }""",
     )
 
+    locale_importer_ts = root / "src" / "lib" / "dayjs" / "LocaleImporter.ts"
+    replace_exact(
+        locale_importer_ts,
+        "import { DEFAULT_LANGUAGE } from '@/lib/ISOLanguageUtil.ts';\n",
+        "",
+    )
+    replace_exact(
+        locale_importer_ts,
+        "    return DEFAULT_LANGUAGE;",
+        "    return 'zh-cn';",
+    )
+
     entry_tsx = root / "src" / "index.tsx"
     replace_exact(
         entry_tsx,
@@ -201,7 +213,7 @@ export class SubpathUtil {
         return '/reader';
     }
 
-    public static getApiBaseUrl(serverUrl: string): string {
+    public static maybeAddAsSuffix(serverUrl: string): string {
         return serverUrl;
     }
 
@@ -352,6 +364,21 @@ export class SubpathUtil {
 
     # 9. ReaderService.useExit: return cleanly to /series/{seriesId} on fake-komga-115 Bookshelf
     reader_svc = root / "src" / "features" / "reader" / "services" / "ReaderService.ts"
+    replace_exact(
+        reader_svc,
+        "import { useNavigate } from 'react-router-dom';\n",
+        "",
+    )
+    replace_exact(
+        reader_svc,
+        "import { ReaderExitMode, ReaderOverlayMode, ReadingDirection, ReadingMode } from '@/features/reader/Reader.types.ts';",
+        "import { ReaderOverlayMode, ReadingDirection, ReadingMode } from '@/features/reader/Reader.types.ts';",
+    )
+    replace_exact(
+        reader_svc,
+        "import { READER_REGEX, useBackButton } from '@/base/hooks/useBackButton.ts';",
+        "import { READER_REGEX } from '@/base/hooks/useBackButton.ts';",
+    )
     replace_exact(
         reader_svc,
         "import { UrlUtil } from '@/lib/UrlUtil.ts';",

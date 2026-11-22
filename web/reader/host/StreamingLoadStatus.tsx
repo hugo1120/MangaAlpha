@@ -207,8 +207,8 @@ export const BookIndexProgress: React.FC<{ bookId?: string }> = ({ bookId }) => 
     return (
         <Stack
             spacing={1.5}
-            alignItems="center"
             sx={{
+                alignItems: 'center',
                 width: 'min(320px, 84vw)',
                 px: 2,
                 py: 2,
@@ -299,8 +299,8 @@ export const PageLoadProgress: React.FC<{ src: string; small?: boolean }> = ({ s
     return (
         <Stack
             spacing={1}
-            alignItems="center"
             sx={{
+                alignItems: 'center',
                 px: 2,
                 py: 1.5,
                 bgcolor: 'transparent',

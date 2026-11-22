@@ -152,6 +152,7 @@ func (s *Server) routes() chi.Router {
 	r.Get("/collections/{collectionID}", s.serveCollectionPageOrSPA)
 	r.Get("/readlists", s.serveSPA)
 	r.Get("/readlists/{readListID}", s.serveReadListPageOrSPA)
+	r.Get("/history", s.serveSPA)
 	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
 	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)

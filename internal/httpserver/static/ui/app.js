@@ -435,6 +435,7 @@
             <a href="/libraries" data-nav class="${activeNav === 'libraries' ? 'active' : ''}">浏览书库</a>
             <a href="/collections" data-nav class="${activeNav === 'collections' ? 'active' : ''}">收藏夹</a>
             <a href="/readlists" data-nav class="${activeNav === 'readlists' ? 'active' : ''}">阅读列表</a>
+            <a href="/history" data-nav class="${activeNav === 'history' ? 'active' : ''}">历史</a>
             <a href="/admin" data-nav class="${activeNav === 'admin' ? 'active' : ''}">管理后台</a>
           </nav>
           <form class="topbar-search" id="global-search-form">
@@ -2147,7 +2148,7 @@
       return `
       <div class="${cardClass}" style="${!l.enabled && nested ? 'opacity:0.72;' : ''}">
         <div class="lib-card-row">
-          <div style="min-width:0;flex:1">
+          <div class="lib-card-info">
             <div class="lib-card-title-row">
               ${nested ? `<span class="badge badge-accent">#${layerRank + 1}</span>` : ''}
               <strong style="font-size:${nested ? '14.5px' : '15.5px'};overflow-wrap:anywhere">${esc(l.name)}</strong>
@@ -4639,6 +4640,275 @@
     }
   }
 
+  // --- Reading History Timeline (/history) ---
+
+  function historyTimestampMs(book) {
+    const rp = book && book.readProgress;
+    const raw = (rp && (rp.readDate || rp.lastModified || rp.created)) || '';
+    if (!raw) return 0;
+    const ms = Date.parse(raw);
+    return Number.isNaN(ms) ? 0 : ms;
+  }
+
+  function historyDayKey(ms) {
+    if (!ms) return 'unknown';
+    const d = new Date(ms);
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const day = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  function historyDayLabel(dayKey) {
+    if (!dayKey || dayKey === 'unknown') return '更早';
+    const parts = dayKey.split('-').map(Number);
+    if (parts.length !== 3) return dayKey;
+    const target = new Date(parts[0], parts[1] - 1, parts[2]);
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
+    if (diffDays === 0) return '今天';
+    if (diffDays === 1) return '1 天前';
+    if (diffDays >= 2 && diffDays <= 6) return `${diffDays} 天前`;
+    return dayKey;
+  }
+
+  function historyTimeText(ms) {
+    if (!ms) return '';
+    try {
+      return new Date(ms).toLocaleTimeString('zh-CN', { hour: 'numeric', minute: '2-digit', hour12: true });
+    } catch (_) {
+      const d = new Date(ms);
+      return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    }
+  }
+
+  function groupHistoryTimeline(books) {
+    const dayOrder = [];
+    const dayMap = new Map();
+    for (const b of books) {
+      const ms = historyTimestampMs(b);
+      const dayKey = historyDayKey(ms);
+      if (!dayMap.has(dayKey)) {
+        const dayObj = { dayKey, label: historyDayLabel(dayKey), seriesOrder: [], seriesMap: new Map() };
+        dayMap.set(dayKey, dayObj);
+        dayOrder.push(dayObj);
+      }
+      const dayObj = dayMap.get(dayKey);
+      const sid = b.seriesId || b.id;
+      if (!dayObj.seriesMap.has(sid)) {
+        const entry = { key: `${dayKey}::${sid}`, seriesId: sid, primary: b, others: [] };
+        dayObj.seriesMap.set(sid, entry);
+        dayObj.seriesOrder.push(entry);
+      } else {
+        dayObj.seriesMap.get(sid).others.push(b);
+      }
+    }
+    return dayOrder.map((d) => ({
+      dayKey: d.dayKey,
+      label: d.label,
+      entries: d.seriesOrder,
+    }));
+  }
+
+  function renderHistoryEntryHTML(entry) {
+    const b = entry.primary;
+    const rp = b.readProgress || {};
+    const pg = Number(rp.page) || 1;
+    const totalPg = Number((b.media && b.media.pagesCount) || 0);
+    const completed = Boolean(rp.completed);
+    const readerPage = completed ? 1 : pg;
+    const readerURL = `/reader/series/${encodeURIComponent(b.seriesId)}/book/${encodeURIComponent(b.id)}?page=${readerPage}`;
+    const seriesURL = `/series/${encodeURIComponent(b.seriesId)}`;
+    const seriesTitle = b.seriesTitle || b.name || '未命名';
+    const bookLabel = (b.metadata && b.metadata.title) ? b.metadata.title : b.name;
+    const timeStr = historyTimeText(historyTimestampMs(b));
+    const sourceText = librarySourceText(b.libraryId);
+    const statusBadge = completed
+      ? `<span class="badge badge-success">已读完</span>`
+      : `<span class="badge badge-accent">第 ${pg}${totalPg > 0 ? ` / ${totalPg}` : ''} 页</span>`;
+
+    const subHTML = entry.others.length > 0 ? `
+      <div class="history-entry-footer">
+        <button type="button" class="history-more-btn" data-hist-toggle="${esc(entry.key)}" data-hist-count="${entry.others.length}" aria-expanded="false">
+          ▸ 当天另有 ${entry.others.length} 卷
+        </button>
+        <a href="${seriesURL}" data-nav style="font-size:12px;color:var(--text-muted)">作品详情 →</a>
+      </div>
+      <div class="history-sub-list" data-hist-children="${esc(entry.key)}" hidden>
+        ${entry.others.map((ob) => {
+          const orp = ob.readProgress || {};
+          const opg = Number(orp.page) || 1;
+          const ototal = Number((ob.media && ob.media.pagesCount) || 0);
+          const odone = Boolean(orp.completed);
+          const oUrl = `/reader/series/${encodeURIComponent(ob.seriesId)}/book/${encodeURIComponent(ob.id)}?page=${odone ? 1 : opg}`;
+          const oName = (ob.metadata && ob.metadata.title) ? ob.metadata.title : ob.name;
+          const oTime = historyTimeText(historyTimestampMs(ob));
+          return `
+            <a class="history-sub-item" href="${oUrl}">
+              <span class="history-sub-name" title="${esc(oName)}">${esc(oName)}</span>
+              <span class="history-sub-meta">
+                ${odone ? `<span class="badge badge-success">已读完</span>` : `<span class="badge badge-accent">第 ${opg}${ototal > 0 ? ` / ${ototal}` : ''} 页</span>`}
+                ${oTime ? `<span>${esc(oTime)}</span>` : ''}
+              </span>
+            </a>`;
+        }).join('')}
+      </div>` : '';
+
+    return `
+      <article class="history-entry">
+        <div class="history-row">
+          <a class="history-cover" href="${seriesURL}" data-nav title="查看作品详情：${esc(seriesTitle)}">
+            <img loading="lazy" src="/api/v1/series/${encodeURIComponent(b.seriesId)}/thumbnail?v=${state.coverVer}" alt="${esc(seriesTitle)}">
+          </a>
+          <a class="history-main" href="${readerURL}" title="打开阅读器：${esc(bookLabel)}">
+            <div class="history-title">${esc(seriesTitle)}</div>
+            <div class="history-sub">
+              <span class="history-vol" title="${esc(bookLabel)}">${esc(bookLabel)}</span>
+              ${statusBadge}
+              ${timeStr ? `<span class="history-time">${esc(timeStr)}</span>` : ''}
+            </div>
+            ${sourceText ? `<div class="history-source">${esc(sourceText)}</div>` : ''}
+          </a>
+        </div>
+        ${subHTML}
+      </article>`;
+  }
+
+  async function renderHistory() {
+    const seq = routeSeq;
+    document.title = '阅读历史 · MangaAlpha';
+    const sp = new URLSearchParams(location.search);
+    const search = (sp.get('search') || '').trim();
+    renderShell('history', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载阅读历史…</p></div>`);
+
+    const PAGE_SIZE = 80;
+    const loadedBooks = [];
+    const seenBookIDs = new Set();
+    let nextPage = 0;
+    let totalPages = 1;
+    let totalElements = 0;
+    let loadingMore = false;
+
+    const fetchBatch = async (minAdditionalGroups = 15) => {
+      let loops = 0;
+      const beforeGroups = groupHistoryTimeline(loadedBooks).reduce((acc, g) => acc + g.entries.length, 0);
+      while (nextPage < totalPages && loops < 4) {
+        loops++;
+        const qs = new URLSearchParams();
+        qs.append('read_status', 'IN_PROGRESS');
+        qs.append('read_status', 'READ');
+        qs.set('sort', 'readProgress.readDate,desc');
+        qs.set('page', String(nextPage));
+        qs.set('size', String(PAGE_SIZE));
+        if (search) qs.set('search', search);
+        const page = await api(`/api/v1/books?${qs.toString()}`);
+        if (seq !== routeSeq) return false;
+        const rows = (page && page.content) || [];
+        totalElements = Number((page && page.totalElements) || 0);
+        totalPages = Number((page && page.totalPages) || 0);
+        nextPage++;
+        for (const r of rows) {
+          if (!r || !r.id || seenBookIDs.has(r.id)) continue;
+          seenBookIDs.add(r.id);
+          loadedBooks.push(r);
+        }
+        const curGroups = groupHistoryTimeline(loadedBooks).reduce((acc, g) => acc + g.entries.length, 0);
+        if (curGroups - beforeGroups >= minAdditionalGroups || rows.length === 0) break;
+      }
+      return true;
+    };
+
+    const paint = () => {
+      const content = document.getElementById('page-content');
+      if (!content || seq !== routeSeq) return;
+      const days = groupHistoryTimeline(loadedBooks);
+      const hasMore = nextPage < totalPages;
+      content.innerHTML = `
+        <section class="section">
+          <div class="section-head">
+            <h2>历史${totalElements > 0 ? `（${totalElements.toLocaleString()} 卷记录）` : ''}</h2>
+            <div class="org-toolbar history-toolbar">
+              <form id="history-filter-form" class="org-search-form">
+                <input type="text" id="history-search-input" value="${esc(search)}" placeholder="搜索历史漫画或卷名…">
+                <button type="submit" class="btn btn-sm">搜索</button>
+                <button type="button" class="btn btn-sm" id="btn-history-refresh">刷新</button>
+              </form>
+            </div>
+          </div>
+          ${days.length ? `
+            <div class="history-timeline">
+              ${days.map((day) => `
+                <section class="history-day-group">
+                  <div class="history-day-head">${esc(day.label)}</div>
+                  <div class="history-list">
+                    ${day.entries.map((entry) => renderHistoryEntryHTML(entry)).join('')}
+                  </div>
+                </section>
+              `).join('')}
+            </div>
+            ${hasMore ? `
+              <div class="pagination">
+                <button type="button" class="btn" id="btn-history-more" ${loadingMore ? 'disabled' : ''}>${loadingMore ? '加载中…' : '加载更多历史'}</button>
+              </div>` : ''}
+          ` : `
+            <div class="empty-box">
+              <p style="margin:0">${search ? '没有找到匹配的阅读历史记录。' : '还没有阅读历史记录。打开任意漫画开始阅读后，这里会按时间线记录你的阅读足迹。'}</p>
+            </div>
+          `}
+        </section>
+      `;
+
+      document.getElementById('history-filter-form').onsubmit = (e) => {
+        e.preventDefault();
+        const val = document.getElementById('history-search-input').value.trim();
+        navigate(val ? `/history?search=${encodeURIComponent(val)}` : '/history');
+      };
+      document.getElementById('btn-history-refresh').onclick = () => renderHistory();
+      content.querySelectorAll('button[data-hist-toggle]').forEach((btn) => {
+        btn.onclick = () => {
+          const key = btn.getAttribute('data-hist-toggle');
+          const count = btn.getAttribute('data-hist-count') || '0';
+          const list = content.querySelector(`[data-hist-children="${CSS.escape(key)}"]`);
+          if (!list) return;
+          const expanded = list.hasAttribute('hidden');
+          if (expanded) list.removeAttribute('hidden');
+          else list.setAttribute('hidden', '');
+          btn.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+          btn.textContent = expanded ? `▾ 收起当天其余 ${count} 卷` : `▸ 当天另有 ${count} 卷`;
+        };
+      });
+      const moreBtn = document.getElementById('btn-history-more');
+      if (moreBtn) {
+        moreBtn.onclick = async () => {
+          if (loadingMore) return;
+          loadingMore = true;
+          moreBtn.disabled = true;
+          moreBtn.textContent = '加载中…';
+          try {
+            const ok = await fetchBatch(15);
+            if (!ok || seq !== routeSeq) return;
+            loadingMore = false;
+            paint();
+          } catch (err) {
+            loadingMore = false;
+            toast(err.message, 'error');
+            paint();
+          }
+        };
+      }
+    };
+
+    try {
+      await Promise.all([ensureLibrariesLoaded(), fetchBatch(15)]);
+      if (seq !== routeSeq) return;
+      paint();
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
+  }
+
   // --- Router ---
 
   let routeSeq = 0;
@@ -4711,6 +4981,10 @@
     if (p.startsWith('/readlists/')) {
       const rid = decodeURIComponent(p.slice('/readlists/'.length));
       await renderReadListDetail(rid);
+      return;
+    }
+    if (p === '/history') {
+      await renderHistory();
       return;
     }
     if (p.startsWith('/series/')) {

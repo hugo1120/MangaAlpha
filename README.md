@@ -198,6 +198,7 @@ systemctl --user start fake-komga-115
 - [docs/ANDROID.md](docs/ANDROID.md)：Android 独立版安装、SAF 目录权限、局域网服务与签名构建说明
 - [docs/AGENT_API.md](docs/AGENT_API.md)：AI Agent 专用书库管理接口（`/api/agent/v1`）参考手册
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：系统架构、鉴权、多源流式读取、Bangumi 双引擎与内置阅读器原理
+- [docs/REVERSE_PROXY.md](docs/REVERSE_PROXY.md)：公网部署安全清单与 Caddy / Nginx / NPM / Cloudflare Tunnel HTTPS 反向代理示例
 - [docs/RELEASING.md](docs/RELEASING.md)：维护者的发版、产物验证与 Docker `latest` 切换流程
 - [AGENTS.md](AGENTS.md)：面向开发者与 AI 编程助手的仓库规范与构建指引
 - [SECURITY.md](SECURITY.md)：安全模型与敏感信息保护边界

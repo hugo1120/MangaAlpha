@@ -308,6 +308,23 @@ export class SubpathUtil {
         """    shouldShowReadingModePreview: false,
     shouldShowTapZoneLayoutPreview: false,""",
     )
+    replace_exact(
+        reader_consts,
+        "    shouldCropBorders: false,",
+        "    shouldCropBorders: typeof window !== 'undefined' && window.innerWidth < 900,",
+    )
+
+    # 8a. Fill missing Simplified Chinese translation for upstream auto-crop setting
+    zh_po = root / "src" / "i18n" / "locales" / "zh-Hans.po"
+    zh_text = zh_po.read_text(encoding="utf-8")
+    if 'msgid "Crop borders"' not in zh_text:
+        zh_po.write_text(
+            zh_text.rstrip()
+            + '\n\n#: src/features/reader/settings/layout/ReaderLayoutSettings.tsx\n'
+            + 'msgid "Crop borders"\n'
+            + 'msgstr "自动裁切白边"\n',
+            encoding="utf-8",
+        )
 
     # 8b. Never auto-pop tap-zone overlay or reading-mode toast on initial reader open
     preview_hook = root / "src" / "features" / "reader" / "hooks" / "useReaderShowSettingPreviewOnChange.ts"
@@ -407,8 +424,8 @@ export class SubpathUtil {
         reader_screen,
         """            <Box
                 sx={{
-                    height: '100vh',
-                    width: '100vw',
+                    height: '100dvh',
+                    width: '100dvw',
                     display: 'grid',
                     placeItems: 'center',
                 }}
@@ -417,8 +434,8 @@ export class SubpathUtil {
             </Box>""",
         """            <Box
                 sx={{
-                    height: '100vh',
-                    width: '100vw',
+                    height: '100dvh',
+                    width: '100dvw',
                     display: 'grid',
                     placeItems: 'center',
                     bgcolor: '#000',

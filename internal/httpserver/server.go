@@ -12,6 +12,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -81,6 +82,9 @@ func New(
 	runtimeInfo RuntimeInfo,
 	logger *slog.Logger,
 ) *Server {
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	s := &Server{
 		store: store, client: client, webdav: webdav.NewManager(),
 		scanner: scanManager, cache: cacheManager,

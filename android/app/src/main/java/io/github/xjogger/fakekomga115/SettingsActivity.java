@@ -154,11 +154,9 @@ public final class SettingsActivity extends Activity {
         serviceCard.addView(serviceStatusView);
 
         LinearLayout serviceActions = makeButtonRow();
-        Button backBtn = new Button(this);
-        backBtn.setText("返回书架");
+        Button backBtn = makeRowButton("返回书架");
         backBtn.setOnClickListener(v -> finish());
-        Button startBtn = new Button(this);
-        startBtn.setText("启动服务");
+        Button startBtn = makeRowButton("启动服务");
         startBtn.setOnClickListener(v -> {
             try {
                 startForegroundService(new Intent(this, ReaderService.class));
@@ -170,8 +168,7 @@ public final class SettingsActivity extends Activity {
             }
             refreshUi();
         });
-        Button stopBtn = new Button(this);
-        stopBtn.setText("停止服务");
+        Button stopBtn = makeRowButton("停止服务");
         stopBtn.setOnClickListener(v -> {
             try {
                 if (service != null) service.stopNow();
@@ -182,9 +179,7 @@ public final class SettingsActivity extends Activity {
             }
             refreshUi();
         });
-        serviceActions.addView(backBtn);
-        serviceActions.addView(startBtn);
-        serviceActions.addView(stopBtn);
+        addRowButtons(serviceActions, backBtn, startBtn, stopBtn);
         serviceCard.addView(serviceActions);
         container.addView(serviceCard);
 
@@ -224,15 +219,12 @@ public final class SettingsActivity extends Activity {
         updateCard.addView(updateProgressText);
 
         LinearLayout updateActions = makeButtonRow();
-        checkUpdateBtn = new Button(this);
-        checkUpdateBtn.setText("检查更新");
+        checkUpdateBtn = makeRowButton("检查更新");
         checkUpdateBtn.setOnClickListener(v -> requestUpdateStatus(true));
-        installUpdateBtn = new Button(this);
-        installUpdateBtn.setText("下载并安装更新");
+        installUpdateBtn = makeRowButton("下载并安装更新");
         installUpdateBtn.setVisibility(View.GONE);
         installUpdateBtn.setOnClickListener(v -> startDownloadAndInstallUpdate());
-        updateActions.addView(checkUpdateBtn);
-        updateActions.addView(installUpdateBtn);
+        addRowButtons(updateActions, checkUpdateBtn, installUpdateBtn);
         updateCard.addView(updateActions);
         container.addView(updateCard);
 
@@ -257,6 +249,7 @@ public final class SettingsActivity extends Activity {
 
         LinearLayout portRow = new LinearLayout(this);
         portRow.setOrientation(LinearLayout.HORIZONTAL);
+        portRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         portRow.setPadding(0, dp(8), 0, dp(6));
         TextView portLabel = new TextView(this);
         portLabel.setText("监听端口：");
@@ -264,9 +257,13 @@ public final class SettingsActivity extends Activity {
         lanPortInput = new EditText(this);
         lanPortInput.setInputType(InputType.TYPE_CLASS_NUMBER);
         lanPortInput.setTextColor(textColor);
-        lanPortInput.setMinWidth(dp(100));
-        Button applyPortBtn = new Button(this);
-        applyPortBtn.setText("应用端口");
+        lanPortInput.setMinWidth(dp(84));
+        LinearLayout.LayoutParams portInputLp = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        portInputLp.leftMargin = dp(4);
+        portInputLp.rightMargin = dp(8);
+        lanPortInput.setLayoutParams(portInputLp);
+        Button applyPortBtn = makeRowButton("应用端口");
         applyPortBtn.setOnClickListener(v -> applyLanFromControls(lanSwitch.isChecked()));
         portRow.addView(portLabel);
         portRow.addView(lanPortInput);
@@ -327,26 +324,20 @@ public final class SettingsActivity extends Activity {
 
         LinearLayout diagActionsRow1 = makeButtonRow();
         LinearLayout diagActionsRow2 = makeButtonRow();
-        Button refreshDiagBtn = new Button(this);
-        refreshDiagBtn.setText("刷新预览");
+        Button refreshDiagBtn = makeRowButton("刷新预览");
         refreshDiagBtn.setOnClickListener(v -> refreshDiagnosticsPreview());
-        Button saveDiagBtn = new Button(this);
-        saveDiagBtn.setText("保存文件");
+        Button saveDiagBtn = makeRowButton("保存文件");
         saveDiagBtn.setOnClickListener(v -> startSaveDiagnosticsDocument());
-        Button shareDiagBtn = new Button(this);
-        shareDiagBtn.setText("分享日志");
+        Button shareDiagBtn = makeRowButton("分享日志");
         shareDiagBtn.setOnClickListener(v -> shareDiagnosticsText());
-        Button clearDiagBtn = new Button(this);
-        clearDiagBtn.setText("清空日志");
+        Button clearDiagBtn = makeRowButton("清空日志");
         clearDiagBtn.setOnClickListener(v -> {
             DiagnosticsLog.clearAll(this, service != null ? service.getInstance() : null);
             Toast.makeText(this, "诊断日志已清空", Toast.LENGTH_SHORT).show();
             refreshDiagnosticsPreview();
         });
-        diagActionsRow1.addView(refreshDiagBtn);
-        diagActionsRow1.addView(clearDiagBtn);
-        diagActionsRow2.addView(saveDiagBtn);
-        diagActionsRow2.addView(shareDiagBtn);
+        addRowButtons(diagActionsRow1, refreshDiagBtn, clearDiagBtn);
+        addRowButtons(diagActionsRow2, saveDiagBtn, shareDiagBtn);
         diagCard.addView(diagActionsRow1);
         diagCard.addView(diagActionsRow2);
 
@@ -627,7 +618,34 @@ public final class SettingsActivity extends Activity {
     private LinearLayout makeButtonRow() {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(4);
+        row.setLayoutParams(lp);
         return row;
+    }
+
+    private Button makeRowButton(String label) {
+        Button btn = new Button(this);
+        btn.setText(label);
+        btn.setAllCaps(false);
+        btn.setTextSize(13f);
+        btn.setSingleLine(true);
+        btn.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        btn.setPadding(dp(8), dp(6), dp(8), dp(6));
+        btn.setMinimumWidth(0);
+        btn.setMinWidth(0);
+        return btn;
+    }
+
+    private void addRowButtons(LinearLayout row, Button... buttons) {
+        for (int i = 0; i < buttons.length; i++) {
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            if (i > 0) lp.leftMargin = dp(6);
+            buttons[i].setLayoutParams(lp);
+            row.addView(buttons[i]);
+        }
     }
 
     private int dp(int value) {

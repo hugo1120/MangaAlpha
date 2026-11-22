@@ -65,6 +65,9 @@ func (s *Server) komgaSSEEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "SSE_UNSUPPORTED", "Streaming is not supported by this response writer.")
 		return
 	}
+	ch, unsubscribe := s.sse.subscribe()
+	defer unsubscribe()
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
@@ -72,9 +75,6 @@ func (s *Server) komgaSSEEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(": connected\n\n"))
 	flusher.Flush()
-
-	ch, unsubscribe := s.sse.subscribe()
-	defer unsubscribe()
 
 	ticker := time.NewTicker(25 * time.Second)
 	defer ticker.Stop()

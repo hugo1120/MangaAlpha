@@ -832,13 +832,13 @@
               <option value="random" ${sort === 'random' ? 'selected' : ''}>随机漫游</option>
             </select>
             <select id="f-read">
-              <option value="">阅读状态：全部</option>
+              <option value="">阅读：全部</option>
               <option value="UNREAD" ${readStatus === 'UNREAD' ? 'selected' : ''}>未读</option>
               <option value="IN_PROGRESS" ${readStatus === 'IN_PROGRESS' ? 'selected' : ''}>阅读中</option>
               <option value="READ" ${readStatus === 'READ' ? 'selected' : ''}>已读完</option>
             </select>
             <select id="f-scrape">
-              <option value="">Bangumi：全部</option>
+              <option value="">BGM：全部</option>
               <option value="matched" ${scrapeStatus === 'matched' ? 'selected' : ''}>已匹配 Bangumi</option>
               <option value="manual" ${scrapeStatus === 'manual' ? 'selected' : ''}>手动指定</option>
               <option value="unmatched" ${scrapeStatus === 'unmatched' ? 'selected' : ''}>自动未命中</option>
@@ -852,7 +852,7 @@
           </div>
           <div class="filter-row">
             <select id="f-status">
-              <option value="">连载状态：全部</option>
+              <option value="">连载：全部</option>
               <option value="ONGOING" ${seriesStatus === 'ONGOING' ? 'selected' : ''}>连载中</option>
               <option value="ENDED" ${seriesStatus === 'ENDED' ? 'selected' : ''}>已完结</option>
               <option value="HIATUS" ${seriesStatus === 'HIATUS' ? 'selected' : ''}>休刊</option>
@@ -873,7 +873,7 @@
             <input type="text" id="f-author" class="filter-author-input" placeholder="作者筛选" value="${esc(author)}">
             <button type="button" class="btn btn-primary btn-sm" id="f-apply">筛选</button>
             <button type="button" class="btn btn-sm" id="f-reset">重置</button>
-            <label class="check-row" title="只在内置网页版合并展示，不改卷列表与阅读进度">
+            <label class="check-row filter-merge-toggle" title="只在内置网页版合并展示，不改卷列表与阅读进度">
               <input type="checkbox" id="f-merge-bgm" ${mergedWorks() ? 'checked' : ''}>合并相同 Bangumi ID
             </label>
             <span class="filter-count" style="margin-left:auto;color:var(--text-muted);font-size:12.5px">共 ${totalElements.toLocaleString()} 部作品</span>
@@ -1364,8 +1364,8 @@
   function renderMaintJobRows(jobs) {
     if (!jobs || jobs.length === 0) return '';
     return `<div style="margin-top:8px;display:grid;gap:6px">${jobs.map((j) => `
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 10px;border-radius:6px;background:var(--bg-input);border:1px solid var(--border)">
-        <span>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px 10px;padding:7px 10px;border-radius:6px;background:var(--bg-input);border:1px solid var(--border)">
+        <span style="min-width:0;overflow-wrap:anywhere;word-break:break-word">
           <span class="badge ${j.status === 'completed' ? 'badge-success' : j.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(j.status)}</span>
           <strong style="margin-left:6px">${esc(j.operation)}</strong>
           <span style="color:var(--text-muted);margin-left:8px">${j.processedBooks || 0}/${j.totalBooks || 0}</span>
@@ -1448,7 +1448,7 @@
                     </div>
                     ${c.summary ? `<div style="font-size:12px;color:var(--text-muted);margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(c.summary)}</div>` : ''}
                   </div>
-                  <div style="display:flex;flex-direction:column;gap:6px;justify-content:center">
+                  <div class="bgm-candidate-actions">
                     <button type="button" class="btn btn-primary btn-sm" data-bind-bgm="${c.id}">选用此条目</button>
                     <a href="https://bgm.tv/subject/${c.id}" target="_blank" rel="noopener noreferrer" class="btn btn-sm">查看 ↗</a>
                   </div>
@@ -1530,15 +1530,15 @@
       bodyHTML: `
         <div class="grid-2">
           <div class="field">
-            <label>显示标题 <label class="check-row" style="float:right"><input type="checkbox" id="em-title-lock" ${m.titleLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-title">显示标题</label><label class="check-row"><input type="checkbox" id="em-title-lock" ${m.titleLock ? 'checked' : ''}>锁定</label></div>
             <input type="text" id="em-title" value="${esc(m.title || detail.originalName)}">
           </div>
           <div class="field">
-            <label>排序标题 <label class="check-row" style="float:right"><input type="checkbox" id="em-sort-lock" ${m.titleSortLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-sort">排序标题</label><label class="check-row"><input type="checkbox" id="em-sort-lock" ${m.titleSortLock ? 'checked' : ''}>锁定</label></div>
             <input type="text" id="em-sort" value="${esc(m.titleSort || m.title || detail.originalName)}">
           </div>
           <div class="field">
-            <label>连载状态 <label class="check-row" style="float:right"><input type="checkbox" id="em-status-lock" ${m.statusLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-status">连载状态</label><label class="check-row"><input type="checkbox" id="em-status-lock" ${m.statusLock ? 'checked' : ''}>锁定</label></div>
             <select id="em-status">
               <option value="ONGOING" ${m.status === 'ONGOING' ? 'selected' : ''}>ONGOING（连载中）</option>
               <option value="ENDED" ${m.status === 'ENDED' ? 'selected' : ''}>ENDED（已完结）</option>
@@ -1547,7 +1547,7 @@
             </select>
           </div>
           <div class="field">
-            <label>阅读方向 <label class="check-row" style="float:right"><input type="checkbox" id="em-dir-lock" ${m.readingDirectionLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-dir">阅读方向</label><label class="check-row"><input type="checkbox" id="em-dir-lock" ${m.readingDirectionLock ? 'checked' : ''}>锁定</label></div>
             <select id="em-dir">
               <option value="RIGHT_TO_LEFT" ${m.readingDirection === 'RIGHT_TO_LEFT' ? 'selected' : ''}>右翻日漫 (RIGHT_TO_LEFT)</option>
               <option value="LEFT_TO_RIGHT" ${m.readingDirection === 'LEFT_TO_RIGHT' ? 'selected' : ''}>左翻国漫/美漫 (LEFT_TO_RIGHT)</option>
@@ -1555,15 +1555,15 @@
             </select>
           </div>
           <div class="field">
-            <label>出版社 <label class="check-row" style="float:right"><input type="checkbox" id="em-pub-lock" ${m.publisherLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-pub">出版社</label><label class="check-row"><input type="checkbox" id="em-pub-lock" ${m.publisherLock ? 'checked' : ''}>锁定</label></div>
             <input type="text" id="em-pub" value="${esc(m.publisher || '')}">
           </div>
           <div class="field">
-            <label>发售日期 <label class="check-row" style="float:right"><input type="checkbox" id="em-date-lock" ${m.releaseDateLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-date">发售日期</label><label class="check-row"><input type="checkbox" id="em-date-lock" ${m.releaseDateLock ? 'checked' : ''}>锁定</label></div>
             <input type="text" id="em-date" placeholder="YYYY-MM-DD" value="${esc(m.releaseDate || '')}">
           </div>
           <div class="field">
-            <label>NSFW 分级标记 <label class="check-row" style="float:right"><input type="checkbox" id="em-nsfw-lock" ${m.nsfwLock ? 'checked' : ''}>锁定</label></label>
+            <div class="field-label-row"><label for="em-nsfw">NSFW 分级标记</label><label class="check-row"><input type="checkbox" id="em-nsfw-lock" ${m.nsfwLock ? 'checked' : ''}>锁定</label></div>
             <select id="em-nsfw">
               <option value="false" ${!m.isNsfw ? 'selected' : ''}>普通作品（非 NSFW）</option>
               <option value="true" ${m.isNsfw ? 'selected' : ''}>NSFW（受后台显示开关控制）</option>
@@ -1571,15 +1571,15 @@
           </div>
         </div>
         <div class="field">
-          <label>分类 Genres（英文逗号分隔） <label class="check-row" style="float:right"><input type="checkbox" id="em-genres-lock" ${m.genresLock ? 'checked' : ''}>锁定</label></label>
+          <div class="field-label-row"><label for="em-genres">分类 Genres（英文逗号分隔）</label><label class="check-row"><input type="checkbox" id="em-genres-lock" ${m.genresLock ? 'checked' : ''}>锁定</label></div>
           <input type="text" id="em-genres" value="${esc(genresStr)}">
         </div>
         <div class="field">
-          <label>标签 Tags（英文逗号分隔） <label class="check-row" style="float:right"><input type="checkbox" id="em-tags-lock" ${m.tagsLock ? 'checked' : ''}>锁定</label></label>
+          <div class="field-label-row"><label for="em-tags">标签 Tags（英文逗号分隔）</label><label class="check-row"><input type="checkbox" id="em-tags-lock" ${m.tagsLock ? 'checked' : ''}>锁定</label></div>
           <input type="text" id="em-tags" value="${esc(tagsStr)}">
         </div>
         <div class="field">
-          <label>简介 Summary <label class="check-row" style="float:right"><input type="checkbox" id="em-sum-lock" ${m.summaryLock ? 'checked' : ''}>锁定</label></label>
+          <div class="field-label-row"><label for="em-sum">简介 Summary</label><label class="check-row"><input type="checkbox" id="em-sum-lock" ${m.summaryLock ? 'checked' : ''}>锁定</label></div>
           <textarea id="em-sum">${esc(m.summary || '')}</textarea>
         </div>
       `,
@@ -1773,7 +1773,7 @@
 
     const tabs = [
       ['overview', '概览与连接'],
-      ['sources', '存储源（115 / WebDAV / 本地·SMB）'],
+      ['sources', '存储源'],
       ['libraries', '书库管理'],
       ['bangumi', 'Bangumi 刮削中心'],
       ['jobs', '后台任务'],
@@ -1792,6 +1792,11 @@
     refreshAdminUpdateBanner();
 
     document.querySelectorAll('button[data-admin-tab]').forEach((btn) => {
+      if (btn.classList.contains('active') && btn.scrollIntoView) {
+        requestAnimationFrame(() => {
+          try { btn.scrollIntoView({ inline: 'center', block: 'nearest' }); } catch (_) {}
+        });
+      }
       btn.onclick = () => {
         const next = btn.getAttribute('data-admin-tab');
         state.adminTab = next;
@@ -1872,8 +1877,8 @@
     const addrs = st.mihonAddresses || [];
     body.innerHTML = `
       <div class="stat-grid">
-        <div class="stat-box"><div class="k">有效书库数</div><div class="v">${st.libraries}${st.hiddenLibraries > 0 ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 ${st.hiddenLibraries}）</span>` : ''}</div></div>
-        <div class="stat-box"><div class="k">漫画系列总数</div><div class="v">${Number(st.series || 0).toLocaleString()}${(!st.showNsfw && st.nsfwSeries > 0) ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 NSFW ${Number(st.nsfwSeries).toLocaleString()} 部）</span>` : ''}</div></div>
+        <div class="stat-box"><div class="k">有效书库数</div><div class="v">${st.libraries}${st.hiddenLibraries > 0 ? `<span class="stat-note">已隐藏 ${st.hiddenLibraries}</span>` : ''}</div></div>
+        <div class="stat-box"><div class="k">漫画系列总数</div><div class="v">${Number(st.series || 0).toLocaleString()}${(!st.showNsfw && st.nsfwSeries > 0) ? `<span class="stat-note">已隐藏 NSFW ${Number(st.nsfwSeries).toLocaleString()} 部</span>` : ''}</div></div>
         <div class="stat-box"><div class="k">漫画文件总数</div><div class="v">${Number(st.books || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">漫画总容量</div><div class="v">${fmtBytes(st.comicBytes)}</div></div>
         <div class="stat-box"><div class="k">Bangumi 已匹配</div><div class="v" style="color:var(--bgm)">${Number(st.bgmMatched || 0).toLocaleString()}</div></div>
@@ -1962,15 +1967,15 @@
                 ${webdavs.map((w) => `
                   <tr>
                     <td><strong>${esc(w.name)}</strong></td>
-                    <td><code>${esc(w.baseUrl)}</code></td>
+                    <td class="cell-wrap"><code>${esc(w.baseUrl)}</code></td>
                     <td>${esc(w.username || '—')}</td>
                     <td>${w.ratePerSecond || 8}</td>
                     <td>${w.insecureTls ? '<span class="badge badge-warn">跳过证书校验</span>' : '标准验证'}</td>
-                    <td style="display:flex;gap:6px;flex-wrap:wrap">
+                    <td><div class="table-actions">
                       <button type="button" class="btn btn-sm" data-wd-test="${esc(w.id)}">测试</button>
                       <button type="button" class="btn btn-sm" data-wd-edit='${esc(JSON.stringify(w))}'>编辑</button>
                       <button type="button" class="btn btn-sm btn-danger" data-wd-del="${esc(w.id)}">删除</button>
-                    </td>
+                    </div></td>
                   </tr>`).join('')}
               </tbody>
             </table></div>`}
@@ -2143,14 +2148,16 @@
       <div class="${cardClass}" style="${!l.enabled && nested ? 'opacity:0.72;' : ''}">
         <div class="lib-card-row">
           <div style="min-width:0;flex:1">
-            ${nested ? `<span class="badge badge-accent" style="margin-right:6px">#${layerRank + 1}</span>` : ''}
-            <strong style="font-size:${nested ? '14.5px' : '15.5px'}">${esc(l.name)}</strong>
-            <span class="badge ${isUnion ? 'badge-accent' : ''}" style="margin-left:6px">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
-            ${l.oneShot ? `<span class="badge badge-accent">单本 One-Shots</span>` : ''}
-            ${isSub && !nested ? `<span class="badge">子库 · 归属：${esc(l.unionParentName)} (#${Number(l.unionPriority || 0) + 1})</span>` : ''}
-            ${!l.enabled ? `<span class="badge badge-warn">已隐藏</span>` : ''}
-            ${schedText ? `<span class="badge badge-success" title="服务器本机时区：${esc(serverTZ || 'Local')}">⏰ ${esc(schedText)}</span>` : ''}
-            <div style="font-size:12px;color:var(--text-muted);margin-top:4px">
+            <div class="lib-card-title-row">
+              ${nested ? `<span class="badge badge-accent">#${layerRank + 1}</span>` : ''}
+              <strong style="font-size:${nested ? '14.5px' : '15.5px'};overflow-wrap:anywhere">${esc(l.name)}</strong>
+              <span class="badge ${isUnion ? 'badge-accent' : ''}">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
+              ${l.oneShot ? `<span class="badge badge-accent">单本 One-Shots</span>` : ''}
+              ${isSub && !nested ? `<span class="badge">子库 · 归属：${esc(l.unionParentName)} (#${Number(l.unionPriority || 0) + 1})</span>` : ''}
+              ${!l.enabled ? `<span class="badge badge-warn">已隐藏</span>` : ''}
+              ${schedText ? `<span class="badge badge-success" title="服务器本机时区：${esc(serverTZ || 'Local')}">⏰ ${esc(schedText)}</span>` : ''}
+            </div>
+            <div style="font-size:12px;color:var(--text-muted);margin-top:6px;overflow-wrap:anywhere;word-break:break-word">
               ${isUnion
                 ? `叠加层级：${(l.unionLayers || []).map((ly, idx) => `#${idx + 1} ${esc(ly.memberLibraryName)} (${esc(providerLabel(ly.providerType, ly.webdavAccountName))})`).join(' → ') || '无'}`
                 : `定位标识：<code>${esc(l.providerType === '115' ? `CID:${l.rootCid}` : l.rootPath || l.rootCid)}</code>`}
@@ -2803,8 +2810,8 @@
       const folders = res.folders || [];
       drawer.innerHTML = `
         <div class="folder-browser">
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border-bottom:1px solid var(--border)">
-            <span style="font-size:12px;color:var(--text-muted)">当前 CID: ${esc(cid)}</span>
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:4px 8px;border-bottom:1px solid var(--border)">
+            <span style="font-size:12px;color:var(--text-muted);word-break:break-all">当前 CID: ${esc(cid)}</span>
             ${stack.length > 1 ? `<button type="button" class="btn btn-sm" id="b115-up">返回上级</button>` : ''}
           </div>
           ${folders.map((f) => `
@@ -2839,9 +2846,9 @@
       const folders = res.folders || [];
       drawer.innerHTML = `
         <div class="folder-browser">
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border-bottom:1px solid var(--border);gap:8px">
-            <code style="font-size:12px">${esc(res.current)}</code>
-            <div style="display:flex;gap:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;padding:4px 8px;border-bottom:1px solid var(--border);gap:6px 8px">
+            <code style="font-size:12px;word-break:break-all;min-width:0">${esc(res.current)}</code>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
               ${res.parent && res.parent !== res.current ? `<button type="button" class="btn btn-sm" id="bloc-up">上级目录</button>` : ''}
               <button type="button" class="btn btn-sm btn-primary" id="bloc-pick-cur">选用当前目录</button>
             </div>
@@ -2885,9 +2892,9 @@
         typeof folder?.relPath === 'string' && folder.relPath.startsWith('/') && folder.relPath !== '/');
       drawer.innerHTML = `
         <div class="folder-browser">
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border-bottom:1px solid var(--border);gap:8px">
-            <code style="font-size:12px">${esc(res.current)}</code>
-            <div style="display:flex;gap:6px">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;padding:4px 8px;border-bottom:1px solid var(--border);gap:6px 8px">
+            <code style="font-size:12px;word-break:break-all;min-width:0">${esc(res.current)}</code>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
               ${res.parent && res.parent !== res.current ? `<button type="button" class="btn btn-sm" id="bwd-up">上级目录</button>` : ''}
               <button type="button" class="btn btn-sm btn-primary" id="bwd-pick-cur">选用当前路径</button>
             </div>
@@ -2973,7 +2980,7 @@
 
     body.innerHTML = `
       <div class="stat-grid">
-        <div class="stat-box"><div class="k">总系列数</div><div class="v">${Number(st.totalSeries || 0).toLocaleString()}${(!st.showNsfw && st.nsfwCount > 0) ? `<span style="font-size:12px;font-weight:500;color:var(--text-muted);margin-left:6px">（已隐藏 NSFW ${Number(st.nsfwCount).toLocaleString()} 部）</span>` : ''}</div></div>
+        <div class="stat-box"><div class="k">总系列数</div><div class="v">${Number(st.totalSeries || 0).toLocaleString()}${(!st.showNsfw && st.nsfwCount > 0) ? `<span class="stat-note">已隐藏 NSFW ${Number(st.nsfwCount).toLocaleString()} 部</span>` : ''}</div></div>
         <div class="stat-box"><div class="k">已匹配 Bangumi</div><div class="v" style="color:var(--success)">${Number(st.matchedCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">待刮削</div><div class="v">${Number(st.pendingCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">自动未命中</div><div class="v" style="color:var(--warn)">${Number(st.unmatchedCount || 0).toLocaleString()}</div></div>
@@ -3002,8 +3009,8 @@
         <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 12px">
           统一加速 GitHub 离线快照下载（中文简介增强版 / <code>bangumi/Archive</code>）、软件版本更新检测与下载、<code>api.bgm.tv</code> 检索与 <code>lain.bgm.tv</code> 封面抓取。<strong>仅作用于 Bangumi 与 GitHub 相关请求，绝不影响 115 网盘与 WebDAV 流量。</strong>
         </p>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-          <input type="text" id="bgm-proxy-url" value="${esc(proxyInputVal)}" placeholder="留空直连；支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" style="flex:1;min-width:260px;height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+        <div class="inline-action-bar">
+          <input type="text" id="bgm-proxy-url" value="${esc(proxyInputVal)}" placeholder="留空直连；支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
           <button type="button" class="btn btn-primary" id="bgm-proxy-save">保存代理</button>
           <button type="button" class="btn" id="bgm-proxy-test">测试连通性与延迟</button>
           ${st.proxyUrl ? `<button type="button" class="btn btn-danger" id="bgm-proxy-clear">清空改回直连</button>` : ''}
@@ -3019,8 +3026,8 @@
           </p>
           <form id="bgm-arch-source-form" style="margin:10px 0 12px;padding:10px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">离线快照数据源</div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-              <select id="bgm-arch-source" style="flex:1;min-width:220px;height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+            <div class="inline-action-bar">
+              <select id="bgm-arch-source" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
                 <option value="zh_cn" ${srcState.source === 'zh_cn' ? 'selected' : ''}>中文简介增强镜像（默认 · xJogger/bangumi-archive-zh）</option>
                 <option value="official" ${srcState.source === 'official' ? 'selected' : ''}>Bangumi 官方原版（bangumi/Archive）</option>
                 <option value="custom" ${srcState.source === 'custom' ? 'selected' : ''}>自定义兼容源（aux/latest.json）</option>
@@ -3139,7 +3146,7 @@
                         <div class="progress-track" style="margin-top:3px"><span style="width:${pct}%"></span></div>
                       </td>
                       <td><span style="color:var(--success)">${r.matchedCount}</span> / <span style="color:var(--warn)">${r.unmatchedCount}</span> / ${r.skippedCount}</td>
-                      <td style="font-size:12px;color:var(--text-muted)">${esc(r.currentSeries || fmtTime(r.startedAt || r.createdAt))}</td>
+                      <td class="cell-wrap" style="font-size:12px;color:var(--text-muted)">${esc(r.currentSeries || fmtTime(r.startedAt || r.createdAt))}</td>
                       <td>${(r.status === 'queued' || r.status === 'running') ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-bgm-run="${esc(r.id)}">取消</button>` : ''}</td>
                     </tr>`;
                 }).join('')}
@@ -3376,7 +3383,7 @@
     const anyActive = pipelines.some(isActive) || scans.some(isActive) || covers.some(isActive) || maints.some(isActive);
 
     body.innerHTML = `
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:14px">
         <span style="font-size:13px;color:var(--text-secondary)">
           ${anyActive ? '⚡ 检测到运行中任务，正在自动同步进度…' : '当前无运行中任务（空闲时不会后台轮询刷屏）'}
         </span>
@@ -3395,7 +3402,7 @@
                   <td><span class="badge">${esc(p.triggerType === 'scheduled' ? '定时' : '手动')}</span></td>
                   <td><span class="badge">${esc(pipelineStageLabel(p.stage))}</span></td>
                   <td><span class="badge ${p.status === 'success' ? 'badge-success' : p.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(p.status)}</span></td>
-                  <td style="font-size:12px">
+                  <td class="cell-wrap" style="font-size:12px">
                     ${p.summary ? `<div>${esc(p.summary)}</div>` : ''}
                     ${p.error ? `<div style="color:var(--danger)">${esc(p.error)}</div>` : ''}
                   </td>
@@ -3418,7 +3425,7 @@
                   <td><span class="badge ${(s.status === 'completed' || s.status === 'success') ? 'badge-success' : s.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(s.status)}</span></td>
                   <td>目录 ${s.directoriesSeen ?? s.directoriesScanned ?? 0} · 系列 ${s.seriesSeen ?? s.seriesFound ?? 0} · 单册 ${s.booksSeen ?? s.booksFound ?? 0}</td>
                   <td>${fmtTime(s.startedAt)}</td>
-                  <td style="color:var(--danger);font-size:12px">${esc(s.error || '')}</td>
+                  <td class="cell-wrap" style="color:var(--danger);font-size:12px">${esc(s.error || '')}</td>
                   <td>${isActive(s) ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-scan="${esc(s.id)}">取消</button>` : ''}</td>
                 </tr>`).join('')}
             </tbody>
@@ -3437,7 +3444,7 @@
                   <td><span class="badge ${(c.status === 'completed' || c.status === 'success') ? 'badge-success' : c.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(c.status)}</span></td>
                   <td>${c.processedSeries || 0} / ${c.totalSeries || 0}</td>
                   <td>${c.generatedCount || 0} / ${c.skippedCount || 0} / ${c.failedCount || 0}</td>
-                  <td style="font-size:12px;color:var(--text-muted)">${esc(c.currentSeries || fmtTime(c.startedAt))}</td>
+                  <td class="cell-wrap" style="font-size:12px;color:var(--text-muted)">${esc(c.currentSeries || fmtTime(c.startedAt))}</td>
                   <td>${isActive(c) ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-cover="${esc(c.id)}">取消</button>` : ''}</td>
                 </tr>`).join('')}
             </tbody>
@@ -3545,7 +3552,7 @@
         ${upd.lastError ? `<div style="font-size:12.5px;color:var(--danger);margin-bottom:10px">最近检查失败：${esc(upd.lastError)}（若无法直连 GitHub，可在「Bangumi 刮削中心」配置网络代理）</div>` : ''}
         ${upd.inDocker && upd.dockerCommand ? `
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
-            <div class="code-box" style="flex:1;min-width:240px">${esc(upd.dockerCommand)}</div>
+            <div class="code-box" style="flex:1 1 200px;min-width:0;max-width:100%">${esc(upd.dockerCommand)}</div>
             <button type="button" class="btn btn-sm btn-primary" id="upd-copy-docker">复制拉取命令</button>
           </div>` : ''}
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
@@ -3808,8 +3815,8 @@
         <div class="card">
           <h3>API Key 管理（推荐用于 AI Agent / 外部客户端 / 脚本）</h3>
           <p style="font-size:12.5px;color:var(--text-secondary)">支持通过 <code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code> 访问 Komga 接口与 AI Agent 专用书库管理接口（<code>GET /api/agent/v1/manifest</code>），无需暴露主登录密码，可随时单独吊销。</p>
-          <div style="display:flex;gap:8px;margin-bottom:12px">
-            <input type="text" id="ak-name" placeholder="备注名称，例如：Mihon 平板" style="flex:1;height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+          <div class="inline-action-bar" style="margin-bottom:12px">
+            <input type="text" id="ak-name" placeholder="备注名称，例如：Mihon 平板" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
             <button type="button" class="btn btn-primary" id="ak-create">生成 API Key</button>
           </div>
           <div id="ak-revealed" style="display:none;margin-bottom:12px"></div>
@@ -4274,9 +4281,9 @@
         <section class="section">
           <div class="section-head" style="flex-wrap:wrap;gap:10px">
             <h2>收藏夹（${page ? page.totalElements : items.length}）</h2>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <form id="collections-filter-form" style="display:flex;gap:6px">
-                <input type="text" id="collections-search-input" value="${esc(search)}" placeholder="筛选收藏夹…" style="height:34px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input)">
+            <div class="org-toolbar">
+              <form id="collections-filter-form" class="org-search-form">
+                <input type="text" id="collections-search-input" value="${esc(search)}" placeholder="筛选收藏夹…">
                 <button type="submit" class="btn btn-sm">搜索</button>
               </form>
               <button type="button" class="btn btn-primary btn-sm" id="btn-create-collection">+ 新建收藏夹</button>
@@ -4460,9 +4467,9 @@
         <section class="section">
           <div class="section-head" style="flex-wrap:wrap;gap:10px">
             <h2>阅读列表（${page ? page.totalElements : items.length}）</h2>
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <form id="readlists-filter-form" style="display:flex;gap:6px">
-                <input type="text" id="readlists-search-input" value="${esc(search)}" placeholder="筛选阅读列表…" style="height:34px;padding:0 10px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--bg-input)">
+            <div class="org-toolbar">
+              <form id="readlists-filter-form" class="org-search-form">
+                <input type="text" id="readlists-search-input" value="${esc(search)}" placeholder="筛选阅读列表…">
                 <button type="submit" class="btn btn-sm">搜索</button>
               </form>
               <button type="button" class="btn btn-primary btn-sm" id="btn-create-readlist">+ 新建阅读列表</button>

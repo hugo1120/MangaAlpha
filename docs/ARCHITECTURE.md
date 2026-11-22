@@ -59,7 +59,7 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
 ## 5. 内置书架、简体中文阅读器与 Agent 接口
 
 - **内置书架与后台 SPA（`internal/httpserver/static/ui/`）**：支持系统自动深浅色切换、日夜双套小鱼图标（含 `/reader/*` 标签页同步）、收藏夹（`/collections`）与阅读列表（`/readlists`）管理、移动端防横向溢出栅格、缓存页全 `MiB` 单位展示与输入、NSFW 开关与自适应空闲零轮询。
-- **内置简体中文阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`）构建，默认加载 `zh-Hans` 简体中文语言包并在首屏渲染前完成激活，通过 `KomgaHostBridge` 内存桥接至 `/api/v1/*` Komga REST 接口，并结合 `GET /api/v1/books/{bookID}/load-status` 实时展示网络串流章节索引构建与单页拉取/解压进度（零改动标准 Komga `/pages` 契约，后续原生移动端阅读器可直接复用）。
+- **内置简体中文阅读器（`/reader/*`，`web/reader/` + `scripts/build-reader.sh`）**：基于上游 `Suwayomi/Suwayomi-WebUI`（`MPL-2.0`，锁定 `r3592`）构建，默认加载 `zh-Hans` 简体中文语言包并在首屏渲染前完成激活，支持浏览器端自动裁切白边/黑边（手机视口 `< 900px` 默认开启、桌面端默认关闭），通过 `KomgaHostBridge` 内存桥接至 `/api/v1/*` Komga REST 接口，并结合 `GET /api/v1/books/{bookID}/load-status` 实时展示网络串流章节索引构建与单页拉取/解压进度（零改动标准 Komga `/pages` 契约）。
 - **跨平台版本更新检测与 Android 校验安装（`internal/updater`）**：服务端/桌面端/Docker/Android 共用更新检测引擎，每 24 小时后台静默检测 GitHub Releases 并自动复用 Bangumi 网络代理（未配置则直连）；管理后台提供可忽略版本提醒、变更日志与对应平台下载链接或 Docker `docker pull` 命令；Android 端通过 Go 桥接下载并强制校验 `SHA256SUMS` 后经系统 `PackageInstaller` 拉起安装。
 - **Koharia 深度兼容与大书库性能**：
   - `series` 表通过轻量 SQLite 触发器与一次性升级回填维护 `books_count`、`sort_modified_at`、`sort_created_at`，配合复合覆盖索引与分块 `IN` 批查，消除大库关联扫描与 `too many SQL variables` 错误；

@@ -12,18 +12,20 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/readme-hero.jpg" alt="本地/NAS、115 和 WebDAV 汇入漫画书架，漫画页面按需传到手机" width="920">
+  <img src="docs/images/showcase-bookshelf.jpg" alt="MangaAlpha 网页书架首页与手机端阅读历史时间线实景" width="920">
 </p>
 
-**MangaAlpha**（原名 `fake-komga-115`）是一个 **100% 纯 Go（`CGO_ENABLED=0`）自包含**的轻量级 Komga 兼容漫画书库与阅读服务端。它原生支持 **115 Open API**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 三类存储源共存（并支持分层叠加联合库），内置 **响应式网页书架**、**简体中文双页与自动裁边网页阅读器**、**Bangumi (`bgm.tv`) 离线+在线双引擎元数据刮削中心（默认含中文简介增强镜像）**、**跨平台更新检测** 与 **AI Agent 专用书库治理接口**，同时完整兼容 **Mihon（Komga 扩展）** 与 **Koharia** 客户端。
+**MangaAlpha**（原名 `fake-komga-115`）是一个 **100% 纯 Go（`CGO_ENABLED=0`）单文件自包含**的轻量级 Komga 兼容漫画书库与阅读服务端，也提供可独立运行的 Android App。
+
+它把 **115 网盘**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 统一汇入同一个书库（支持多源分层叠加联合库），内置 **响应式网页书架与阅读历史时间线**、**支持自动裁切白边的简体中文双页网页阅读器**、**默认带中文简介增强镜像的 Bangumi (`bgm.tv`) 双引擎刮削中心**、**跨平台更新检测** 与 **AI Agent 书库治理接口**，并完整兼容 **Mihon（Komga 扩展）** 与 **Koharia** 客户端。
 
 ```text
-内置网页书架 (/) · 内置简体中文阅读器 (/reader/*) · Mihon / Koharia · AI Agent (/api/agent/v1)
-                ↓ (Session Cookie / HTTP Basic Auth / Bearer & X-API-Key)
-                              MangaAlpha
-        ├── 115 Open API ─────────→ downurl + HTTP Range 分块按需流式解压
-        ├── WebDAV (CloudDrive2/OpenList) ─→ PROPFIND + 令牌桶限速 + HTTP Range 按需解压
-        └── 本地 / SMB 挂载目录 ───→ 原生 io.ReaderAt 随机直读（免分块缓存 + 空挂载点保护）
+内置网页书架 (/) · 阅读历史 (/history) · 简体中文阅读器 (/reader/*) · Mihon / Koharia · AI Agent (/api/agent/v1)
+                       ↓ (Session Cookie / HTTP Basic Auth / Bearer & X-API-Key)
+                                     MangaAlpha
+               ├── 115 Open API ──────────────→ downurl + HTTP Range 分块按需流式解压
+               ├── WebDAV (CloudDrive2/OpenList) ─→ PROPFIND + 令牌桶限速 + HTTP Range 按需解压
+               └── 本地 / SMB 挂载目录 ────────→ 原生 io.ReaderAt 随机直读（免分块缓存 + 空挂载点保护）
 ```
 
 > **按需流式核心承诺**：启动与目录扫描阶段仅读取目录层级及文件大小/修改时间元数据，**绝不提前下载整包压缩文件**；仅当读者打开某一卷并翻到具体页面时，才按需读取对应图片所需的字节区间。
@@ -32,42 +34,44 @@
 
 ## 核心特性
 
-### 1. 多存储源共存、SMB 挂载优化与一键隐藏书库
-- **115 网盘直连**：基于 115 Open API 获取目录与短期 `downurl`，通过 `Range` 分块缓存按页流式读取；从 `v1.x` 原地升级可 **100% 保留原有书库 ID、几万部系列记录、阅读进度、归档索引与封面缩略图**。
-- **本地磁盘与 SMB 挂载目录**：支持 Linux 本地盘与 CIFS/SMB 挂载目录（如 `/share/manga`、`/mnt/smb`）及 Windows 本地盘、映射网络驱动器（`Z:\`）与 UNC 路径（`\\nas\manga`）。
-  - 直接通过操作系统文件句柄（`io.ReaderAt`）按偏移量随机读取，**自动跳过 Range 分块磁盘缓存**，零双份磁盘占用；
-  - 针对 SMB 网络文件系统去除多余 `stat` / 符号链接逐级解析开销，自动忽略 `thumbs.db`、`desktop.ini`、`.smbdelete*` 等系统文件；
-  - 内置 **SMB 空挂载点防误删保护**：当已有书籍记录的本地/SMB 书库因网络断连或未挂载呈现为空目录时，自动中止扫描并报错，保护既有系列、Bangumi 元数据与阅读进度不被误清空。
-- **多账号 WebDAV（CloudDrive2 / OpenList / 群晖 / Nextcloud）**：支持配置多个 WebDAV 账号、自定义每秒请求限速（同时约束 `PROPFIND` 扫描与 `Range` 页面读取，适配 CloudDrive2 / OpenList 挂载网盘防风控）、根目录空条目防误清空保护及局域网自签名 HTTPS 证书选项。
-- **分层叠加联合库（OverlayFS 风格）**：支持将多个物理书库（如本地/SMB → WebDAV → 115）按优先级合为一个逻辑「联合库」。跨层按去根目录名的归一化相对路径自动对齐、支持卷级互补叠加与同名上层覆盖，读取失败自动按层透明容灾回退，首次纳入自动继承 Bangumi 元数据、阅读进度与收藏夹/阅读列表，阅读进度双向同步回写底层副本，解散联合库无损保留进度。
-- **单库/联合库定时自动化流水线**：支持按服务器本机时区每日/每周定时串行执行「扫库（联合库可勾选仅扫指定子库）→ 联合库合并刷新 → Bangumi 增量刮削 → 缺封面未匹配作品自动补首卷封面（默认上限 `0`）」，支持进度查看与随时取消。
-- **一键隐藏书库**：支持在后台随时将任意书库设为「已隐藏」或「取消隐藏」。隐藏期间完整保留数据库记录、归档索引与封面缓存，同时在前台书架、客户端 API、直链详情、内置阅读器及扫描/刮削任务中全链路隔离（返回 `404` 并自动中止进行中任务）。
+### 1. 内置简体中文阅读器（自动裁切白边 · 双页拼合 · 串流进度）
 
-### 2. Bangumi (`bgm.tv`) 双引擎中文刮削与 NSFW 默认隐藏
-- **离线快照（多源切换，默认中文简介增强镜像）+ 实时 API 双引擎**：
-  - **引擎一（主力批量）**：后台一键下载校验离线数据快照并导入本地 SQLite 索引库（自动剔除单行本分卷子条目），数万部漫画可在本地秒级完成批量清洗与匹配，零在线 API 限流风险。默认使用与官方 100% 同构的 **中文简介增强镜像（[`xJogger/bangumi-archive-zh`](https://github.com/xJogger/bangumi-archive-zh)）**，已将全站非 NSFW 外文漫画简介翻译为简体中文；后台也可随时切回 `bangumi/Archive` 官方原版或自定义兼容源。支持按服务器本机时区配置每周/每月定时更新（比对快照名与 SHA256，无更新自动跳过下载），导入新版快照后自动对已匹配作品的未锁定元数据字段执行本地增量 diff 同步。
-  - **引擎二（精准交互）**：作品详情页支持通过 `api.bgm.tv/v0` 实时关键词搜索、直接粘贴 Subject ID 或 `bgm.tv/subject/...` 链接预览绑定。
-  - **独立专用代理**：支持单独为 Bangumi 与 GitHub 配置 `http` / `https` / `socks5` / `socks5h` 代理并一键探测延迟，统一加速离线快照、版本更新检测与下载、实时检索和封面中转缓存，**绝不影响 115 与 WebDAV 直连流量**。
-- **深度适配真实漫画命名规则**：
-  - 同时兼容 `[标题][作者][出版社][卷数]` 与 `[作者][标题][出版社][扫图组][卷数]` 双序方括号、小写 `x` 合著作者（如 `[镰池和马x冬川基]`）、括号内外双标题（如 `猎魔战记（大剑）`）、中英混排切分（如 `ARIA 水星領航員`）及常见扫图组噪音过滤；
-  - 通用子目录自动回溯：对 `台版`、`港版`、`日版`、`特别篇`、`番外篇`、`单行本`、`[CHN]` 等子目录自动向上匹配父系列标题并生成规范后缀（如 `水星领航员（台版）`）；
-  - 支持 **增量刮削 / 重试未命中 / 全量强制重刮** 三档批量模式，严格保护手动绑定与 `*Lock` 锁定字段。
-- **NSFW 智能匹配与默认隐藏开关**：
-  - Bangumi 条目严格依据官方布尔字段 `nsfw: true` 判定分级（不会误伤仅带用户标签但 `nsfw: false` 的普通青年漫画），未命中条目辅助识别显式成人目录关键词，也支持在元数据弹窗中手动开关并锁定 NSFW 标记；
-  - 默认全局隐藏 NSFW 作品（前台书架、分类筛选、客户端与阅读直链均自动隔离），可在管理后台随时一键切换显示或隐藏。
+<p align="center">
+  <img src="docs/images/showcase-reader.jpg" alt="MangaAlpha 桌面端双页对开与手机端自动裁切白边实拍" width="920">
+</p>
 
-### 3. 内置响应式书架、收藏夹 / 阅读列表与简体中文双页阅读器
-- **内置书架（`/`）与管理中心（`/admin`）**：默认自动跟随系统白天/黑夜模式切换（支持手动固定日间/夜间），网页导航、登录页与标签页图标（含 `/reader/*` 阅读器标签页）统一按书架日夜模式切换（日间为黑底白鱼，夜间为白底线稿鱼）；移动端自适应防横向溢出布局，支持「继续阅读」、最近更新、多维筛选排序，缓存页面全部采用直观的 `MiB` 单位配置与展示，空闲状态零后台轮询刷屏。
-- **收藏夹（`/collections`）、阅读列表（`/readlists`）与阅读历史（`/history`）**：完整支持 Komga Collections / ReadLists 持久化存储与 REST CRUD，内置网页书架提供列表、详情、手动排序及作品/单卷页快捷加入弹窗，并与 Koharia 实时同步；新增按日期分组的阅读历史时间线页签（同一天同作品自动合并折叠），所有列表均遵循隐藏书库与 NSFW 隔离策略。
-- **Bangumi 排名、多版本切换与一键跳转脚本**：可按 Bangumi 排名排序（未收录排名靠后），书库页可选「合并相同 Bangumi ID」（默认展示卷数最多的版本）；作品页提供默认折叠的多版本切换面板（按卷数优先排序并保留最近阅读直达入口），跨库卡片与作品/单卷详情页清晰标注所属书库与文件来源（联合库展示各卷生效层与备用副本）；支持 `/bgm/{subjectID}` 跳转入口与后台一键下载的 Bangumi 油猴脚本（`.user.js`），浏览 `bgm.tv` 时自动探测本库收录状态并直达作品页。
-- **按需补齐封面**：作品页可生成首卷第一页的缩略图，不改变封面显示偏好。书库批量任务可仅补缺封面且未绑定 Bangumi 的作品；本地/SMB 默认全库（需确认），115/WebDAV 默认最近更新的 5 部，可自定数量。
-- **内置简体中文阅读器（`/reader/*`）**：基于 `Suwayomi-WebUI` 深度定制的无 GraphQL/WebSocket 纯 REST 宿主阅读器，默认界面语言为**简体中文**，纯黑画布护眼背景（免去初始触摸区与模式弹窗干扰）；桌面端默认日漫右翻双页拼合（宽幅跨页图自动独占一屏），移动端默认单页自适应并**默认开启自动裁切白边/黑边（桌面端默认关闭，均可在布局设置中按全局或单部作品自由开关）**；支持条漫长图模式、跨卷无缝连读、页级阅读进度双向同步，以及 115 / WebDAV 等网络源首次建索引与单页拉取/解压的实时阶段与百分比进度展示。
-- **完整 Koharia 兼容与大书库优化**：支持 Koharia `(<q>) OR tag:(<q>)` 联合检索、Komga 字段检索语法与 `relevance` 相关性排序、完整 `readProgress` 字段与 90 天进度重置墓碑保护、轻量级 Komga SSE 事件流（`/api/v1/sse/v1/events`）、`/api/v2/authors` 分页作者接口与 HTTP `gzip` 压缩，在数十万册规模书库下仍可流畅同步。
+- **纯前端自动裁切白边 / 黑边**：基于 `Suwayomi-WebUI`（无 GraphQL/WebSocket 纯 REST 宿主适配）打造，浏览器端本地采样边界并经 `OffscreenCanvas` 实时裁切缓存，**零服务端 CPU 占用**。手机/窄屏（`< 900px`）默认开启实现满屏沉浸阅读，桌面/宽屏（`>= 900px`）默认关闭保留原版比例，均可按全局默认或单部作品随时开关。
+- **日漫友好默认体验**：默认简体中文界面、纯黑护眼画布（无初始触摸区与模式弹窗干扰）；桌面端默认日漫右翻双页对开（宽幅跨页图自动独占一屏），移动端默认单页自适应；支持条漫长图模式、跨卷无缝连读与页级阅读进度双向同步。
+- **网络串流加载进度可视化**：在阅读 115 / WebDAV 远程归档时，实时展示首次建索引与单页拉取/解压的来源、阶段、已缓冲字节、百分比进度条与耗时；本地或缓存命中页面零额外干扰。
 
-### 4. 安全鉴权、全平台更新检测与 AI Agent 友好接口
-- **单管理员强制鉴权**：首次访问（含从 `v1.x` 升级后首次访问）强制引导设置管理员账号密码（`argon2id` 哈希）；浏览器登录会话支持持久自动续期，外部客户端与工具支持 `HTTP Basic Auth`、`Authorization: Bearer <API_KEY>` 与 `X-API-Key: <API_KEY>`。
-- **全平台自动更新检测与 Android 校验安装**：桌面端、服务端、Docker 与 Android 共用更新检测引擎，默认每 24 小时后台静默检查 GitHub Releases（自动复用 Bangumi 代理，未配置则直连）；管理后台展示可忽略版本提醒、更新日志与对应平台下载链接或 Docker `docker pull` 命令；Android 端可在原生「手机端设置」页下载官方 APK 并强制校验 `SHA256SUMS` 后经系统 `PackageInstaller` 拉起安装。
-- **AI Agent 专用 API（`/api/agent/v1`）与全平台脱敏诊断日志**：提供自描述能力清单（`GET /api/agent/v1/manifest`）、低 Token 开销系列检索与单次最多 200 条异构批量元数据治理接口，详见 [docs/AGENT_API.md](docs/AGENT_API.md)；内置白名单脱敏诊断引擎（默认精简、可切换详细排障并一键导出脱敏报告，绝不记录密码、Token、Cookie、完整 URL 或私人路径）。
+### 2. 响应式书架、阅读历史时间线与 Komga 客户端生态
+
+- **全端自适应书架（`/`）与昼夜图标统一**：默认自动跟随系统日/夜模式（可手动固定），顶栏与浏览器标签页（含 `/reader/*` 阅读器）统一按书架主题切换黑底白鱼 / 白底线稿鱼标识；针对 `360px ~ 412px` 手机竖屏深度适配，零挤压裁切，空闲状态零后台轮询。
+- **阅读历史时间线（`/history`）**：按本机自然日分组（`今天` / `1~6 天前` / `YYYY-MM-DD`）记录阅读中与已读完卷；同一天连读同一部作品的多卷自动折叠并可一键展开「当天另有 N 卷」，支持按书名/卷名检索与分页加载。
+- **收藏夹（`/collections`）与阅读列表（`/readlists`）**：完整持久化存储与 Komga REST CRUD，支持手动排序、作品/单卷页快捷加入并与 Koharia 双向同步。
+- **多版本切换与 Bangumi 油猴脚本**：支持按 Bangumi 排名排序与「合并相同 Bangumi ID」；作品页提供默认折叠的多版本切换面板，跨库卡片与详情页清晰标注书库与文件来源；内置 `/bgm/{subjectID}` 直达入口与后台一键下载的 Bangumi 油猴脚本（`.user.js`），浏览 `bgm.tv` 时自动探测本库收录状态并直达。
+- **深度兼容 Koharia 与 Mihon**：支持 `(<q>) OR tag:(<q>)` 联合检索、Komga 字段检索与 `relevance` 排序、90 天进度重置墓碑保护、轻量 Komga SSE 事件流（`/api/v1/sse/v1/events`）、`/api/v2/authors` 分页作者接口与 HTTP `gzip` 压缩，数十万册大库依然流畅同步。
+
+### 3. 多存储源共存、分层联合库与自动化流水线
+
+<p align="center">
+  <img src="docs/images/showcase-admin.jpg" alt="MangaAlpha 管理后台多源联合书库与 Bangumi 中文刮削中心实景" width="920">
+</p>
+
+- **115 网盘直连**：基于 115 Open API 获取目录与短期 `downurl`，通过 `Range` 分块缓存按页流式读取；从 `v1.x` 原地升级可 **100% 保留原有书库 ID、系列记录、阅读进度、归档索引与封面缓存**。
+- **本地磁盘与 SMB 挂载目录**：支持 Linux 本地盘 / CIFS 挂载及 Windows 盘符 / UNC 路径；通过 `io.ReaderAt` 原生随机直读（自动跳过 Range 分块磁盘缓存），去除 SMB 多余 `stat` 开销并自动忽略系统垃圾文件，内置 **空挂载点防误删保护**。
+- **多账号 WebDAV（CloudDrive2 / OpenList / 群晖 / Nextcloud）**：支持多账号配置、令牌桶请求限速（同时约束 `PROPFIND` 与 `Range` 读取，平稳适配云盘挂载防风控）、根目录空条目保护与自签 TLS 选项。
+- **分层叠加联合库（OverlayFS 风格）**：将多个物理库（如本地/SMB → WebDAV → 115）按优先级叠合为单一逻辑库，自动按归一化相对路径对齐、卷级互补叠加与同名上层覆盖，读取失败按层透明容灾回退；阅读进度双向回写底层副本，解散联合库无损保留进度。
+- **定时流水线与一键隐藏书库**：支持按本机时区每日/每周定时串行执行「扫库（联合库可勾选指定子库）→ 联合库合并刷新 → Bangumi 增量刮削 → 缺封面未匹配作品自动补首卷封面」；支持一键隐藏任意书库（保留全部数据与缓存，前台与客户端全链路隔离返回 `404`）。
+
+### 4. Bangumi (`bgm.tv`) 中文双引擎刮削、NSFW 隔离与跨平台治理
+
+- **离线快照（默认中文简介增强镜像）+ 在线双引擎**：
+  - 后台一键下载校验离线索引并本地秒级批量匹配，默认接入与官方 100% 同构的 **中文简介增强镜像（[`xJogger/bangumi-archive-zh`](https://github.com/xJogger/bangumi-archive-zh)）**，全站非 NSFW 外文简介已翻译为简体中文；也可随时切回 `bangumi/Archive` 官方原版或自定义兼容源，支持每周/每月定时检查更新并自动增量 diff 同步未锁定字段。
+  - 作品详情页支持 `api.bgm.tv/v0` 实时搜索或粘贴 Subject ID / 链接精准绑定；深度兼容双序方括号、`x` 合著作者、中英混排、扫图组噪音清洗与 `台版 / 港版 / 番外篇` 子目录父级回溯。
+  - 支持独立专用代理（`http` / `https` / `socks5` / `socks5h`），统一加速 Bangumi、封面中转与 GitHub 更新检测，**不影响 115 与 WebDAV 直连流量**。
+- **NSFW 精准分级与默认隐藏**：严格依据 Bangumi 官方 `nsfw: true` 字段判定（辅助未命中目录成人关键词识别，并支持手动锁定），默认全局隐藏，后台可一键切换。
+- **单管理员强鉴权、全平台更新检测与 AI Agent API**：首次访问强制设密（`argon2id`），兼容持久 Session Cookie、`HTTP Basic Auth`、`Bearer` 与 `X-API-Key`；内置 24 小时跨平台更新检测（Android 端支持 `SHA256SUMS` 校验与应用内 `PackageInstaller` 安装）、全平台白名单脱敏诊断日志导出，以及 `/api/agent/v1` AI Agent 批量治理接口（见 [docs/AGENT_API.md](docs/AGENT_API.md)）。
 
 ---
 
@@ -82,15 +86,11 @@
 
 ## 快速开始
 
-<p align="center">
-  <img src="docs/images/quick-start.jpg" alt="四格漫画：下载并启动、设置管理员、添加书库并扫描、开始阅读" width="920">
-</p>
-
 **下载并启动 → 设置管理员 → 添加书库并扫描 → 开始阅读**
 
 ### 方式一：Windows 下载即用
 
-1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载文件名以 `_windows_amd64.zip` 结尾的压缩包（例如 `mangaalpha_v2.5.0_windows_amd64.zip`）并解压。
+1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `_windows_amd64.zip` 压缩包（例如 `mangaalpha_v2.6.0_windows_amd64.zip`）并解压。
 2. 双击运行 `mangaalpha.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`（保持兼容，原地升级无需迁移目录）。
 
@@ -115,14 +115,14 @@ docker run -d \
   -v fake-komga-115-data:/data \
   -v /share/manga:/manga:ro \
   -e TZ=Asia/Shanghai \
-  blacktal/fake-komga-115:v2.5.0
+  blacktal/fake-komga-115:v2.6.0
 ```
 
-从 `v2.3.0` 起，GitHub Release 桌面/服务端压缩包与本地构建产物名统一为 `mangaalpha`；Docker 镜像名 `blacktal/fake-komga-115`、容器内入口命令、环境变量 `FK115_*` 与既有默认数据路径保持不变。已有容器升级时，请保留挂载在 `/data` 的原数据卷。建议固定使用版本标签，避免自动更新工具在未备份时跨大版本升级。首次启动后同样需要在网页设置管理员。
+> 从 `v2.3.0` 起，GitHub Release 桌面/服务端压缩包与本地构建产物名统一为 `mangaalpha`；Docker 镜像名 `blacktal/fake-komga-115`、容器入口、`FK115_*` 环境变量与既有默认数据路径保持不变。已有容器升级时请保留 `/data` 数据卷，建议固定版本标签升级。
 
 ### 方式四：从源码构建
 
-完整构建（含内置 Suwayomi 阅读器静态包）需要 Go 1.26+、Node.js 24+、Python 3 与 `pnpm`（或 `corepack`）：
+完整构建（含内置 Suwayomi 阅读器静态包与 `tsc --noEmit` 校验）需要 Go 1.26+、Node.js 24+、Python 3 与 `pnpm`（或 `corepack`）：
 
 ```bash
 git clone https://github.com/xJogger/MangaAlpha.git
@@ -133,12 +133,12 @@ make build
 
 ### Android 独立版
 
-从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载签名正式包 `mangaalpha-arm64.apk`（ARM64）。它在手机本机运行，支持手机目录（SAF）、115 和 WebDAV，内置原生「手机端设置」页（状态查看、应用内更新检测与 `SHA256SUMS` 校验安装、可选开启局域网漫画服务器、导出脱敏诊断日志）与系统状态栏/安全区自适应，不与家里的服务器自动同步。构建、安装与详细说明见 [Android 独立版](docs/ANDROID.md)。
+从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载官方签名包 `mangaalpha-arm64.apk`（ARM64）。它在手机本机独立运行，支持手机目录（SAF）、115 和 WebDAV，内置原生「手机端设置」页（服务状态、应用内 `SHA256SUMS` 校验更新、可选开启局域网漫画服务器、脱敏诊断日志导出）与状态栏/安全区自适应，不与家里的服务器自动同步。详情见 [docs/ANDROID.md](docs/ANDROID.md)。
 
 **使用提示**：
-- 在手机上连接同机 **CloudDrive2** 扫描大型书库或长时间阅读时，建议在系统省电 / 应用管理中将 **CloudDrive2** 与 **MangaAlpha** 两者的后台权限均设为「无限制」，避免系统休眠冻结进程导致扫库或翻页中断；
+- 在手机上连接同机 **CloudDrive2** 扫描大库或持续阅读时，建议在系统省电 / 应用管理中将 **CloudDrive2** 与 **MangaAlpha** 两者的后台权限均设为「无限制」，避免系统休眠冻结进程；
 - 小米 MIUI / HyperOS 等系统默认单行折叠静音常驻通知，下拉或长按通知即可展开「手机端设置 / 停止」快捷按钮，也可在网页「管理后台」顶栏直接进入；
-- 本地 SAF 目录与 WebDAV 归档读取已做文件大小校准、瞬态重试与 ZIP/RAR 魔数回退加固，如遇个别文件提供方或压缩包异常，可在「手机端设置」开启详细排障并导出脱敏诊断日志反馈。
+- 本地 SAF 目录与 WebDAV 归档读取已做文件大小校准、瞬态重试与 ZIP/RAR 魔数回退加固，如遇异常可在「手机端设置」开启详细排障并导出脱敏诊断日志反馈。
 
 ### 命令行参数与环境变量
 
@@ -155,35 +155,34 @@ make build
 ## 存储源、刮削与客户端使用提示
 
 ### 配置三类存储源
-1. **115 网盘**：打开 [OpenList 授权工具](https://api.oplist.org/)，选择 115 网盘的 OAuth2 授权登录，勾选「使用 OpenList 提供的参数」，点击获取 Token，并在弹窗中登录 115、完成授权。将 `Refresh Token` 和 `Access Token` 分别粘贴到「管理后台 → 存储源 → 115 开放平台令牌」的同名字段（`Access Token` 可选），点击「保存并验证」。通过后，在「书库管理」添加一个或多个目录并启动扫描。不要分享或截图公开 Token。详见 [OpenList 的 115 授权说明](https://doc.oplist.org/guide/drivers/115_open)。
-2. **服务器本地 / SMB 挂载目录**：无需预配账号。Linux 上推荐通过 `cifs` 挂载 NAS 共享（如 `/share/manga`），Windows 上可使用映射盘符（如 `Z:\Manga`）或 UNC 路径（`\\nas\manga`），在「书库管理」中选择「服务器本地 / SMB 挂载目录」即可。
+1. **115 网盘**：打开 [OpenList 授权工具](https://api.oplist.org/)，选择 115 网盘 OAuth2 授权登录，勾选「使用 OpenList 提供的参数」获取 Token，将 `Refresh Token` 与 `Access Token`（可选）粘贴到「管理后台 → 存储源 → 115 开放平台令牌」保存并验证，随后在「书库管理」添加目录并扫描（切勿公开分享 Token）。详见 [OpenList 115 授权说明](https://doc.oplist.org/guide/drivers/115_open)。
+2. **服务器本地 / SMB 挂载目录**：无需预配账号。Linux 推荐通过 `cifs` 挂载 NAS 共享（如 `/share/manga`），Windows 可用映射盘符（`Z:\Manga`）或 UNC 路径（`\\nas\manga`）。
 3. **WebDAV（CloudDrive2 / OpenList / NAS）**：
-   - **CloudDrive2** 默认 WebDAV 根地址一般为 `http://<IP>:19798/dav`；
-   - **OpenList** 默认 WebDAV 根地址一般为 `http://<IP>:5244/dav`；
-   - 若后端挂载的是 115 等云盘，建议将 WebDAV 账号的「请求限速」设为 `2 ~ 4` req/s，平稳保护网盘接口。
+   - **CloudDrive2** 默认 WebDAV 根地址通常为 `http://<IP>:19798/dav`；
+   - **OpenList** 默认 WebDAV 根地址通常为 `http://<IP>:5244/dav`；
+   - 挂载云盘时建议将 WebDAV 账号「请求限速」设为 `2 ~ 4` req/s 平稳防风控。
 
-### Bangumi 刮削与网页端链接说明
-- **推荐流程**：首次在「Bangumi 刮削中心」点击「一键下载并构建离线索引库」，就绪后启动批量刮削；后续规则更新时可选择 **「重试未命中」** 模式快速补全未匹配条目。
-- `+` 或 `&` 连接的标题只有在完整标题吻合，或各部分都是同一条目的正式标题/别名时，才会作为目录名匹配候选；真正的合集不会自动匹配其中一部。仍可改写关键词或输入条目 ID 并手动绑定。
-- **为什么个别漫画点击 `bgm.tv` 链接提示“数据库中没有查询您所指定的条目”？**
-  这是 Bangumi 官网的未登录访问限制：部分带有受限标签（如 `R18`，即使官方 `nsfw: false`）的真实条目在未登录浏览器访问时会显示该提示页。只需在浏览器中登录你的 `bgm.tv` 账号后重新打开链接即可正常浏览。
+### Bangumi 刮削与链接说明
+- **推荐流程**：首次在「Bangumi 刮削中心」点击「一键下载并构建离线索引库」（默认简体中文简介增强镜像），就绪后启动批量刮削；后续可用「重试未命中」补全未匹配条目。
+- `+` 或 `&` 连接的标题仅在完整标题吻合或各部分同属一部作品正式标题/别名时才参与自动匹配，合集不会误匹配单部作品，仍可手动搜索或填条目 ID 绑定。
+- **为什么个别作品点击 `bgm.tv` 链接提示“数据库中没有查询您所指定的条目”？** 这是 Bangumi 官网未登录访问限制，在浏览器登录 `bgm.tv` 账号后重新打开即可正常查看。
 
 ### 连接 Mihon / Koharia 与 AI Agent
-- **Mihon**：安装 Komga 扩展，在扩展设置中填入 `http://<服务器IP>:25600` 和管理员账号密码。
-- **Koharia**：内置 Komga 支持，无需安装扩展。在应用中新增 Komga 服务器，填入服务地址和管理员账号密码。支持自定义鉴权请求头的工具也可以使用后台生成的 API Key。
-- **AI Agent 自动化治理**：携带 `Authorization: Bearer <API_KEY>` 请求 `GET /api/agent/v1/manifest` 即可发现全部管理能力，详见 [docs/AGENT_API.md](docs/AGENT_API.md)。
+- **Mihon**：安装 Komga 扩展，填入 `http://<服务器IP>:25600` 与管理员账号密码。
+- **Koharia**：内置 Komga 支持，直接新增 Komga 服务器并填入服务地址与管理员账号密码（也支持后台生成的 API Key）。
+- **AI Agent 治理**：携带 `Authorization: Bearer <API_KEY>` 请求 `GET /api/agent/v1/manifest` 即可发现全部管理能力，详见 [docs/AGENT_API.md](docs/AGENT_API.md)。
 
 ---
 
 ## 从 `v1.x` 升级与备份
 
-**v2 是一次不兼容升级：** 第一次打开网页时需要设置管理员账号密码，随后在 Mihon/Koharia 补上认证信息。v1 的外部跨域（CORS）白名单已经移除，独立托管的网页阅读器不能继续按原方式直连；可改用本服务内置的书架和阅读器。已匹配且标为 NSFW 的系列默认隐藏，可在后台调整。
+**v2 是一次不兼容升级**：首次访问需设置管理员账号密码并在客户端补填认证信息；v1 的外部跨域（CORS）白名单已移除，请改用内置书架与阅读器；NSFW 系列默认隐藏，可在后台随时调整。
 
-1. 停止旧服务，备份整个数据目录（Docker 对应 `/data` 的数据卷或宿主机目录）。备份含凭据，请妥善保管。
-2. 以**同一个数据目录**启动 v2。首次启动会自动迁移 SQLite，保留原有 115 书库 ID、阅读进度、索引和封面；不必重新扫库。
-3. 在网页完成管理员初始化，确认书库和进度无误后，再配置阅读客户端。若需回退，不要让 v1 直接打开已升级的数据目录，应退出 v2 后用预先备份的数据恢复。
+1. 停止旧服务并完整备份数据目录（Docker 为 `/data` 卷，备份含凭据请妥善保管）。
+2. 以**同一个数据目录**启动 v2，首次启动自动迁移 SQLite 并保留原有 115 书库 ID、阅读进度、索引与封面，无需重扫。
+3. 在网页完成管理员初始化并确认书库与进度无误后再配置客户端；若需回退，请退出 v2 后用备份恢复。
 
-Linux 的 systemd 部署示例（将 `data/` 和备份路径替换成你的实际位置）：
+Linux systemd 升级示例：
 
 ```bash
 systemctl --user stop fake-komga-115
@@ -196,6 +195,7 @@ systemctl --user start fake-komga-115
 
 ## 项目文档
 
+- [docs/ANDROID.md](docs/ANDROID.md)：Android 独立版安装、SAF 目录权限、局域网服务与签名构建说明
 - [docs/AGENT_API.md](docs/AGENT_API.md)：AI Agent 专用书库管理接口（`/api/agent/v1`）参考手册
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：系统架构、鉴权、多源流式读取、Bangumi 双引擎与内置阅读器原理
 - [docs/RELEASING.md](docs/RELEASING.md)：维护者的发版、产物验证与 Docker `latest` 切换流程
@@ -210,7 +210,7 @@ systemctl --user start fake-komga-115
 
 - **[Suwayomi / Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI)**（MPL-2.0）：提供了体验极其出色的现代化漫画 Web 阅读器前端实现，本项目的内置阅读器（`/reader/*`）基于其源码适配构建。
 - **[Komga](https://komga.org/)（[@gotson](https://github.com/gotson)）**：定义了清晰、成熟的漫画数字书库领域模型与 REST API 规范，让跨客户端生态互联成为可能。
-- **[Bangumi 番组计划](https://bgm.tv/) 与 [`bangumi/Archive`](https://github.com/bangumi/Archive)**：感谢 Sai 与全体番组计划维基编辑者多年积累的高质量中文 ACGN 资料库，以及官方持续开放的每日离线数据快照与 Open API。
+- **[Bangumi 番组计划](https://bgm.tv/) 与 [`bangumi/Archive`](https://github.com/bangumi/Archive)**：感谢 Sai 与全体番组计划维基编辑者多年积累的高质量中文 ACGN 资料库，以及官方持续开放的离线数据快照与 Open API。
 - **[OpenList](https://github.com/OpenListTeam/OpenList) 与 [`OpenListTeam/115-sdk-go`](https://github.com/OpenListTeam/115-sdk-go)**：提供了稳定易用的 115 开放平台 Go SDK、OAuth 授权工具以及优秀的 WebDAV 多存储聚合实践。
 - **[CloudDrive2](https://www.clouddrive2.com/)**：提供了高性能的云盘挂载与标准 WebDAV 服务支持，让多种网盘通过 WebDAV 流式接入漫画书库更加便捷。
 - **[Mihon](https://mihon.app/) 与 [Koharia](https://github.com/Mister-album/Koharia)**：优秀的移动端与跨平台漫画阅读客户端，推动了 Komga 生态的普及与打磨。

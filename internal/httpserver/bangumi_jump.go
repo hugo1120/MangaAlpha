@@ -1,15 +1,105 @@
 package httpserver
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"html"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 )
+
+const (
+	userscriptKeyNamePrefix = "Bangumi 油猴脚本"
+	userscriptTicketTTL     = 60 * time.Second
+	userscriptTicketReads   = 5
+	userscriptTicketMaxCap  = 64
+)
+
+type userscriptTicket struct {
+	origin         string
+	apiKey         string
+	expiresAt      time.Time
+	remainingReads int
+}
+
+type userscriptTicketStore struct {
+	mu      sync.Mutex
+	tickets map[string]*userscriptTicket
+	nowFunc func() time.Time
+}
+
+func newUserscriptTicketStore() *userscriptTicketStore {
+	return &userscriptTicketStore{
+		tickets: make(map[string]*userscriptTicket),
+		nowFunc: time.Now,
+	}
+}
+
+func (st *userscriptTicketStore) now() time.Time {
+	if st != nil && st.nowFunc != nil {
+		return st.nowFunc()
+	}
+	return time.Now()
+}
+
+func (st *userscriptTicketStore) Issue(origin, apiKey string) (string, error) {
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", err
+	}
+	token := base64.RawURLEncoding.EncodeToString(raw[:])
+	now := st.now()
+
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for k, v := range st.tickets {
+		if !v.expiresAt.After(now) || v.remainingReads <= 0 {
+			delete(st.tickets, k)
+		}
+	}
+	if len(st.tickets) >= userscriptTicketMaxCap {
+		st.tickets = make(map[string]*userscriptTicket)
+	}
+	st.tickets[token] = &userscriptTicket{
+		origin:         origin,
+		apiKey:         apiKey,
+		expiresAt:      now.Add(userscriptTicketTTL),
+		remainingReads: userscriptTicketReads,
+	}
+	return token, nil
+}
+
+func (st *userscriptTicketStore) Consume(token string) (origin, apiKey string, ok bool) {
+	token = strings.TrimSpace(token)
+	if st == nil || token == "" {
+		return "", "", false
+	}
+	now := st.now()
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	item, exists := st.tickets[token]
+	if !exists {
+		return "", "", false
+	}
+	if !item.expiresAt.After(now) || item.remainingReads <= 0 {
+		delete(st.tickets, token)
+		return "", "", false
+	}
+	item.remainingReads--
+	origin, apiKey = item.origin, item.apiKey
+	if item.remainingReads <= 0 {
+		delete(st.tickets, token)
+	}
+	return origin, apiKey, true
+}
 
 func (s *Server) serveBangumiJump(w http.ResponseWriter, r *http.Request) {
 	rawID := strings.TrimSpace(chi.URLParam(r, "subjectID"))
@@ -104,19 +194,31 @@ func (s *Server) komgaBangumiLookup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func requestOrigin(r *http.Request) string {
+func (s *Server) requestOrigin(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil {
+	if s.isHTTPSRequest(r) {
 		scheme = "https"
-	}
-	if proto := strings.TrimSpace(strings.Split(r.Header.Get("X-Forwarded-Proto"), ",")[0]); proto == "http" || proto == "https" {
-		scheme = proto
 	}
 	host := strings.TrimSpace(r.Host)
 	if host == "" {
 		return ""
 	}
 	return scheme + "://" + host
+}
+
+func sanitizeConnectHost(origin string) string {
+	u, err := url.Parse(strings.TrimSpace(origin))
+	if err != nil {
+		return ""
+	}
+	host := strings.TrimSpace(u.Hostname())
+	if host == "" || strings.ContainsAny(host, " \t\r\n/\\*@") {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return strings.ToLower(host)
 }
 
 func escapeJSString(s string) string {
@@ -132,18 +234,100 @@ func escapeJSString(s string) string {
 	return replacer.Replace(s)
 }
 
-func (s *Server) downloadBangumiUserscript(w http.ResponseWriter, r *http.Request) {
+func renderUserscriptBody(origin, apiKey string) (string, error) {
 	raw, err := staticFiles.ReadFile("static/mangaalpha-bangumi.user.js")
+	if err != nil {
+		return "", err
+	}
+	connectLine := ""
+	if host := sanitizeConnectHost(origin); host != "" {
+		connectLine = "// @connect      " + host
+	}
+	script := string(raw)
+	if connectLine != "" {
+		script = strings.ReplaceAll(script, "// __MANGAALPHA_CONNECT_LINE__", connectLine)
+	} else {
+		script = strings.ReplaceAll(script, "// __MANGAALPHA_CONNECT_LINE__\n", "")
+		script = strings.ReplaceAll(script, "// __MANGAALPHA_CONNECT_LINE__", "")
+	}
+	script = strings.ReplaceAll(script, "__MANGAALPHA_SERVER_URL__", escapeJSString(origin))
+	script = strings.ReplaceAll(script, "__MANGAALPHA_API_KEY__", escapeJSString(apiKey))
+	return script, nil
+}
+
+func writeUserscriptResponse(w http.ResponseWriter, script string) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Content-Disposition", `inline; filename="mangaalpha-bangumi.user.js"`)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	_, _ = w.Write([]byte(script))
+}
+
+func (s *Server) downloadBangumiUserscript(w http.ResponseWriter, r *http.Request) {
+	script, err := renderUserscriptBody(s.requestOrigin(r), "")
 	if err != nil {
 		http.Error(w, "userscript template unavailable", http.StatusInternalServerError)
 		return
 	}
-	origin := requestOrigin(r)
-	script := strings.ReplaceAll(string(raw), "__MANGAALPHA_SERVER_URL__", escapeJSString(origin))
-	script = strings.ReplaceAll(script, "__MANGAALPHA_API_KEY__", "")
+	writeUserscriptResponse(w, script)
+}
 
-	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-	w.Header().Set("Content-Disposition", `inline; filename="mangaalpha-bangumi.user.js"`)
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(script))
+func (s *Server) createUserscriptInstallTicket(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		WithKey bool `json:"withKey"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	var (
+		rawKey     string
+		keyPrefix  string
+		rotatedOld int64
+	)
+	if req.WithKey {
+		revoked, err := s.store.DeleteAPIKeysByNamePrefix(r.Context(), userscriptKeyNamePrefix)
+		if err != nil {
+			s.writeDBError(w, r, err)
+			return
+		}
+		rotatedOld = revoked
+		keyName := fmt.Sprintf("%s (%s)", userscriptKeyNamePrefix, time.Now().UTC().Format("2006-01-02"))
+		createdKey, info, err := s.store.CreateAPIKey(r.Context(), keyName)
+		if err != nil {
+			s.writeDBError(w, r, err)
+			return
+		}
+		rawKey = createdKey
+		keyPrefix = info.KeyPrefix
+	}
+	origin := s.requestOrigin(r)
+	ticket, err := s.userscriptTickets.Issue(origin, rawKey)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "TICKET_ERROR", "Failed to generate install ticket.")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"installUrl":       "/bgm/userscript/" + ticket + "/mangaalpha-bangumi.user.js",
+		"expiresInSeconds": int(userscriptTicketTTL.Seconds()),
+		"withKey":          req.WithKey,
+		"rotatedOldKeys":   rotatedOld,
+		"keyPrefix":        keyPrefix,
+		"connectHost":      sanitizeConnectHost(origin),
+	})
+}
+
+func (s *Server) serveUserscriptByTicket(w http.ResponseWriter, r *http.Request) {
+	ticket := chi.URLParam(r, "ticket")
+	origin, apiKey, ok := s.userscriptTickets.Consume(ticket)
+	if !ok {
+		w.Header().Set("Cache-Control", "no-store")
+		http.Error(w, "Userscript install link has expired. Please regenerate it from MangaAlpha Admin -> Bangumi.", http.StatusNotFound)
+		return
+	}
+	script, err := renderUserscriptBody(origin, apiKey)
+	if err != nil {
+		http.Error(w, "userscript template unavailable", http.StatusInternalServerError)
+		return
+	}
+	writeUserscriptResponse(w, script)
 }

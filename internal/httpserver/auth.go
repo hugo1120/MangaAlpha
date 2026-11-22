@@ -41,11 +41,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 
-		// 1. Always public health check & static UI/reader bundles (no user data inside static code bundles).
+		// 1. Always public health check, static UI/reader bundles, and ephemeral ticket-authenticated userscript install links.
 		if p == "/health" || p == "/favicon.ico" ||
 			strings.HasPrefix(p, "/ui/") ||
 			strings.HasPrefix(p, "/assets/") ||
-			isStaticReaderAssetPath(p) {
+			isStaticReaderAssetPath(p) ||
+			isUserscriptTicketPath(p, r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -63,6 +64,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				p == "/api/v1/claim" && (r.Method == http.MethodGet || r.Method == http.MethodPost),
 				p == "/admin/api/auth/status" && r.Method == http.MethodGet,
 				p == "/admin/api/auth/setup" && r.Method == http.MethodPost:
+				if isUnsafeHTTPMethod(r.Method) && !checkSameOriginCSRF(r) {
+					writeError(w, http.StatusForbidden, "CSRF_REJECTED", "Cross-origin request rejected.")
+					return
+				}
 				next.ServeHTTP(w, r)
 				return
 			case isAPIRequestPath(p):
@@ -75,7 +80,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// 3. Claimed state: try authenticating incoming credentials.
-		principal, authed := s.authenticateRequest(r)
+		principal, authed, basicRateLimited, basicRetryAfter := s.authenticateRequest(r)
 
 		// Public auth/claim status endpoints when already claimed:
 		if p == "/api/v1/claim" && r.Method == http.MethodGet {
@@ -90,6 +95,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		if (p == "/admin/api/auth/login" || p == "/admin/api/auth/logout") && r.Method == http.MethodPost {
+			if !checkSameOriginCSRF(r) {
+				writeError(w, http.StatusForbidden, "CSRF_REJECTED", "Cross-origin request rejected.")
+				return
+			}
 			if authed {
 				r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, principal))
 			}
@@ -114,6 +123,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		if !authed {
+			if basicRateLimited {
+				writeRateLimited(w, basicRetryAfter)
+				return
+			}
 			if isAPIRequestPath(p) {
 				if !isBrowserUIXHR(r) {
 					w.Header().Set("WWW-Authenticate", `Basic realm="fake-komga-115"`)
@@ -129,15 +142,20 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		if principal.Method == "session" && isUnsafeHTTPMethod(r.Method) && !checkSameOriginCSRF(r) {
+			writeError(w, http.StatusForbidden, "CSRF_REJECTED", "Cross-origin request rejected.")
+			return
+		}
+
 		if principal.Method == "session" && principal.Refreshed && principal.RawSession != "" {
-			setSessionCookies(w, r, principal.RawSession, true)
+			s.setSessionCookies(w, r, principal.RawSession, true)
 		}
 		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, principal))
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool) {
+func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool, bool, time.Duration) {
 	// 1. Session Cookie (fk115_session or KOMGA-SESSION) or X-Auth-Token header
 	for _, token := range candidateSessionTokens(r) {
 		if sess, ok, err := s.store.ValidateSession(r.Context(), token); err == nil && ok {
@@ -146,7 +164,7 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool) {
 				Method:     "session",
 				RawSession: token,
 				Refreshed:  sess.Refreshed,
-			}, true
+			}, true, false, 0
 		}
 	}
 	// 2. X-API-Key header or Authorization: Bearer <api-key>
@@ -160,19 +178,28 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool) {
 			return authPrincipal{
 				Username: username,
 				Method:   "apikey",
-			}, true
+			}, true, false, 0
 		}
 	}
-	// 3. HTTP Basic Auth
+	// 3. HTTP Basic Auth (protected by per-IP brute-force limiter)
 	if username, password, ok := r.BasicAuth(); ok {
-		if user, valid, err := s.store.VerifyAdminPassword(r.Context(), username, password); err == nil && valid {
+		clientIP := s.trustedProxies.clientIP(r)
+		if allowed, retryAfter := s.authLimiter.Allow(clientIP); !allowed {
+			return authPrincipal{}, false, true, retryAfter
+		}
+		user, valid, err := s.store.VerifyAdminPassword(r.Context(), username, password)
+		if err == nil && valid {
+			s.authLimiter.RecordSuccess(clientIP)
 			return authPrincipal{
 				Username: user.Username,
 				Method:   "basic",
-			}, true
+			}, true, false, 0
+		}
+		if err == nil {
+			s.authLimiter.RecordFailure(clientIP)
 		}
 	}
-	return authPrincipal{}, false
+	return authPrincipal{}, false, false, 0
 }
 
 func candidateSessionTokens(r *http.Request) []string {
@@ -207,23 +234,43 @@ func isAPIRequestPath(p string) bool {
 		p == "/admin/api" || strings.HasPrefix(p, "/admin/api/")
 }
 
+func isUserscriptTicketPath(p, method string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false
+	}
+	return strings.HasPrefix(p, "/bgm/userscript/") && strings.HasSuffix(p, "/mangaalpha-bangumi.user.js")
+}
+
 func isStaticReaderAssetPath(p string) bool {
 	if !strings.HasPrefix(p, "/reader/") {
 		return false
 	}
-	// Entry routes like /reader/series/... or /reader/manga/... require authentication;
-	// hashed static bundles/icons/licenses under /reader/assets/ etc. are safe static files.
-	if strings.HasPrefix(p, "/reader/assets/") ||
-		strings.HasPrefix(p, "/reader/locales/") ||
-		p == "/reader/LICENSE-Suwayomi.txt" ||
-		p == "/reader/BUILD-MANIFEST.json" ||
-		p == "/reader/site.webmanifest" ||
-		strings.HasSuffix(p, ".png") ||
-		strings.HasSuffix(p, ".svg") ||
-		strings.HasSuffix(p, ".ico") {
+	rel := strings.TrimPrefix(p, "/reader/")
+	if rel == "" || strings.Contains(rel, "..") || strings.Contains(rel, "\\") {
+		return false
+	}
+	// Entry routes like /reader/series/... or /reader/book/... MUST always require authentication.
+	if strings.HasPrefix(rel, "assets/") || strings.HasPrefix(rel, "locales/") {
 		return true
 	}
-	return false
+	// Only allow single-segment known static files directly under /reader/.
+	if strings.Contains(rel, "/") {
+		return false
+	}
+	switch rel {
+	case "LICENSE-Suwayomi.txt",
+		"BUILD-MANIFEST.json",
+		"site.webmanifest",
+		"robots.txt",
+		"favicon.ico",
+		"favicon.svg",
+		"notFound.svg":
+		return true
+	}
+	lower := strings.ToLower(rel)
+	return strings.HasSuffix(lower, ".png") ||
+		strings.HasSuffix(lower, ".svg") ||
+		strings.HasSuffix(lower, ".ico")
 }
 
 func isBrowserUIXHR(r *http.Request) bool {
@@ -239,14 +286,24 @@ func isBrowserUIXHR(r *http.Request) bool {
 func sanitizeRedirectTarget(raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || !strings.HasPrefix(raw, "/") || strings.HasPrefix(raw, "//") ||
+		strings.Contains(raw, "\\") ||
 		strings.HasPrefix(raw, "/login") || strings.HasPrefix(raw, "/setup") {
+		return "/"
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return "/"
+		}
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme != "" || parsed.Host != "" {
 		return "/"
 	}
 	return raw
 }
 
-func setSessionCookies(w http.ResponseWriter, r *http.Request, token string, _ bool) {
-	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+func (s *Server) setSessionCookies(w http.ResponseWriter, r *http.Request, token string, _ bool) {
+	secure := s.isHTTPSRequest(r)
 	expires := time.Now().UTC().Add(time.Duration(cookieMaxAgeSeconds) * time.Second)
 	for _, name := range []string{sessionCookieName, komgaSessionCookieName} {
 		cookie := &http.Cookie{
@@ -263,8 +320,8 @@ func setSessionCookies(w http.ResponseWriter, r *http.Request, token string, _ b
 	}
 }
 
-func clearSessionCookies(w http.ResponseWriter, r *http.Request) {
-	secure := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+func (s *Server) clearSessionCookies(w http.ResponseWriter, r *http.Request) {
+	secure := s.isHTTPSRequest(r)
 	for _, name := range []string{sessionCookieName, komgaSessionCookieName} {
 		http.SetCookie(w, &http.Cookie{
 			Name:     name,
@@ -322,7 +379,7 @@ func (s *Server) authSetupHandler(w http.ResponseWriter, r *http.Request) {
 		remember = *req.Remember
 	}
 	if rawToken, _, sErr := s.store.CreateSession(r.Context(), admin.Username, remember, r.UserAgent()); sErr == nil {
-		setSessionCookies(w, r, rawToken, remember)
+		s.setSessionCookies(w, r, rawToken, remember)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"username": admin.Username,
@@ -330,6 +387,11 @@ func (s *Server) authSetupHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authLoginHandler(w http.ResponseWriter, r *http.Request) {
+	clientIP := s.trustedProxies.clientIP(r)
+	if allowed, retryAfter := s.authLimiter.Allow(clientIP); !allowed {
+		writeRateLimited(w, retryAfter)
+		return
+	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -344,15 +406,17 @@ func (s *Server) authLoginHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !ok {
+		s.authLimiter.RecordFailure(clientIP)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "用户名或密码不正确")
 		return
 	}
+	s.authLimiter.RecordSuccess(clientIP)
 	rawToken, _, err := s.store.CreateSession(r.Context(), user.Username, req.Remember, r.UserAgent())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "SESSION_ERROR", err.Error())
 		return
 	}
-	setSessionCookies(w, r, rawToken, req.Remember)
+	s.setSessionCookies(w, r, rawToken, req.Remember)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"username": user.Username,
 	})
@@ -362,7 +426,7 @@ func (s *Server) authLogoutHandler(w http.ResponseWriter, r *http.Request) {
 	for _, tok := range candidateSessionTokens(r) {
 		_ = s.store.DeleteSession(r.Context(), tok)
 	}
-	clearSessionCookies(w, r)
+	s.clearSessionCookies(w, r)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -508,7 +572,7 @@ func (s *Server) komgaSetCookie(w http.ResponseWriter, r *http.Request) {
 	}
 	remember := r.URL.Query().Get("remember-me") == "true"
 	if principal.Method == "session" && principal.RawSession != "" {
-		setSessionCookies(w, r, principal.RawSession, remember)
+		s.setSessionCookies(w, r, principal.RawSession, remember)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -517,7 +581,7 @@ func (s *Server) komgaSetCookie(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "SESSION_ERROR", err.Error())
 		return
 	}
-	setSessionCookies(w, r, rawToken, remember)
+	s.setSessionCookies(w, r, rawToken, remember)
 	w.WriteHeader(http.StatusNoContent)
 }
 

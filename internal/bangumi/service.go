@@ -49,6 +49,7 @@ type Service struct {
 	store   *database.Store
 	archive *ArchiveIndex
 	live    *LiveClient
+	tracker *trackerManager
 	logger  *slog.Logger
 
 	ctx       context.Context
@@ -136,6 +137,7 @@ WHERE status IN ('queued','running')`, now)
 	enqueueSync(false)
 	go svc.archiveScheduleLoop()
 	go svc.worker()
+	svc.tracker = newTrackerManager(svc)
 	return svc, nil
 }
 
@@ -159,7 +161,66 @@ func (s *Service) Close() error {
 	if s.rankDone != nil {
 		<-s.rankDone
 	}
+	if s.tracker != nil {
+		s.tracker.Close()
+	}
 	return s.archive.Close()
+}
+
+func (s *Service) TrackerStatus(ctx context.Context, recordLimit int) (TrackerStatus, error) {
+	if s == nil || s.tracker == nil {
+		return TrackerStatus{NSFWMode: TrackerNSFWModeSkip, Records: []database.BangumiTrackerRecord{}}, nil
+	}
+	return s.tracker.Status(ctx, recordLimit)
+}
+
+func (s *Service) UpdateTrackerConfig(ctx context.Context, upd TrackerConfigUpdate) (TrackerStatus, error) {
+	if s == nil || s.tracker == nil {
+		return TrackerStatus{}, errors.New("Bangumi tracker is not initialized")
+	}
+	return s.tracker.UpdateConfig(ctx, upd)
+}
+
+func (s *Service) TestTrackerToken(ctx context.Context, candidateToken *string) TrackerTestResult {
+	if s == nil || s.tracker == nil {
+		return TrackerTestResult{OK: false, Error: "Bangumi tracker is not initialized"}
+	}
+	return s.tracker.TestToken(ctx, candidateToken)
+}
+
+func (s *Service) NotifyProgress(seriesID string) {
+	if s == nil || s.tracker == nil {
+		return
+	}
+	s.tracker.NotifyProgress(seriesID)
+}
+
+func (s *Service) SyncSeriesTrackerNow(ctx context.Context, seriesID string) (database.BangumiTrackerRecord, error) {
+	if s == nil || s.tracker == nil {
+		return database.BangumiTrackerRecord{}, errors.New("Bangumi tracker is not initialized")
+	}
+	return s.tracker.SyncSeries(ctx, seriesID, true)
+}
+
+func (s *Service) SeriesTrackerSummary(ctx context.Context, subjectID int64) *SeriesTrackerSummary {
+	if s == nil || s.tracker == nil {
+		return nil
+	}
+	return s.tracker.SeriesSummary(ctx, subjectID)
+}
+
+// SetAPIBaseURLForTest overrides the Bangumi API base URL in automated tests.
+func (s *Service) SetAPIBaseURLForTest(baseURL string) {
+	if s != nil && s.live != nil {
+		s.live.baseURL = baseURL
+	}
+}
+
+// SetTrackerDebounceForTest overrides the tracker debounce interval in automated tests.
+func (s *Service) SetTrackerDebounceForTest(d time.Duration) {
+	if s != nil && s.tracker != nil {
+		s.tracker.SetDebounce(d)
+	}
 }
 
 func (s *Service) ArchiveStatus() ArchiveStatus {

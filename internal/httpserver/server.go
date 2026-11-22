@@ -58,16 +58,20 @@ type Server struct {
 	logger    *slog.Logger
 	router    chi.Router
 	web       *template.Template
-	runtime   RuntimeInfo
-	sse       *sseHub
+	runtime           RuntimeInfo
+	sse               *sseHub
+	trustedProxies    *trustedProxyChecker
+	authLimiter       *authRateLimiter
+	userscriptTickets *userscriptTicketStore
 
 	placeholder []byte
 }
 
 type RuntimeInfo struct {
-	DataDir string
-	Host    string
-	Port    int
+	DataDir        string
+	Host           string
+	Port           int
+	TrustedProxies string
 }
 
 func New(
@@ -90,8 +94,14 @@ func New(
 		scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
 		tasks:   maintenanceManager,
-		runtime: runtimeInfo, logger: logger, sse: newSSEHub(), placeholder: makePlaceholder(),
-		web: template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
+		runtime:           runtimeInfo,
+		logger:            logger,
+		sse:               newSSEHub(),
+		trustedProxies:    newTrustedProxyChecker(runtimeInfo.TrustedProxies),
+		authLimiter:       newAuthRateLimiter(),
+		userscriptTickets: newUserscriptTicketStore(),
+		placeholder:       makePlaceholder(),
+		web:               template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
 	s.router = s.routes()
 	return s
@@ -134,6 +144,7 @@ func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(s.requestLogger)
+	r.Use(securityHeadersMiddleware)
 	r.Use(gzipMiddleware)
 	r.Use(s.authMiddleware)
 
@@ -156,6 +167,7 @@ func (s *Server) routes() chi.Router {
 	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
 	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
+	r.Get("/bgm/userscript/{ticket}/mangaalpha-bangumi.user.js", s.serveUserscriptByTicket)
 	r.Get("/bgm/{subjectID}", s.serveBangumiJump)
 	r.Get("/admin", s.serveSPA)
 	r.Get("/admin/", func(w http.ResponseWriter, r *http.Request) {
@@ -513,7 +525,7 @@ func (s *Server) writeDBErrorMessage(w http.ResponseWriter, r *http.Request, err
 		s.logger.Error("database error", "method", method, "path", urlPath, "error", err)
 	}
 	if message == "" {
-		message = err.Error()
+		message = "Internal database error."
 	}
 	writeError(w, http.StatusInternalServerError, "DATABASE_ERROR", message)
 }

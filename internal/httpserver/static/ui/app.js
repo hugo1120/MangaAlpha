@@ -185,6 +185,15 @@
       .replace(/'/g, '&#39;');
   }
 
+  function safeRedirectTarget(raw) {
+    const val = String(raw || '').trim();
+    if (!val || !val.startsWith('/') || val.startsWith('//') || val.includes('\\') || /[\x00-\x1f\x7f]/.test(val)) {
+      return '/';
+    }
+    if (val.startsWith('/login') || val.startsWith('/setup')) return '/';
+    return val;
+  }
+
   function fmtBytes(n) {
     const v = Number(n || 0);
     if (!v || v < 1024) return `${v || 0} B`;
@@ -223,6 +232,38 @@
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return String(iso);
     return d.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function fmtBgmCollectionType(t) {
+    switch (Number(t)) {
+      case 1: return '想读';
+      case 2: return '读过';
+      case 3: return '在读';
+      case 4: return '搁置';
+      case 5: return '抛弃';
+      default: return '';
+    }
+  }
+
+  function renderSeriesTrackerBadge(tr) {
+    if (!tr || !tr.status || tr.status === 'idle') return '';
+    if (tr.status === 'synced') {
+      const parts = [];
+      const typeLabel = fmtBgmCollectionType(tr.remoteType);
+      if (typeLabel) parts.push(typeLabel);
+      if (tr.remoteVolStatus > 0) parts.push(`第 ${tr.remoteVolStatus} 卷`);
+      if (tr.remotePrivate) parts.push('私密');
+      const summary = parts.length ? parts.join(' · ') : '已同步';
+      const tip = tr.lastSyncedAt ? `最近同步：${fmtTime(tr.lastSyncedAt)}` : '已单向同步至 Bangumi';
+      return `<span class="badge badge-success" title="${esc(tip)}">BGM 追踪：${esc(summary)}</span>`;
+    }
+    if (tr.status === 'skipped') {
+      return `<span class="badge" title="${esc(tr.lastError || '已按设置跳过')}">BGM 追踪：已跳过 (NSFW)</span>`;
+    }
+    if (tr.status === 'failed') {
+      return `<span class="badge badge-danger" title="${esc(tr.lastError || '同步失败')}">BGM 追踪失败</span><button type="button" class="btn btn-sm" id="btn-retry-bgm-tracker" style="padding:2px 8px;font-size:11.5px;min-height:24px">重试同步</button>`;
+    }
+    return '';
   }
 
   function providerLabel(p, webdavAccountName = '') {
@@ -598,7 +639,7 @@
           allow401: true,
         });
         state.auth = { claimed: true, authenticated: true, username: res.username };
-        navigate(redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/', true);
+        navigate(safeRedirectTarget(redirect), true);
       } catch (err) {
         toast(err.message || '用户名或密码错误', 'error');
         btn.disabled = false;
@@ -1063,6 +1104,7 @@
             ${bgmID > 0
               ? `<a href="https://bgm.tv/subject/${bgmID}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm" title="若打开提示“数据库中没有查询您所指定的条目”，说明该条目在 Bangumi 网页端受登录保护，请先在浏览器登录 bgm.tv 账号后再访问">Bangumi #${bgmID}${bgmScore ? ` · ★ ${bgmScore}` : ''} ↗</a>`
               : `<span class="badge">${rawMeta.scrapeStatus === 'unmatched' ? 'Bangumi 未命中' : '尚未匹配 Bangumi'}</span>`}
+            ${bgmID > 0 ? renderSeriesTrackerBadge(detail.tracker) : ''}
           </div>
 
           <h1>${esc(title)}</h1>
@@ -1198,6 +1240,21 @@
     });
 
     document.getElementById('btn-open-bgm').onclick = () => openBangumiMatchModal(seriesID, detail);
+    const retryTrackerBtn = document.getElementById('btn-retry-bgm-tracker');
+    if (retryTrackerBtn) {
+      retryTrackerBtn.onclick = async () => {
+        retryTrackerBtn.disabled = true;
+        retryTrackerBtn.textContent = '同步中…';
+        try {
+          await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/tracker/retry`, { method: 'POST' });
+          toast('已同步至 Bangumi');
+          renderSeriesDetail(seriesID);
+        } catch (err) {
+          toast(err.message || 'Bangumi 同步失败', 'error');
+          renderSeriesDetail(seriesID);
+        }
+      };
+    }
     loadSeriesVersions(seriesID, bgmID);
     loadSeriesCollectionsBar(seriesID);
     document.getElementById('btn-edit-meta').onclick = () => openMetadataEditModal(seriesID, detail);
@@ -2929,24 +2986,33 @@
   // --- Admin Bangumi Scraper Center ---
 
   async function renderAdminBangumi(body) {
-    const [st, runs, libs] = await Promise.all([
+    const [st, runs, libs, tracker] = await Promise.all([
       api('/admin/api/bangumi/status'),
       api('/admin/api/bangumi/runs?limit=20'),
       api('/admin/api/libraries'),
+      api('/admin/api/bangumi/tracker?limit=20').catch(() => ({ enabled: false, hasToken: false, nsfwMode: 'skip', privateDefault: false, records: [] })),
     ]);
-    paintAdminBangumi(body, st, runs || [], libs || []);
+    paintAdminBangumi(body, st, runs || [], libs || [], tracker || {});
   }
 
-  function paintAdminBangumi(body, st, runs, libs) {
+  function paintAdminBangumi(body, st, runs, libs, tracker) {
     const arch = st.archive || {};
     const archSrc = st.archiveSource || { source: 'zh_cn', customUrl: '', metaUrl: '' };
     const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: 3, dayOfMonth: 1, timeOfDay: '06:00' };
+    const tr = tracker || { enabled: false, hasToken: false, username: '', nickname: '', nsfwMode: 'skip', privateDefault: false, records: [] };
+    const trRecords = Array.isArray(tr.records) ? tr.records : [];
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
     const prevInput = document.getElementById('bgm-proxy-url');
     const editingProxy = prevInput && document.activeElement === prevInput;
     const proxyInputVal = editingProxy ? prevInput.value : (st.proxyUrl || '');
     const selStart = editingProxy ? prevInput.selectionStart : null;
     const selEnd = editingProxy ? prevInput.selectionEnd : null;
+    const trackerForm = document.getElementById('bgm-tracker-form');
+    const editingTracker = trackerForm && trackerForm.contains(document.activeElement);
+    const trackerTokenDraft = editingTracker ? (document.getElementById('bgm-tracker-token')?.value || '') : '';
+    const trackerEnabledDraft = editingTracker ? !!document.getElementById('bgm-tracker-enabled')?.checked : !!tr.enabled;
+    const trackerNsfwDraft = editingTracker ? (document.getElementById('bgm-tracker-nsfw-mode')?.value || tr.nsfwMode || 'skip') : (tr.nsfwMode || 'skip');
+    const trackerPrivateDraft = editingTracker ? !!document.getElementById('bgm-tracker-private-default')?.checked : !!tr.privateDefault;
     const srcForm = document.getElementById('bgm-arch-source-form');
     const editingSrc = srcForm && srcForm.contains(document.activeElement);
     const srcState = editingSrc ? {
@@ -3111,18 +3177,99 @@
       </div>
 
       <div class="card">
-        <h3>油猴脚本（Bangumi 条目页一键跳转本库）</h3>
-        <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary);line-height:1.6">
-          支持在 <code>bgm.tv</code> / <code>bangumi.tv</code> / <code>chii.in</code> 条目页自动探测本库收录状态并一键直达作品（多版本时自动展开版本切换栏）。
-          无需安装浏览器扩展，使用 Tampermonkey / Violentmonkey 导入即可。
+        <div class="section-head" style="margin-bottom:8px">
+          <h3>Bangumi 进度追踪器（单向自动同步）</h3>
+          ${tr.hasToken
+            ? `<span class="badge ${tr.enabled ? 'badge-success' : ''}">${tr.enabled ? '已启用自动同步' : '已绑定（未开启同步）'}${tr.nickname || tr.username ? ` · ${esc(tr.nickname || tr.username)}${tr.username ? ` (@${esc(tr.username)})` : ''}` : ''}</span>`
+            : `<span class="badge">未绑定 Bangumi 账号</span>`}
+        </div>
+        <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-secondary);line-height:1.65">
+          将<strong>后续新增</strong>的阅读进度自动单向推送到你的 Bangumi 收藏（兼容内置阅读器、Android 端、Mihon 与 Koharia，复用上方 Bangumi 网络代理，不会批量回写历史进度）。
+          前往 <a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Bangumi Personal Access Token 页面 ↗</a> 生成个人令牌粘贴到下方即可（Token 仅保存于本地 SQLite，绝不明文回传）。
+        </p>
+        <form id="bgm-tracker-form" style="display:grid;gap:10px">
+          <div class="inline-action-bar">
+            <input type="password" id="bgm-tracker-token" autocomplete="off" value="${esc(trackerTokenDraft)}"
+              placeholder="${tr.hasToken ? '已保存有效 Access Token（留空保持不变，输入新值可替换）' : '粘贴 Bangumi Personal Access Token'}"
+              style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+            <button type="submit" class="btn btn-primary" id="bgm-tracker-save">保存并验证</button>
+            <button type="button" class="btn" id="bgm-tracker-test">测试 Token</button>
+            ${tr.hasToken ? `<button type="button" class="btn btn-danger" id="bgm-tracker-clear">解绑清空</button>` : ''}
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
+            <label class="check-row" style="font-size:13px;font-weight:600;color:var(--text)">
+              <input type="checkbox" id="bgm-tracker-enabled" ${trackerEnabledDraft ? 'checked' : ''}>
+              <span>启用自动单向同步</span>
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-secondary)">
+              <span>NSFW 策略：</span>
+              <select id="bgm-tracker-nsfw-mode" style="height:32px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+                <option value="skip" ${trackerNsfwDraft === 'skip' ? 'selected' : ''}>跳过 NSFW 作品不同步（默认）</option>
+                <option value="private" ${trackerNsfwDraft === 'private' ? 'selected' : ''}>以私密收藏（private）同步 NSFW</option>
+              </select>
+            </label>
+            <label class="check-row" style="font-size:12.5px;color:var(--text-secondary)">
+              <input type="checkbox" id="bgm-tracker-private-default" ${trackerPrivateDraft ? 'checked' : ''}>
+              <span>新建普通作品收藏时默认设为私密（仅自己可见）</span>
+            </label>
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+            <strong>同步规则与提示：</strong>
+            ① 卷数进度按本地已读完的最高文件序号单调递增同步（受 Bangumi 总卷数封顶，不会回退）；<strong>若某部作品本地是按单话（而非单行本）拆分存放，推送的卷数可能偏快，请知悉。</strong>
+            ② 开始阅读会将未收藏/「想读」推进为「在读」；仅当 Bangumi 状态已完结（<code>ENDED</code>）且本地卷全部读完（达到总卷数）或单本读完时才会标记「读过」。
+            ③ 仅增量更新状态与卷数，<strong>绝不覆盖你在 Bangumi 已写的评分、吐槽、标签，也不会降级已标记的「读过 / 搁置 / 抛弃」状态</strong>（修改评分与状态请直接点击作品页的 Bangumi 链接前往操作）。
+          </div>
+        </form>
+        <div id="bgm-tracker-test-result" style="margin-top:8px;font-size:12.5px"></div>
+        ${trRecords.length > 0 ? `
+          <div style="margin-top:12px">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary)">最近同步记录（最多 20 条）</div>
+            <div class="table-wrap"><table class="data-table">
+              <thead><tr><th>作品</th><th>Bangumi 条目</th><th>状态</th><th>远端进度</th><th>更新时间 / 说明</th><th>操作</th></tr></thead>
+              <tbody>
+                ${trRecords.map((rec) => {
+                  const statusBadge = rec.status === 'synced'
+                    ? `<span class="badge badge-success">已同步</span>`
+                    : rec.status === 'skipped'
+                      ? `<span class="badge">已跳过</span>`
+                      : `<span class="badge badge-danger">失败</span>`;
+                  const progParts = [];
+                  const tLbl = fmtBgmCollectionType(rec.remoteType);
+                  if (tLbl) progParts.push(tLbl);
+                  if (rec.remoteVolStatus > 0) progParts.push(`第 ${rec.remoteVolStatus} 卷`);
+                  if (rec.remotePrivate) progParts.push('私密');
+                  return `
+                    <tr>
+                      <td>${rec.seriesId ? `<a href="/series/${encodeURIComponent(rec.seriesId)}" data-nav style="color:var(--accent);font-weight:500">${esc(rec.seriesTitle || rec.seriesId)}</a>` : esc(rec.seriesTitle || '—')}</td>
+                      <td><a href="https://bgm.tv/subject/${rec.bgmSubjectId}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm">#${rec.bgmSubjectId} ↗</a></td>
+                      <td>${statusBadge}</td>
+                      <td style="font-size:12px">${esc(progParts.join(' · ') || '—')}</td>
+                      <td class="cell-wrap" style="font-size:12px;color:${rec.status === 'failed' ? 'var(--danger)' : 'var(--text-muted)'}">${esc(rec.lastError || fmtTime(rec.lastSyncedAt || rec.updatedAt))}</td>
+                      <td>${rec.seriesId && rec.status === 'failed' ? `<button type="button" class="btn btn-sm" data-retry-tracker-series="${esc(rec.seriesId)}">重试</button>` : ''}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table></div>
+          </div>` : ''}
+      </div>
+
+      <div class="card">
+        <h3>油猴脚本（Bangumi 条目页右侧栏快捷跳转）</h3>
+        <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary);line-height:1.65">
+          在 <code>bgm.tv</code> / <code>bangumi.tv</code> / <code>chii.in</code> 条目页<strong>右侧收藏盒下方</strong>以原生侧栏卡片展示本库收录状态（自动适配浅色与深色模式），并一键直达作品或多版本切换栏。
+          支持 Tampermonkey / Violentmonkey 直接弹窗安装与覆盖升级。
         </p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-          <button type="button" class="btn btn-primary btn-sm" id="bgm-us-download-key">一键生成专用 API Key 并下载已配置脚本（推荐）</button>
-          <a class="btn btn-sm" href="/admin/api/bangumi/userscript.user.js" target="_blank" rel="noopener noreferrer">安装 / 下载基础脚本（手动配置 Key）</a>
+          <button type="button" class="btn btn-primary btn-sm" id="bgm-us-install-key">一键安装油猴脚本（自动生成并轮换专属 Key）</button>
+          <button type="button" class="btn btn-sm" id="bgm-us-update-only">仅更新脚本（沿用已保存 Key）</button>
+          <a class="btn btn-sm" href="/admin/api/bangumi/userscript.user.js" target="_blank" rel="noopener noreferrer">直接打开脚本源码</a>
         </div>
-        <div id="bgm-us-status" style="margin-top:8px;font-size:12px;color:var(--text-muted)">
-          直达跳转地址格式：<code>${esc(location.origin)}/bgm/&lt;subjectId&gt;</code> · 自动探测接口：<code>/api/v1/bangumi/lookup?subject_id=&lt;id&gt;</code>
+        <div style="margin-top:10px;font-size:12px;color:var(--text-muted);line-height:1.65;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+          <div><strong>① 密钥复用与轮换：</strong>首次点击「一键安装」会自动把服务器地址与专属 Key 持久化到油猴本地存储，并自动吊销旧的同名「Bangumi 油猴脚本」Key（不再堆积冗余密钥）；日后仅更新脚本样式/功能时点「仅更新脚本」，将直接沿用油猴内已保存的 Key。</div>
+          <div style="margin-top:4px"><strong>② 跨域权限提示说明：</strong>由于脚本运行在 <code>bgm.tv</code> 上、需要向你的 MangaAlpha 服务器（<code>${esc(location.hostname)}</code>）发起收录探测请求，新版脚本已在 <code>@connect</code> 中自动预授权当前主机；若更换了服务器地址或油猴仍弹出「跨域访问确认」，点击<strong>「始终允许该域名」</strong>即可（脚本仅连接你自己的 MangaAlpha 实例，不向任何第三方发送数据）。</div>
+          <div style="margin-top:4px">直达跳转格式：<code>${esc(location.origin)}/bgm/&lt;subjectId&gt;</code> · 自动探测接口：<code>/api/v1/bangumi/lookup?subject_id=&lt;id&gt;</code></div>
         </div>
+        <div id="bgm-us-status" style="margin-top:8px;font-size:12px;color:var(--text-muted)"></div>
       </div>
 
       <div class="card">
@@ -3306,44 +3453,123 @@
         renderAdminBangumi(body);
       } catch (err) { toast(err.message, 'error'); }
     };
-    const usKeyBtn = document.getElementById('bgm-us-download-key');
-    if (usKeyBtn) {
-      usKeyBtn.onclick = async () => {
-        usKeyBtn.disabled = true;
+    const trackerFormEl = document.getElementById('bgm-tracker-form');
+    if (trackerFormEl) {
+      trackerFormEl.onsubmit = async (e) => {
+        e.preventDefault();
+        const saveBtn = document.getElementById('bgm-tracker-save');
+        const tokVal = (document.getElementById('bgm-tracker-token')?.value || '').trim();
+        const enabledVal = !!document.getElementById('bgm-tracker-enabled')?.checked;
+        const nsfwModeVal = document.getElementById('bgm-tracker-nsfw-mode')?.value || 'skip';
+        const privateDefaultVal = !!document.getElementById('bgm-tracker-private-default')?.checked;
+        if (saveBtn) saveBtn.disabled = true;
         try {
-          const [keyRes, scriptResp] = await Promise.all([
-            api('/admin/api/auth/api-keys', { method: 'POST', body: { name: `Bangumi 油猴脚本 (${new Date().toISOString().slice(0, 10)})` } }),
-            fetch('/admin/api/bangumi/userscript.user.js', { credentials: 'same-origin' }),
-          ]);
-          if (!scriptResp.ok) throw new Error('拉取油猴脚本模板失败');
-          const rawKey = String((keyRes && (keyRes.key || keyRes.apiKey)) || '').trim();
-          if (!rawKey) throw new Error('生成 API Key 失败');
-          const safeKey = rawKey.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-          const template = await scriptResp.text();
-          const finalScript = template.replace(
-            /const DEFAULT_API_KEY = '[^']*';/,
-            `const DEFAULT_API_KEY = '${safeKey}';`,
-          );
-          const blob = new Blob([finalScript], { type: 'text/javascript;charset=utf-8' });
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = 'mangaalpha-bangumi.user.js';
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          setTimeout(() => URL.revokeObjectURL(url), 4000);
-          const st = document.getElementById('bgm-us-status');
-          if (st) {
-            st.innerHTML = `<span style="color:var(--success)">✅ 已生成专用 API Key 并下载 <code>mangaalpha-bangumi.user.js</code>（已自动填入当前服务器地址与 Key，拖入油猴扩展即可使用；密钥可在「安全」页随时吊销）。</span>`;
-          }
-          toast('已下载预配置油猴脚本');
+          const payload = {
+            enabled: enabledVal,
+            nsfwMode: nsfwModeVal,
+            privateDefault: privateDefaultVal,
+          };
+          if (tokVal) payload.accessToken = tokVal;
+          await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: payload });
+          toast(tokVal ? 'Bangumi Token 验证通过，追踪器配置已保存' : 'Bangumi 追踪器配置已保存');
+          renderAdminBangumi(body);
         } catch (err) {
-          toast(err.message, 'error');
+          toast(err.message || '保存追踪器配置失败', 'error');
         } finally {
-          usKeyBtn.disabled = false;
+          if (saveBtn) saveBtn.disabled = false;
         }
       };
+    }
+    const trackerTestBtn = document.getElementById('bgm-tracker-test');
+    if (trackerTestBtn) {
+      trackerTestBtn.onclick = async () => {
+        trackerTestBtn.disabled = true;
+        const box = document.getElementById('bgm-tracker-test-result');
+        const tokVal = (document.getElementById('bgm-tracker-token')?.value || '').trim();
+        if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在连接 api.bgm.tv 验证 Token…</span>`;
+        try {
+          const rep = await api('/admin/api/bangumi/tracker/test', {
+            method: 'POST',
+            body: tokVal ? { accessToken: tokVal } : {},
+          });
+          if (rep && rep.ok) {
+            if (box) {
+              box.innerHTML = `<span style="color:var(--success)">✅ Token 有效：${esc(rep.nickname || rep.username)}${rep.username ? ` (@${esc(rep.username)})` : ''} · 延迟 ${rep.latencyMs} ms</span>`;
+            }
+          } else if (box) {
+            box.innerHTML = `<span style="color:var(--danger)">❌ 验证失败：${esc((rep && rep.error) || 'Token 无效')}</span>`;
+          }
+        } catch (err) {
+          if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
+        } finally {
+          trackerTestBtn.disabled = false;
+        }
+      };
+    }
+    const trackerClearBtn = document.getElementById('bgm-tracker-clear');
+    if (trackerClearBtn) {
+      trackerClearBtn.onclick = async () => {
+        if (!confirm('确认解绑并清空 Bangumi Access Token（同时关闭自动同步）？')) return;
+        try {
+          await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearToken: true } });
+          toast('已解绑 Bangumi 追踪器');
+          renderAdminBangumi(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+    body.querySelectorAll('button[data-retry-tracker-series]').forEach((btn) => {
+      btn.onclick = async () => {
+        const sid = btn.getAttribute('data-retry-tracker-series');
+        btn.disabled = true;
+        btn.textContent = '同步中…';
+        try {
+          await api(`/admin/api/series/${encodeURIComponent(sid)}/bangumi/tracker/retry`, { method: 'POST' });
+          toast('已重试同步至 Bangumi');
+          renderAdminBangumi(body);
+        } catch (err) {
+          toast(err.message || '重试同步失败', 'error');
+          renderAdminBangumi(body);
+        }
+      };
+    });
+
+    async function launchUserscriptInstall(withKey, btn) {
+      if (btn) btn.disabled = true;
+      const popup = window.open('about:blank', '_blank');
+      try {
+        const res = await api('/admin/api/bangumi/userscript/install-ticket', {
+          method: 'POST',
+          body: { withKey },
+        });
+        const absUrl = `${location.origin}${res.installUrl}`;
+        if (popup && !popup.closed) {
+          popup.location.href = absUrl;
+        } else {
+          window.location.href = absUrl;
+        }
+        const stEl = document.getElementById('bgm-us-status');
+        if (stEl) {
+          const rotNote = withKey && res.rotatedOldKeys > 0 ? `（已自动吊销 ${res.rotatedOldKeys} 个旧油猴 Key）` : '';
+          const modeText = withKey
+            ? `已生成新专属 Key（前缀 <code>${esc(res.keyPrefix || '')}</code>）${rotNote}并触发油猴安装页`
+            : '已触发油猴更新页（未新建或吊销 Key，沿用油猴内已保存配置）';
+          stEl.innerHTML = `<span style="color:var(--success)">✅ ${modeText}；临时安装链接 ${res.expiresInSeconds || 60} 秒内有效。若浏览器拦截了弹窗，请点此手动打开：<a href="${esc(res.installUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:underline">打开安装页 ↗</a></span>`;
+        }
+        toast(withKey ? '已触发油猴一键安装' : '已触发油猴脚本更新');
+      } catch (err) {
+        if (popup && !popup.closed) popup.close();
+        toast(err.message || '生成油猴安装链接失败', 'error');
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+    const usInstallKeyBtn = document.getElementById('bgm-us-install-key');
+    if (usInstallKeyBtn) {
+      usInstallKeyBtn.onclick = () => launchUserscriptInstall(true, usInstallKeyBtn);
+    }
+    const usUpdateOnlyBtn = document.getElementById('bgm-us-update-only');
+    if (usUpdateOnlyBtn) {
+      usUpdateOnlyBtn.onclick = () => launchUserscriptInstall(false, usUpdateOnlyBtn);
     }
 
     document.getElementById('bgm-refresh-btn').onclick = () => renderAdminBangumi(body);
@@ -4938,7 +5164,7 @@
     if (p === '/login') {
       if (state.auth.authenticated) {
         const redir = new URLSearchParams(location.search).get('redirect') || '/';
-        navigate(redir.startsWith('/') && !redir.startsWith('//') ? redir : '/', true);
+        navigate(safeRedirectTarget(redir), true);
         return;
       }
       renderLogin();

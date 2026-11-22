@@ -258,6 +258,7 @@ func (s *Server) markKomgaSeriesRead(w http.ResponseWriter, r *http.Request) {
 		"seriesId": series.ID,
 		"userId":   "admin",
 	})
+	s.notifyBangumiTracker(series.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -596,6 +597,7 @@ func (s *Server) patchKomgaBookReadProgress(w http.ResponseWriter, r *http.Reque
 		"bookId": book.ID,
 		"userId": "admin",
 	})
+	s.notifyBangumiTracker(book.SeriesID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -760,7 +762,16 @@ func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
 		"seriesId": series.ID,
 		"userId":   "admin",
 	})
+	if request.LastBookNumberSortRead > 0 {
+		s.notifyBangumiTracker(series.ID)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) notifyBangumiTracker(seriesID string) {
+	if s.bangumi != nil && seriesID != "" {
+		s.bangumi.NotifyProgress(seriesID)
+	}
 }
 
 func seriesDTO(item database.Series) map[string]any {

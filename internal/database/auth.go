@@ -31,7 +31,15 @@ const (
 	argonKeyLen  uint32 = 32
 
 	PermanentSessionExpiresAt = "9999-12-31T23:59:59Z"
+
+	// dummyArgonHash matches our Argon2id parameters (m=32MiB, t=2, p=2) and is verified
+	// on unknown usernames to prevent username enumeration via response timing.
+	dummyArgonHash = "$argon2id$v=19$m=32768,t=2,p=2$AAAAAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 )
+
+// argonSem caps concurrent Argon2id derivations (4 x 32MiB = ~128MiB max) so public
+// login / Basic Auth floods cannot trigger OOM on low-memory hosts or containers.
+var argonSem = make(chan struct{}, 4)
 
 func (s *Store) HasAdmin(ctx context.Context) (bool, error) {
 	var exists int
@@ -102,13 +110,18 @@ SELECT username,password_hash,created_at,updated_at FROM auth_admin WHERE id=1`,
 		return AdminUser{}, false, err
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.ToLower(user.Username)), []byte(strings.ToLower(username))) != 1 {
+		_, _ = verifyPasswordCtx(ctx, password, dummyArgonHash)
 		return AdminUser{}, false, nil
 	}
 	cacheKey := basicCacheKey(user.Username, password, storedHash)
 	if s.checkBasicAuthCache(cacheKey) {
 		return user, true, nil
 	}
-	if !verifyPassword(password, storedHash) {
+	ok, err := verifyPasswordCtx(ctx, password, storedHash)
+	if err != nil {
+		return AdminUser{}, false, err
+	}
+	if !ok {
 		return AdminUser{}, false, nil
 	}
 	s.putBasicAuthCache(cacheKey)
@@ -412,6 +425,24 @@ func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
 	return nil
 }
 
+// DeleteAPIKeysByNamePrefix removes API keys whose name equals prefix or starts with prefix + " ".
+func (s *Store) DeleteAPIKeysByNamePrefix(ctx context.Context, prefix string) (int64, error) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return 0, nil
+	}
+	res, err := s.db.ExecContext(ctx, `
+DELETE FROM auth_api_keys
+WHERE name=? OR name LIKE ? ESCAPE '\'`,
+		prefix, escapeLike(prefix)+" %",
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func validateAdminUsername(username string) error {
 	if username == "" || len(username) > 64 || strings.ContainsAny(username, ":\r\n\t\x00") {
 		return ErrInvalidUsername
@@ -441,6 +472,16 @@ func hashPassword(password string) (string, error) {
 		base64.RawStdEncoding.EncodeToString(salt[:]),
 		base64.RawStdEncoding.EncodeToString(derived),
 	), nil
+}
+
+func verifyPasswordCtx(ctx context.Context, password, encoded string) (bool, error) {
+	select {
+	case argonSem <- struct{}{}:
+		defer func() { <-argonSem }()
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	return verifyPassword(password, encoded), nil
 }
 
 func verifyPassword(password, encoded string) bool {

@@ -539,4 +539,20 @@ CREATE TABLE IF NOT EXISTS pipeline_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_created ON pipeline_runs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_lib ON pipeline_runs(library_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS bangumi_tracker_records (
+  bgm_subject_id INTEGER PRIMARY KEY,
+  series_id TEXT NOT NULL DEFAULT '',
+  series_title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  remote_type INTEGER NOT NULL DEFAULT 0,
+  remote_vol_status INTEGER NOT NULL DEFAULT 0,
+  remote_private INTEGER NOT NULL DEFAULT 0,
+  last_local_vol INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  last_synced_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bgm_tracker_updated ON bangumi_tracker_records(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bgm_tracker_series ON bangumi_tracker_records(series_id);
 `

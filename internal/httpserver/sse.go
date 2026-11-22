@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const maxSSEClients = 64
+
 type sseEvent struct {
 	Event string
 	Data  string
@@ -43,9 +45,13 @@ func (h *sseHub) Publish(eventType string, payload any) {
 	h.mu.Unlock()
 }
 
-func (h *sseHub) subscribe() (chan sseEvent, func()) {
+func (h *sseHub) subscribe() (chan sseEvent, func(), bool) {
 	ch := make(chan sseEvent, 64)
 	h.mu.Lock()
+	if len(h.clients) >= maxSSEClients {
+		h.mu.Unlock()
+		return nil, nil, false
+	}
 	h.clients[ch] = struct{}{}
 	h.mu.Unlock()
 	unsubscribe := func() {
@@ -56,7 +62,7 @@ func (h *sseHub) subscribe() (chan sseEvent, func()) {
 		}
 		h.mu.Unlock()
 	}
-	return ch, unsubscribe
+	return ch, unsubscribe, true
 }
 
 func (s *Server) komgaSSEEvents(w http.ResponseWriter, r *http.Request) {
@@ -65,7 +71,11 @@ func (s *Server) komgaSSEEvents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "SSE_UNSUPPORTED", "Streaming is not supported by this response writer.")
 		return
 	}
-	ch, unsubscribe := s.sse.subscribe()
+	ch, unsubscribe, ok := s.sse.subscribe()
+	if !ok {
+		writeError(w, http.StatusServiceUnavailable, "SSE_CAPACITY_EXCEEDED", "Too many concurrent event streams.")
+		return
+	}
 	defer unsubscribe()
 
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")

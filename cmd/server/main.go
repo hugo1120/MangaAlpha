@@ -33,6 +33,11 @@ func main() {
 			envBool("FK115_OPEN_BROWSER", runtime.GOOS == "windows"),
 			"open the web bookshelf after the server starts",
 		)
+		trustedProxies = flag.String(
+			"trusted-proxies",
+			envOr("FK115_TRUSTED_PROXIES", ""),
+			"comma-separated trusted reverse proxy IPs/CIDRs (default: loopback and private networks; use 'none' to disable)",
+		)
 		showVersion = flag.Bool("version", false, "print version and exit")
 	)
 	flag.Parse()
@@ -46,10 +51,13 @@ func main() {
 	defer stop()
 
 	a, err := app.New(ctx, app.Options{
-		Host:    *host,
-		Port:    *port,
-		DataDir: *dataDir,
-		Logger:  logger,
+		Host:                 *host,
+		Port:                 *port,
+		DataDir:              *dataDir,
+		Logger:               logger,
+		TrustedProxies:       *trustedProxies,
+		InitialAdminUsername: os.Getenv("FK115_ADMIN_USERNAME"),
+		InitialAdminPassword: os.Getenv("FK115_ADMIN_PASSWORD"),
 	})
 	if err != nil {
 		diagnostics.WriteStartupFailure(*dataDir, "server", "startup", err)

@@ -34,6 +34,9 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensureUnionAndScheduleTables(db); err != nil {
 		return err
 	}
+	if err := ensureBangumiTrackerTable(db); err != nil {
+		return err
+	}
 	migrations := []struct {
 		table      string
 		column     string
@@ -314,6 +317,27 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_lib ON pipeline_runs(library_id, cr
 	// Clean up removed legacy global auto-scan settings.
 	_, _ = db.Exec(`DELETE FROM settings WHERE key IN ('auto_scan_enabled','auto_scan_interval_minutes','scan_on_startup')`)
 	return nil
+}
+
+func ensureBangumiTrackerTable(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS bangumi_tracker_records (
+  bgm_subject_id INTEGER PRIMARY KEY,
+  series_id TEXT NOT NULL DEFAULT '',
+  series_title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  remote_type INTEGER NOT NULL DEFAULT 0,
+  remote_vol_status INTEGER NOT NULL DEFAULT 0,
+  remote_private INTEGER NOT NULL DEFAULT 0,
+  last_local_vol INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  last_synced_at TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bgm_tracker_updated ON bangumi_tracker_records(updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_bgm_tracker_series ON bangumi_tracker_records(series_id);
+`)
+	return err
 }
 
 func triggerHasBulkGuard(db *sql.DB, name string) bool {

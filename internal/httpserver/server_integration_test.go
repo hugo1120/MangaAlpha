@@ -180,6 +180,8 @@ func TestV2AuthAndMihonKomgaContract(t *testing.T) {
 	})
 	clearProxyResp.Body.Close()
 
+	bangumi.SetAllowLoopbackCoversForTest(true)
+	defer bangumi.SetAllowLoopbackCoversForTest(false)
 	mockCoverSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		_, _ = w.Write(testCoverPNG(t))

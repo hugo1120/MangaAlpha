@@ -34,11 +34,14 @@ import (
 const SettingDiagnosticsVerbose = "diagnostics_verbose"
 
 type Options struct {
-	Host          string
-	Port          int
-	DataDir       string
-	Logger        *slog.Logger
-	LoopbackToken string
+	Host                 string
+	Port                 int
+	DataDir              string
+	Logger               *slog.Logger
+	LoopbackToken        string
+	TrustedProxies       string
+	InitialAdminUsername string
+	InitialAdminPassword string
 }
 
 type App struct {
@@ -102,6 +105,10 @@ func New(_ context.Context, options Options) (*App, error) {
 		if parsed, pErr := strconv.ParseBool(strings.TrimSpace(rawVerbose)); pErr == nil {
 			diagRecorder.SetVerbose(parsed)
 		}
+	}
+	if err := seedInitialAdminFromOptions(context.Background(), store, options); err != nil {
+		store.Close()
+		return nil, err
 	}
 	cacheManager, err := cache.New(store, filepath.Join(dataDir, "cache"))
 	if err != nil {
@@ -167,9 +174,10 @@ func New(_ context.Context, options Options) (*App, error) {
 	handler := httpserver.New(
 		store, client, scanManager, cacheManager, archiveService, thumbnailService,
 		coverManager, maintenanceManager, httpserver.RuntimeInfo{
-			DataDir: dataDir,
-			Host:    options.Host,
-			Port:    options.Port,
+			DataDir:        dataDir,
+			Host:           options.Host,
+			Port:           options.Port,
+			TrustedProxies: options.TrustedProxies,
 		}, options.Logger,
 	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager).WithDiagnostics(diagRecorder).WithUpdater(updaterService)
 
@@ -440,6 +448,31 @@ func (a *App) Close() error {
 		_ = a.bangumi.Close()
 	}
 	return a.store.Close()
+}
+
+func seedInitialAdminFromOptions(ctx context.Context, store *database.Store, options Options) error {
+	user := strings.TrimSpace(options.InitialAdminUsername)
+	pass := options.InitialAdminPassword
+	if user == "" && pass == "" {
+		return nil
+	}
+	claimed, err := store.HasAdmin(ctx)
+	if err != nil {
+		return fmt.Errorf("check administrator setup state: %w", err)
+	}
+	if claimed {
+		options.Logger.Info("administrator already configured; ignoring FK115_ADMIN_USERNAME/FK115_ADMIN_PASSWORD")
+		return nil
+	}
+	if user == "" || pass == "" {
+		return errors.New("both FK115_ADMIN_USERNAME and FK115_ADMIN_PASSWORD must be set together for unattended initialization")
+	}
+	admin, err := store.ClaimAdmin(ctx, user, pass)
+	if err != nil {
+		return fmt.Errorf("initialize administrator from environment: %w", err)
+	}
+	options.Logger.Info("initial administrator configured from environment", "username", admin.Username)
+	return nil
 }
 
 // The Android WebView uses a per-process cookie in addition to normal app

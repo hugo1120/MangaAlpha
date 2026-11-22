@@ -109,7 +109,10 @@ ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_
 func (s *Store) Settings(ctx context.Context) (map[string]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT key,value FROM settings
-WHERE key NOT IN ('cors_allowed_origins','bangumi_proxy_url')
+WHERE key NOT IN ('cors_allowed_origins','bangumi_proxy_url','bangumi_tracker_token')
+  AND lower(key) NOT LIKE '%\_token' ESCAPE '\'
+  AND lower(key) NOT LIKE '%\_secret' ESCAPE '\'
+  AND lower(key) NOT LIKE '%\_password' ESCAPE '\'
 ORDER BY key`)
 	if err != nil {
 		return nil, err

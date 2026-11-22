@@ -10,8 +10,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
+
+var allowLoopbackCovers atomic.Bool
+
+// SetAllowLoopbackCoversForTest enables http://127.0.0.1 and http://localhost
+// cover URLs exclusively inside automated tests. Production builds always keep this false.
+func SetAllowLoopbackCoversForTest(allow bool) {
+	allowLoopbackCovers.Store(allow)
+}
 
 const SettingProxyURL = "bangumi_proxy_url"
 
@@ -128,9 +137,7 @@ func IsAllowedBangumiCoverURL(rawURL string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	if host == "127.0.0.1" || host == "localhost" {
-		// Allow local httptest servers only when loopback HTTP is used in tests;
-		// production Bangumi cover URLs are https on bgm.tv / lain.bgm.tv.
-		return scheme == "http"
+		return allowLoopbackCovers.Load() && scheme == "http"
 	}
 	if scheme != "https" {
 		return false

@@ -101,8 +101,13 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/series/{seriesID}/detail", s.seriesRichDetail)
 	r.Get("/books/{bookID}/detail", s.bookRichDetail)
 
-	// Bangumi scraping, archive index management & userscript
+	// Bangumi scraping, archive index management, tracker & userscript
 	r.Get("/bangumi/userscript.user.js", s.downloadBangumiUserscript)
+	r.Post("/bangumi/userscript/install-ticket", s.createUserscriptInstallTicket)
+	r.Get("/bangumi/tracker", s.getBangumiTracker)
+	r.Put("/bangumi/tracker/config", s.putBangumiTrackerConfig)
+	r.Post("/bangumi/tracker/test", s.testBangumiTracker)
+	r.Post("/series/{seriesID}/bangumi/tracker/retry", s.retrySeriesBangumiTracker)
 	r.Get("/bangumi/status", s.bangumiStatus)
 	r.Put("/bangumi/config", s.putBangumiConfig)
 	r.Post("/bangumi/proxy/test", s.testBangumiProxy)
@@ -450,7 +455,12 @@ func (s *Server) testWebDAVAccount(w http.ResponseWriter, r *http.Request) {
 		password := req.Password
 		if password == "" && req.ID != "" {
 			if existing, err := s.store.WebDAVAccountSecret(r.Context(), req.ID); err == nil {
-				password = existing.Password
+				if sameSchemeAndHost(cleanURL, existing.BaseURL) {
+					password = existing.Password
+				} else if existing.Password != "" {
+					writeError(w, http.StatusBadRequest, "PASSWORD_REQUIRED", "修改 WebDAV 服务器地址后，请重新输入密码再测试连接。")
+					return
+				}
 			}
 		}
 		secret = database.WebDAVAccountSecret{
@@ -1275,9 +1285,14 @@ func (s *Server) seriesRichDetail(w http.ResponseWriter, r *http.Request) {
 	if len(library.UnionLayers) > 0 {
 		libPayload["unionLayers"] = library.UnionLayers
 	}
+	var trackerSummary *bangumi.SeriesTrackerSummary
+	if s.bangumi != nil && meta.BgmSubjectID != nil && *meta.BgmSubjectID > 0 {
+		trackerSummary = s.bangumi.SeriesTrackerSummary(r.Context(), *meta.BgmSubjectID)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"series":             seriesDTOFull(series, progress, meta),
 		"rawMeta":            meta,
+		"tracker":            trackerSummary,
 		"originalName":       series.Name,
 		"relativePath":       series.RelativePath,
 		"library":            libPayload,
@@ -1513,7 +1528,7 @@ func (s *Server) startBangumiArchiveUpdate(w http.ResponseWriter, r *http.Reques
 		Force bool `json:"force"`
 	}
 	if r != nil && r.Body != nil {
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&req)
 	}
 	st, err := s.bangumi.StartArchiveUpdateWithOptions(req.Force)
 	if err != nil {
@@ -1672,4 +1687,84 @@ func (s *Server) clearSeriesBangumi(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, meta)
+}
+
+// --- Bangumi Progress Tracker Handlers ---
+
+func (s *Server) getBangumiTracker(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	st, err := s.bangumi.TrackerStatus(r.Context(), intQuery(r, "limit", 30))
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) putBangumiTrackerConfig(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	var req bangumi.TrackerConfigUpdate
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	st, err := s.bangumi.UpdateTrackerConfig(r.Context(), req)
+	if err != nil {
+		switch {
+		case errors.Is(err, bangumi.ErrTrackerTokenInvalid):
+			writeError(w, http.StatusBadRequest, "INVALID_BGM_TOKEN", err.Error())
+		case errors.Is(err, bangumi.ErrTrackerNotBound):
+			writeError(w, http.StatusBadRequest, "TRACKER_NOT_BOUND", err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, "INVALID_TRACKER_CONFIG", err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+func (s *Server) testBangumiTracker(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	var req struct {
+		AccessToken *string `json:"accessToken"`
+	}
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	res := s.bangumi.TestTrackerToken(r.Context(), req.AccessToken)
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) retrySeriesBangumiTracker(w http.ResponseWriter, r *http.Request) {
+	if s.bangumi == nil {
+		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
+		return
+	}
+	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
+		return
+	}
+	rec, err := s.bangumi.SyncSeriesTrackerNow(r.Context(), series.ID)
+	if err != nil {
+		status := http.StatusBadGateway
+		code := "TRACKER_SYNC_FAILED"
+		switch {
+		case errors.Is(err, bangumi.ErrTrackerNotBound), errors.Is(err, bangumi.ErrTrackerUnboundItem):
+			status, code = http.StatusBadRequest, "TRACKER_UNAVAILABLE"
+		case errors.Is(err, bangumi.ErrTrackerTokenInvalid):
+			status, code = http.StatusUnauthorized, "INVALID_BGM_TOKEN"
+		}
+		writeError(w, status, code, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }

@@ -286,12 +286,16 @@ func opdsBookSummary(book database.Book, seriesTitle string, meta database.Serie
 	parts = append(parts, fmt.Sprintf("%s · %s", strings.TrimPrefix(strings.ToLower(webArchiveType(book.Name)), "."), formatBytes(book.Size)))
 	if book.PageCount > 0 {
 		if hasProgress && progress.Completed {
-			parts = append(parts, fmt.Sprintf("Progress: %d of %d", book.PageCount, book.PageCount))
+			parts = append(parts, fmt.Sprintf("已读完 · 共 %d 页", book.PageCount))
 		} else if hasProgress && progress.Page != nil && *progress.Page > 0 {
-			parts = append(parts, fmt.Sprintf("Progress: %d of %d", *progress.Page, book.PageCount))
+			parts = append(parts, fmt.Sprintf("阅读至第 %d/%d 页", min(book.PageCount, *progress.Page), book.PageCount))
 		} else {
-			parts = append(parts, fmt.Sprintf("Progress: 0 of %d", book.PageCount))
+			parts = append(parts, fmt.Sprintf("共 %d 页", book.PageCount))
 		}
+	} else if hasProgress && progress.Completed {
+		parts = append(parts, "已读完")
+	} else if hasProgress && progress.Page != nil && *progress.Page > 0 {
+		parts = append(parts, fmt.Sprintf("阅读至第 %d 页", *progress.Page))
 	}
 	header := strings.Join(parts, " · ")
 	if seriesTitle != "" {
@@ -731,19 +735,28 @@ func (s *Server) opdsSuwayomiSeries(w http.ResponseWriter, r *http.Request) {
 	if query == "" {
 		query = strings.TrimSpace(r.URL.Query().Get("search"))
 	}
+	genre := strings.TrimSpace(r.URL.Query().Get("genre"))
 	params := url.Values{}
 	title := "全部漫画"
+	feedID := "ma:opds:suwayomi:series"
+	var genres []string
+	if genre != "" {
+		params.Set("genre", genre)
+		genres = []string{genre}
+		title = "类型：" + genre
+		feedID = "ma:opds:suwayomi:genre:" + genre
+	}
 	if query != "" {
 		params.Set("query", query)
 		title = "搜索：" + query
 	}
 	s.renderSuwayomiSeriesFeed(
 		w, r,
-		"ma:opds:suwayomi:series",
+		feedID,
 		title,
 		opdsSuwayomiBase+"/library/series",
 		params,
-		database.SeriesQuery{Search: query},
+		database.SeriesQuery{Search: query, Genres: genres},
 	)
 }
 
@@ -891,7 +904,11 @@ func (s *Server) opdsSuwayomiGenres(w http.ResponseWriter, r *http.Request) {
 			Title:   g,
 			Updated: now,
 			Links: []opdsLink{
-				{Rel: opdsRelSubsection, Type: opdsMIMELinkAcq, Href: opdsSuwayomiBase + "/genre/" + url.PathEscape(g)},
+				{
+					Rel:  opdsRelSubsection,
+					Type: opdsMIMELinkAcq,
+					Href: opdsBuildURL(opdsSuwayomiBase+"/library/series", url.Values{"genre": {g}}),
+				},
 			},
 		})
 	}
@@ -985,6 +1002,7 @@ func (s *Server) renderSuwayomiChapterList(
 	total int64,
 	pageNum, pageSize int,
 	includeSeriesTitle bool,
+	bookOrdinals map[string]int,
 	extraLinks []opdsLink,
 ) {
 	bookIDs := make([]string, len(books))
@@ -1054,9 +1072,14 @@ func (s *Server) renderSuwayomiChapterList(
 		meta := metaMap[b.SeriesID]
 		sTitle := opdsSeriesDisplayTitle(sr, meta)
 
-		entryTitle := opdsChapterStatusPrefix(prog, hasProg) + b.Name
+		prefix := opdsChapterStatusPrefix(prog, hasProg)
+		entryTitle := prefix + b.Name
 		if includeSeriesTitle && sTitle != "" {
-			entryTitle = opdsChapterStatusPrefix(prog, hasProg) + sTitle + ": " + b.Name
+			entryTitle = prefix + sTitle + ": " + b.Name
+		} else if ord := bookOrdinals[b.ID]; ord > 0 {
+			// Suwayomi-style leading ordinal ("1 - Vol.01.cbz") lets opdsforcomic.koplugin's
+			// chapterNumberIn() identify previous/next chapters accurately in both asc & desc sorts.
+			entryTitle = fmt.Sprintf("%s%d - %s", prefix, ord, b.Name)
 		}
 		// Notice: NO acquisition link on list entries — tapping triggers opdsforcomic.koplugin's
 		// Suwayomi direct-stream fast path (/api/opds/v1.2/series/{sNum}/chapter/{bNum}/metadata)
@@ -1064,30 +1087,41 @@ func (s *Server) renderSuwayomiChapterList(
 		metaHref := fmt.Sprintf("%s/series/%d/chapter/%d/metadata", opdsSuwayomiBase, sRow, bRow)
 		thumbHref := fmt.Sprintf("%s/series/%d/thumbnail", opdsSuwayomiBase, sRow)
 
+		// Do NOT emit "Progress: N of M" in chapter list summaries: when /metadata omits
+		// pse:lastRead on a completed chapter (to reopen from page 1), opdsforcomic's
+		// suwayomiProgressFromItem() regex fallback would otherwise parse "Progress: N of N"
+		// and jump straight to the last page. /metadata always supplies authoritative pse:lastRead.
 		var sumParts []string
 		sumParts = append(sumParts, formatBytes(b.Size))
 		if b.PageCount > 0 {
 			if hasProg && prog.Completed {
-				sumParts = append(sumParts, fmt.Sprintf("Progress: %d of %d", b.PageCount, b.PageCount))
+				sumParts = append(sumParts, fmt.Sprintf("已读完 · 共 %d 页", b.PageCount))
 			} else if hasProg && prog.Page != nil && *prog.Page > 0 {
-				// Emit 0-based index in "Progress: N of M" fallback matching opdsforcomic's suwayomiProgressFromItem.
-				sumParts = append(sumParts, fmt.Sprintf("Progress: %d of %d", max(0, *prog.Page-1), b.PageCount))
+				sumParts = append(sumParts, fmt.Sprintf("阅读至第 %d/%d 页", min(b.PageCount, *prog.Page), b.PageCount))
 			} else {
-				sumParts = append(sumParts, fmt.Sprintf("Progress: 0 of %d", b.PageCount))
+				sumParts = append(sumParts, fmt.Sprintf("共 %d 页", b.PageCount))
 			}
-		} else if hasProg && !prog.Completed && prog.Page != nil && *prog.Page > 1 {
-			sumParts = append(sumParts, fmt.Sprintf("Progress: %d", *prog.Page-1))
+		} else if hasProg && prog.Completed {
+			sumParts = append(sumParts, "已读完")
+		} else if hasProg && prog.Page != nil && *prog.Page > 0 {
+			sumParts = append(sumParts, fmt.Sprintf("阅读至第 %d 页", *prog.Page))
 		}
 		updated := opdsBookUpdatedAt(b)
 		if hasProg && !prog.UpdatedAt.IsZero() && includeSeriesTitle {
 			updated = prog.UpdatedAt.UTC()
 		}
 
+		// Omit redundant author suffix on single-series chapter lists so e-ink rows stay concise.
+		var authors []string
+		if includeSeriesTitle {
+			authors = opdsSeriesAuthors(meta)
+		}
+
 		entries = append(entries, opdsEntry{
 			ID:      fmt.Sprintf("ma:chapter:%d:%d", sRow, bRow),
 			Title:   entryTitle,
 			Updated: updated,
-			Authors: opdsSeriesAuthors(meta),
+			Authors: authors,
 			Summary: strings.Join(sumParts, " · "),
 			Links: []opdsLink{
 				{Rel: opdsRelSubsection, Type: opdsMIMELinkAcq, Href: metaHref},
@@ -1125,7 +1159,7 @@ func (s *Server) opdsSuwayomiHistory(w http.ResponseWriter, r *http.Request) {
 		"ma:opds:suwayomi:history",
 		"阅读历史",
 		opdsSuwayomiBase+"/history",
-		books, total, pageNum, size, true, nil,
+		books, total, pageNum, size, true, nil, nil,
 	)
 }
 
@@ -1146,7 +1180,7 @@ func (s *Server) opdsSuwayomiUpdates(w http.ResponseWriter, r *http.Request) {
 		"ma:opds:suwayomi:updates",
 		"最近更新",
 		opdsSuwayomiBase+"/library-updates",
-		books, total, pageNum, size, true, nil,
+		books, total, pageNum, size, true, nil, nil,
 	)
 }
 
@@ -1202,6 +1236,11 @@ func (s *Server) opdsSuwayomiSeriesChapters(w http.ResponseWriter, r *http.Reque
 		s.writeDBError(w, r, err)
 		return
 	}
+	ordinals, err := s.store.SeriesBookOrdinals(r.Context(), series.ID)
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
+	}
 
 	basePath := fmt.Sprintf("%s/series/%d/chapters", opdsSuwayomiBase, rowID)
 	var facets []opdsLink
@@ -1243,7 +1282,7 @@ func (s *Server) opdsSuwayomiSeriesChapters(w http.ResponseWriter, r *http.Reque
 		fmt.Sprintf("ma:opds:suwayomi:series:%d:chapters", rowID),
 		title,
 		basePath,
-		books, total, pageNum, opdsDefaultChapterPageSize, false, facets,
+		books, total, pageNum, opdsDefaultChapterPageSize, false, ordinals, facets,
 	)
 }
 
@@ -1278,16 +1317,15 @@ func (s *Server) opdsSuwayomiChapterMetadata(w http.ResponseWriter, r *http.Requ
 	}
 
 	// On-demand lazy indexing ONLY for the single chapter the reader actually tapped.
-	pageCount := book.PageCount
-	if pageCount <= 0 {
-		pages, lErr := s.listPagesDetached(r.Context(), book)
-		if lErr != nil {
-			s.archiveError(w, lErr)
-			return
-		}
-		pageCount = len(pages)
-		book.PageCount = pageCount
+	// Always validate against the archive's current bookVersion (instant SQLite hit when fresh;
+	// automatically re-indexes if the underlying archive file was replaced).
+	pages, lErr := s.listPagesDetached(r.Context(), book)
+	if lErr != nil {
+		s.archiveError(w, lErr)
+		return
 	}
+	pageCount := len(pages)
+	book.PageCount = pageCount
 	if pageCount <= 0 {
 		writeError(w, http.StatusUnprocessableEntity, "EMPTY_ARCHIVE", "No readable image pages found in archive.")
 		return
@@ -1440,23 +1478,27 @@ func opdsKomgaPageParams(r *http.Request, defaultSize int) (page, size int) {
 	return page, size
 }
 
-func opdsKomgaPageLinks(basePath string, baseParams url.Values, page, size int, total int64, acquisition bool) []opdsLink {
+func opdsKomgaPageLinks(r *http.Request, basePath string, baseParams url.Values, page, size int, total int64, acquisition bool) []opdsLink {
 	linkType := opdsMIMELinkNav
 	if acquisition {
 		linkType = opdsMIMELinkAcq
 	}
-	selfParams := cloneURLValues(baseParams)
+	params := cloneURLValues(baseParams)
+	if strings.TrimSpace(r.URL.Query().Get("size")) != "" {
+		params.Set("size", strconv.Itoa(size))
+	}
+	selfParams := cloneURLValues(params)
 	if page > 0 {
 		selfParams.Set("page", strconv.Itoa(page))
 	}
 	links := opdsKomgaBaseLinks(opdsBuildURL(basePath, selfParams), acquisition)
 	if page > 0 {
-		prevParams := cloneURLValues(baseParams)
+		prevParams := cloneURLValues(params)
 		prevParams.Set("page", strconv.Itoa(page-1))
 		links = append(links, opdsLink{Rel: opdsRelPrev, Type: linkType, Href: opdsBuildURL(basePath, prevParams)})
 	}
 	if int64((page+1)*size) < total {
-		nextParams := cloneURLValues(baseParams)
+		nextParams := cloneURLValues(params)
 		nextParams.Set("page", strconv.Itoa(page+1))
 		links = append(links, opdsLink{Rel: opdsRelNext, Type: linkType, Href: opdsBuildURL(basePath, nextParams)})
 	}
@@ -1593,7 +1635,7 @@ func (s *Server) renderKomgaSeriesFeed(
 		ID:      feedID,
 		Title:   feedTitle,
 		Updated: time.Now().UTC(),
-		Links:   opdsKomgaPageLinks(basePath, baseParams, page, size, total, false),
+		Links:   opdsKomgaPageLinks(r, basePath, baseParams, page, size, total, false),
 		Entries: entries,
 	})
 }
@@ -1701,7 +1743,7 @@ func (s *Server) opdsKomgaCollections(w http.ResponseWriter, r *http.Request) {
 		ID:      "all_collections",
 		Title:   "All collections",
 		Updated: time.Now().UTC(),
-		Links:   opdsKomgaPageLinks(opdsKomgaBase+"/collections", url.Values{}, page, size, total, false),
+		Links:   opdsKomgaPageLinks(r, opdsKomgaBase+"/collections", url.Values{}, page, size, total, false),
 		Entries: entries,
 	})
 }
@@ -1752,7 +1794,7 @@ func (s *Server) opdsKomgaCollectionSeries(w http.ResponseWriter, r *http.Reques
 		ID:      col.ID,
 		Title:   col.Name,
 		Updated: col.UpdatedAt.UTC(),
-		Links:   opdsKomgaPageLinks(opdsKomgaBase+"/collections/"+url.PathEscape(col.ID), url.Values{}, page, size, total, false),
+		Links:   opdsKomgaPageLinks(r, opdsKomgaBase+"/collections/"+url.PathEscape(col.ID), url.Values{}, page, size, total, false),
 		Entries: entries,
 	})
 }
@@ -1780,7 +1822,7 @@ func (s *Server) opdsKomgaReadLists(w http.ResponseWriter, r *http.Request) {
 		ID:      "all_readlists",
 		Title:   "All read lists",
 		Updated: time.Now().UTC(),
-		Links:   opdsKomgaPageLinks(opdsKomgaBase+"/readlists", url.Values{}, page, size, total, false),
+		Links:   opdsKomgaPageLinks(r, opdsKomgaBase+"/readlists", url.Values{}, page, size, total, false),
 		Entries: entries,
 	})
 }
@@ -1921,7 +1963,7 @@ func (s *Server) renderKomgaBookEntries(
 		Title:       feedTitle,
 		Updated:     time.Now().UTC(),
 		Acquisition: true,
-		Links:       opdsKomgaPageLinks(basePath, url.Values{}, page, size, total, true),
+		Links:       opdsKomgaPageLinks(r, basePath, url.Values{}, page, size, total, true),
 		Entries:     entries,
 	})
 }
@@ -2032,14 +2074,14 @@ func (s *Server) opdsKomgaBookDetail(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	if book.PageCount <= 0 {
-		pages, lErr := s.listPagesDetached(r.Context(), book)
-		if lErr != nil {
-			s.archiveError(w, lErr)
-			return
-		}
-		book.PageCount = len(pages)
+	// Always validate against the archive's current bookVersion (instant SQLite hit when fresh;
+	// automatically re-indexes if the underlying archive file was replaced).
+	pages, lErr := s.listPagesDetached(r.Context(), book)
+	if lErr != nil {
+		s.archiveError(w, lErr)
+		return
 	}
+	book.PageCount = len(pages)
 	if book.PageCount <= 0 {
 		writeError(w, http.StatusUnprocessableEntity, "EMPTY_ARCHIVE", "No readable image pages found in archive.")
 		return

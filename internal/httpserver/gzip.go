@@ -40,6 +40,12 @@ func shouldSkipGzipPath(p string) bool {
 	if strings.HasPrefix(p, "/api/v1/books/") && strings.Contains(p, "/pages/") {
 		return true
 	}
+	if strings.HasPrefix(p, "/api/opds/") && strings.Contains(p, "/page/") {
+		return true
+	}
+	if strings.HasPrefix(p, "/opds/") && strings.Contains(p, "/pages/") {
+		return true
+	}
 	return false
 }
 

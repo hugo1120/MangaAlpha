@@ -221,7 +221,7 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 	title := "阿尔法物语"
 	pub := "讲谈社"
 	status := "ONGOING"
-	genres := []string{"奇幻"}
+	genres := []string{"奇幻", "科幻/机战"}
 	authors := []database.Author{{Name: "测试作者", Role: "writer"}}
 	if _, err := store.PatchSeriesMetadata(ctx, alphaSeries, database.SeriesMetadataPatch{
 		Title:     &title,
@@ -313,11 +313,24 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 		t.Fatalf("OPDS feed must not expose whole-book download acquisition link")
 	}
 
-	// Check sources, categories, genres, statuses, updates, search
+	// Check sources, categories, genres (including genre with "/"), statuses, updates, search
+	genresRec := doBasic("/api/opds/v1.2/library/genres")
+	if genresRec.Code != http.StatusOK {
+		t.Fatalf("library/genres code=%d", genresRec.Code)
+	}
+	genresXML := genresRec.Body.String()
+	assertValidXML(t, genresXML)
+	if !strings.Contains(genresXML, `/api/opds/v1.2/library/series?genre=%E7%A7%91%E5%B9%BB%2F%E6%9C%BA%E6%88%98`) {
+		t.Fatalf("genres feed should link via query param ?genre= to avoid reverse-proxy %%2F 404:\n%s", genresXML)
+	}
+	slashGenreRec := doBasic("/api/opds/v1.2/library/series?genre=%E7%A7%91%E5%B9%BB%2F%E6%9C%BA%E6%88%98")
+	if slashGenreRec.Code != http.StatusOK || !strings.Contains(slashGenreRec.Body.String(), "阿尔法物语") {
+		t.Fatalf("query-param genre filter with slash failed: code=%d body=%s", slashGenreRec.Code, slashGenreRec.Body.String())
+	}
+
 	for _, p := range []string{
 		"/api/opds/v1.2/library/sources",
 		"/api/opds/v1.2/library/categories",
-		"/api/opds/v1.2/library/genres",
 		"/api/opds/v1.2/library/statuses",
 		"/api/opds/v1.2/library/series?query=%E9%98%BF%E5%B0%94%E6%B3%95",
 		"/api/opds/v1.2/genre/%E5%A5%87%E5%B9%BB",
@@ -360,6 +373,23 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 	if strings.Contains(chapListXML, "opds-pse/stream") {
 		t.Fatalf("Suwayomi chapters list must NOT contain direct stream link so opdsforcomic fast path activates")
 	}
+	if !strings.Contains(chapListXML, "<title>[○] 1 - Vol.01.cbz</title>") || !strings.Contains(chapListXML, "<title>[○] 2 - Vol.02.cbz</title>") {
+		t.Fatalf("Suwayomi chapters list expected stable 1-based ordinal prefixes:\n%s", chapListXML)
+	}
+	if strings.Contains(chapListXML, "测试作者") {
+		t.Fatalf("single-series chapters list should omit redundant author suffix on chapter rows:\n%s", chapListXML)
+	}
+	// Desc sort preserves the same 1-based ordinals so opdsforcomic chapterNumberIn() stays accurate.
+	chapDescRec := doBasic(fmt.Sprintf("/api/opds/v1.2/series/%s/chapters?sort=desc", seriesNum))
+	if chapDescRec.Code != http.StatusOK {
+		t.Fatalf("chapters desc code=%d", chapDescRec.Code)
+	}
+	chapDescXML := chapDescRec.Body.String()
+	idx2 := strings.Index(chapDescXML, "<title>[○] 2 - Vol.02.cbz</title>")
+	idx1 := strings.Index(chapDescXML, "<title>[○] 1 - Vol.01.cbz</title>")
+	if idx2 < 0 || idx1 < 0 || idx2 >= idx1 {
+		t.Fatalf("chapters desc expected 2 before 1 with stable ordinals:\n%s", chapDescXML)
+	}
 
 	var indexedCount int
 	_ = store.DB().QueryRowContext(ctx, `SELECT count(*) FROM zip_indexes`).Scan(&indexedCount)
@@ -374,6 +404,7 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 		t.Fatalf("expected 2 chapter metadata links, got %d in:\n%s", len(metaMatches), chapListXML)
 	}
 	ch1Num := metaMatches[0][2]
+	ch2Num := metaMatches[1][2]
 
 	// Tap chapter 1 metadata: lazy-indexes ONLY book 1!
 	ch1MetaPath := fmt.Sprintf("/api/opds/v1.2/series/%s/chapter/%s/metadata", seriesNum, ch1Num)
@@ -439,7 +470,7 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 		t.Fatalf("expected 0-based pse:lastRead=\"1\" on Suwayomi metadata, got:\n%s", metaRec2.Body.String())
 	}
 
-	// History feed lists in-progress chapter with [◐] prefix and direct metadata URL
+	// History feed lists in-progress chapter with [◐] prefix, human-readable Chinese progress (no "Progress:"), and direct metadata URL
 	histRec := doBasic("/api/opds/v1.2/history")
 	if histRec.Code != http.StatusOK {
 		t.Fatalf("history code=%d", histRec.Code)
@@ -448,6 +479,12 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 	assertValidXML(t, histXML)
 	if !strings.Contains(histXML, "[◐] 阿尔法物语: Vol.01.cbz") || !strings.Contains(histXML, ch1MetaPath) {
 		t.Fatalf("history feed missing expected chapter entry:\n%s", histXML)
+	}
+	if !strings.Contains(histXML, "阅读至第 2/3 页") || strings.Contains(histXML, "Progress:") {
+		t.Fatalf("history feed summary should show 1-based Chinese progress without raw Progress: pattern:\n%s", histXML)
+	}
+	if !strings.Contains(histXML, "测试作者") {
+		t.Fatalf("history feed should retain series author:\n%s", histXML)
 	}
 
 	// Check Komga OPDS /series/{id} while book 1 is in-progress (page 2) & book 2 is unindexed
@@ -486,10 +523,25 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 	if !prog.Completed {
 		t.Fatalf("re-reading earlier page must NOT downgrade completed status")
 	}
-	// Completed book omits pse:lastRead so reopening starts from page 1
+	// Completed book omits pse:lastRead AND omits "Progress: N of N" in chapter/history summaries
+	// so opdsforcomic.koplugin's suwayomiProgressFromItem fallback does NOT jump to the last page!
 	metaRecDone := doBasic(ch1MetaPath)
-	if strings.Contains(metaRecDone.Body.String(), "pse:lastRead=") {
-		t.Fatalf("completed chapter must omit pse:lastRead:\n%s", metaRecDone.Body.String())
+	if strings.Contains(metaRecDone.Body.String(), "pse:lastRead=") || strings.Contains(metaRecDone.Body.String(), "Progress:") {
+		t.Fatalf("completed chapter metadata must omit pse:lastRead and Progress: pattern:\n%s", metaRecDone.Body.String())
+	}
+	chapDoneRec := doBasic(fmt.Sprintf("/api/opds/v1.2/series/%s/chapters", seriesNum))
+	chapDoneXML := chapDoneRec.Body.String()
+	if !strings.Contains(chapDoneXML, "已读完 · 共 3 页") || strings.Contains(chapDoneXML, "Progress:") {
+		t.Fatalf("completed chapter list summary must not contain Progress: pattern:\n%s", chapDoneXML)
+	}
+	// Filtered unread chapter list still keeps stable ordinal "2 - Vol.02.cbz"
+	chapUnreadRec := doBasic(fmt.Sprintf("/api/opds/v1.2/series/%s/chapters?filter=unread", seriesNum))
+	if chapUnreadRec.Code != http.StatusOK || !strings.Contains(chapUnreadRec.Body.String(), "<title>[○] 2 - Vol.02.cbz</title>") {
+		t.Fatalf("filtered unread chapters must keep stable ordinal 2:\n%s", chapUnreadRec.Body.String())
+	}
+	histDoneRec := doBasic("/api/opds/v1.2/history")
+	if strings.Contains(histDoneRec.Body.String(), "Progress:") || !strings.Contains(histDoneRec.Body.String(), "已读完 · 共 3 页") {
+		t.Fatalf("completed history entry must not contain Progress: pattern:\n%s", histDoneRec.Body.String())
 	}
 
 	// =========================================================================
@@ -572,5 +624,66 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 	// Hidden library returns 404 on Komga OPDS
 	if rec := doBasic("/opds/v1.2/libraries/" + hidLib.ID); rec.Code != http.StatusNotFound {
 		t.Fatalf("hidden library expected 404, got %d", rec.Code)
+	}
+
+	// Custom ?size= on Komga OPDS pagination is preserved in rel="next"
+	kPagedRec := doBasic("/opds/v1.2/series/" + alphaSeries.ID + "?size=1")
+	if kPagedRec.Code != http.StatusOK {
+		t.Fatalf("komga OPDS paged series code=%d", kPagedRec.Code)
+	}
+	kPagedXML := kPagedRec.Body.String()
+	assertValidXML(t, kPagedXML)
+	if !strings.Contains(kPagedXML, `rel="next"`) || !strings.Contains(kPagedXML, `page=1&amp;size=1`) {
+		t.Fatalf("komga OPDS pagination must preserve custom size=1:\n%s", kPagedXML)
+	}
+
+	// gzipMiddleware explicitly skips OPDS page image paths even when client sends Accept-Encoding: gzip
+	for _, pagePath := range []string{
+		fmt.Sprintf("/api/opds/v1.2/series/%s/chapter/%s/page/0?updateProgress=false", seriesNum, ch1Num),
+		"/opds/v1.2/books/" + alphaBooks[0].ID + "/pages/0?zero_based=true&updateProgress=false",
+	} {
+		req := httptest.NewRequest(http.MethodGet, pagePath, nil)
+		req.SetBasicAuth("reader", "secret123")
+		req.Header.Set("Accept-Encoding", "gzip")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Encoding") != "" || rec.Header().Get("Vary") != "" || rec.Header().Get("Content-Length") == "" {
+			t.Fatalf("OPDS page %s should skip gzip middleware completely: code=%d ce=%q vary=%q cl=%q",
+				pagePath, rec.Code, rec.Header().Get("Content-Encoding"), rec.Header().Get("Vary"), rec.Header().Get("Content-Length"))
+		}
+	}
+
+	// Stale zip_indexes version refresh: replace Vol.02.cbz on disk with 4 pages and re-scan
+	// while zip_indexes still holds old page_count=2; single-book metadata/detail MUST refresh to pse:count="4".
+	writeTestCBZ(t, filepath.Join(libRoot, "AlphaQuest", "Vol.02.cbz"), 4)
+	run2, err := scanMgr.StartLibrary(ctx, visLib.ID, "manual")
+	if err != nil {
+		t.Fatalf("rescan StartLibrary: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		runs, _ := scanMgr.Runs(ctx, 10)
+		done := false
+		for _, r := range runs {
+			if r.ID == run2.ID && (r.Status == "success" || r.Status == "failed") {
+				if r.Status != "success" {
+					t.Fatalf("rescan failed: %s", r.Error)
+				}
+				done = true
+				break
+			}
+		}
+		if done {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	ch2MetaRefresh := doBasic(fmt.Sprintf("/api/opds/v1.2/series/%s/chapter/%s/metadata", seriesNum, ch2Num))
+	if ch2MetaRefresh.Code != http.StatusOK || !strings.Contains(ch2MetaRefresh.Body.String(), `pse:count="4"`) {
+		t.Fatalf("Suwayomi metadata must refresh stale zip_index to pse:count=\"4\": code=%d body=%s", ch2MetaRefresh.Code, ch2MetaRefresh.Body.String())
+	}
+	b2DetailRefresh := doBasic("/opds/v1.2/books/" + alphaBooks[1].ID)
+	if b2DetailRefresh.Code != http.StatusOK || !strings.Contains(b2DetailRefresh.Body.String(), `pse:count="4"`) {
+		t.Fatalf("Komga book detail must refresh stale zip_index to pse:count=\"4\": code=%d body=%s", b2DetailRefresh.Code, b2DetailRefresh.Body.String())
 	}
 }

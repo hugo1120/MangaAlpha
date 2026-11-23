@@ -113,6 +113,39 @@ func (s *Store) CollectionByRowID(ctx context.Context, rowID int64) (Collection,
 	return s.CollectionByID(ctx, id)
 }
 
+// SeriesBookOrdinals returns a stable 1-based ordinal for every book in a series
+// ordered by natural ascending reading order (number_sort ASC, name ASC, id ASC).
+// Used by OPDS Suwayomi chapter titles ("1 - Vol.01.cbz") so KOReader's chapter
+// chooser identifies previous/next chapters accurately regardless of sort order or filters.
+func (s *Store) SeriesBookOrdinals(ctx context.Context, seriesID string) (map[string]int, error) {
+	out := make(map[string]int)
+	if seriesID == "" {
+		return out, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT b.id
+FROM books b
+WHERE b.series_id=?
+ORDER BY b.number_sort ASC, b.name COLLATE NOCASE ASC, b.id ASC`, seriesID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	idx := 0
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		idx++
+		out[id] = idx
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // OnDeckBooksPage returns the next unread book for each visible series that has at
 // least one completed book and no currently in-progress book, ordered by most recent
 // completed activity. Driven from book_read_progress so large libraries stay fast.

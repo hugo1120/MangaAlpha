@@ -207,14 +207,32 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 		}
 	}
 
+	prevRefreshToken := strings.TrimSpace(cfg.RefreshToken)
 	clientID, clientSecret, _ := tm.effectiveOAuthApp(cfg)
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("client_id", clientID)
 	form.Set("client_secret", clientSecret)
-	form.Set("refresh_token", cfg.RefreshToken)
+	form.Set("refresh_token", prevRefreshToken)
 	if strings.TrimSpace(cfg.OAuthRedirectURI) != "" {
 		form.Set("redirect_uri", strings.TrimSpace(cfg.OAuthRedirectURI))
+	}
+
+	saveRefreshConditionally := func(updatedCfg trackerConfig) (bool, error) {
+		if tm.svc.store == nil {
+			return true, nil
+		}
+		return tm.svc.store.UpdateUserBangumiTrackerOAuthRefresh(ctx, prevRefreshToken, database.UserBangumiTracker{
+			UserID:           database.UserIDFromContext(ctx),
+			AccessToken:      updatedCfg.Token,
+			RefreshToken:     updatedCfg.RefreshToken,
+			ExpiresAt:        updatedCfg.ExpiresAt,
+			LastRefreshAt:    updatedCfg.LastRefreshAt,
+			LastRefreshError: updatedCfg.LastRefreshError,
+			BgmUserID:        updatedCfg.UserID,
+			BgmUsername:      updatedCfg.Username,
+			BgmNickname:      updatedCfg.Nickname,
+		})
 	}
 
 	tokResp, err := tm.postOAuthToken(ctx, form)
@@ -222,7 +240,7 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 		_, proxyRaw := tm.svc.live.httpClient()
 		cleanErr := SanitizeProxyError(err, proxyRaw)
 		cfg.LastRefreshError = cleanErr
-		_ = tm.saveUserConfig(ctx, cfg)
+		_, _ = saveRefreshConditionally(cfg)
 		diagnostics.Default().Record(diagnostics.Event{
 			Level:     diagnostics.LevelWarn,
 			Component: "bangumi",
@@ -236,7 +254,7 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 	if strings.TrimSpace(tokResp.AccessToken) == "" {
 		errMsg := "Bangumi OAuth refresh returned empty access_token"
 		cfg.LastRefreshError = errMsg
-		_ = tm.saveUserConfig(ctx, cfg)
+		_, _ = saveRefreshConditionally(cfg)
 		return TrackerStatus{}, errors.New(errMsg)
 	}
 
@@ -264,8 +282,12 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 			cfg.UserID = strconv.FormatInt(user.ID, 10)
 		}
 	}
-	if err := tm.saveUserConfig(ctx, cfg); err != nil {
+	updated, err := saveRefreshConditionally(cfg)
+	if err != nil {
 		return TrackerStatus{}, err
+	}
+	if !updated {
+		return TrackerStatus{}, ErrOAuthNotConfigured
 	}
 
 	diagnostics.Default().RecordVerbose(diagnostics.Event{

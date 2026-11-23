@@ -479,7 +479,7 @@ func (s *Server) serveSeriesThumbOrPlaceholder(w http.ResponseWriter, r *http.Re
 		return
 	}
 	w.Header().Set("Content-Type", data.MediaType)
-	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data.Bytes)))
 	_, _ = w.Write(data.Bytes)
 }

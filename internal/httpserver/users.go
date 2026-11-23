@@ -33,7 +33,7 @@ func (s *Server) adminCreateUser(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	allLibs := true
+	allLibs := false
 	if req.AllLibraries != nil {
 		allLibs = *req.AllLibraries
 	}
@@ -110,6 +110,8 @@ func (s *Server) adminResetUserPassword(w http.ResponseWriter, r *http.Request) 
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "用户不存在")
+		case errors.Is(err, database.ErrCannotModifyAdmin):
+			writeError(w, http.StatusBadRequest, "CANNOT_MODIFY_ADMIN", "主管理员密码请通过「账号与 API Key」使用当前密码修改")
 		case errors.Is(err, database.ErrWeakPassword):
 			writeError(w, http.StatusBadRequest, "WEAK_PASSWORD", err.Error())
 		default:

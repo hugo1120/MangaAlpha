@@ -242,7 +242,33 @@ func (tm *trackerManager) worker() {
 		case <-tm.svc.ctx.Done():
 			return
 		case item := <-tm.queue:
-			syncCtx, cancel := context.WithTimeout(database.WithUserID(tm.svc.ctx, item.UserID), 25*time.Second)
+			if tm.svc.store == nil {
+				continue
+			}
+			var baseCtx context.Context
+			user, err := tm.svc.store.UserByID(tm.svc.ctx, item.UserID)
+			if err == nil {
+				if !user.Enabled {
+					continue
+				}
+				scope := database.UserScope{
+					UserID:            user.ID,
+					Username:          user.Username,
+					IsAdmin:           user.IsAdmin(),
+					AllowNSFW:         user.AllowNSFW,
+					ShowNSFW:          user.EffectiveShowNSFW(),
+					AllLibraries:      user.AllLibraries || user.IsAdmin(),
+					AllowedLibraryIDs: user.AllowedLibraryIDs,
+				}
+				baseCtx = database.WithUserScope(tm.svc.ctx, scope)
+			} else {
+				hasAdmin, aErr := tm.svc.store.HasAdmin(tm.svc.ctx)
+				if aErr != nil || hasAdmin || item.UserID != database.PrimaryAdminUserID {
+					continue
+				}
+				baseCtx = database.WithUserID(tm.svc.ctx, item.UserID)
+			}
+			syncCtx, cancel := context.WithTimeout(baseCtx, 25*time.Second)
 			_, _ = tm.SyncSeries(syncCtx, item.SeriesID, false)
 			cancel()
 		}
@@ -607,9 +633,38 @@ func (tm *trackerManager) SyncSeries(ctx context.Context, seriesID string, manua
 		return database.BangumiTrackerRecord{}, nil
 	}
 
+	userID := database.UserIDFromContext(ctx)
+	if tm.svc.store != nil {
+		if user, uErr := tm.svc.store.UserByID(ctx, userID); uErr == nil {
+			if !user.Enabled {
+				return database.BangumiTrackerRecord{}, nil
+			}
+			scope := database.UserScope{
+				UserID:            user.ID,
+				Username:          user.Username,
+				IsAdmin:           user.IsAdmin(),
+				AllowNSFW:         user.AllowNSFW,
+				ShowNSFW:          user.AllowNSFW,
+				AllLibraries:      user.AllLibraries || user.IsAdmin(),
+				AllowedLibraryIDs: user.AllowedLibraryIDs,
+			}
+			ctx = database.WithUserScope(ctx, scope)
+			if _, sErr := tm.svc.store.SeriesByID(ctx, seriesID); sErr != nil {
+				return database.BangumiTrackerRecord{}, nil
+			}
+		} else if hasAdmin, aErr := tm.svc.store.HasAdmin(ctx); aErr != nil || hasAdmin || userID != database.PrimaryAdminUserID {
+			return database.BangumiTrackerRecord{}, nil
+		}
+	}
+
 	snap, ok, err := tm.svc.store.BangumiTrackerSeriesSnapshot(ctx, seriesID)
 	if err != nil || !ok {
 		return database.BangumiTrackerRecord{}, err
+	}
+	if snap.IsNSFW {
+		if scope, hasScope := database.UserScopeFromContext(ctx); hasScope && !scope.AllowNSFW {
+			return database.BangumiTrackerRecord{}, nil
+		}
 	}
 	if snap.BgmSubjectID <= 0 {
 		if manualRetry {

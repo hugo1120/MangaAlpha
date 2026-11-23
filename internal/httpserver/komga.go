@@ -671,11 +671,7 @@ func (s *Server) komgaPageImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", page.Entry.MimeType)
-	if page.Entry.Encrypted {
-		w.Header().Set("Cache-Control", "private, no-store")
-	} else {
-		w.Header().Set("Cache-Control", "private, max-age=86400")
-	}
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(len(page.Data)))
 	if _, err := w.Write(page.Data); err != nil {
 		return
@@ -721,7 +717,7 @@ func (s *Server) komgaSeriesThumbnail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", data.MediaType)
-	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data.Bytes)))
 	_, _ = w.Write(data.Bytes)
 }

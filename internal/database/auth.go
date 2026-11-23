@@ -128,35 +128,42 @@ ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.
 
 // VerifyUserPassword authenticates any enabled user (admin or sub-user) in constant time.
 func (s *Store) VerifyUserPassword(ctx context.Context, username, password string) (User, bool, error) {
+	u, _, ok, err := s.VerifyUserPasswordWithHash(ctx, username, password)
+	return u, ok, err
+}
+
+// VerifyUserPasswordWithHash authenticates any enabled user and returns the verified password hash
+// so session creation can be conditioned on the hash not changing concurrently (e.g. admin reset).
+func (s *Store) VerifyUserPasswordWithHash(ctx context.Context, username, password string) (User, string, bool, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
-		return User{}, false, nil
+		return User{}, "", false, nil
 	}
 	user, storedHash, err := s.UserByUsername(ctx, username)
 	if errors.Is(err, sql.ErrNoRows) {
 		_, _ = verifyPasswordCtx(ctx, password, dummyArgonHash)
-		return User{}, false, nil
+		return User{}, "", false, nil
 	}
 	if err != nil {
-		return User{}, false, err
+		return User{}, "", false, err
 	}
 	if !user.Enabled {
 		_, _ = verifyPasswordCtx(ctx, password, dummyArgonHash)
-		return User{}, false, nil
+		return User{}, "", false, nil
 	}
 	cacheKey := basicCacheKey(user.ID+":"+user.Username, password, storedHash)
 	if s.checkBasicAuthCache(cacheKey) {
-		return user, true, nil
+		return user, storedHash, true, nil
 	}
 	ok, err := verifyPasswordCtx(ctx, password, storedHash)
 	if err != nil {
-		return User{}, false, err
+		return User{}, "", false, err
 	}
 	if !ok {
-		return User{}, false, nil
+		return User{}, "", false, nil
 	}
 	s.putBasicAuthCache(cacheKey)
-	return user, true, nil
+	return user, storedHash, true, nil
 }
 
 func (s *Store) VerifyAdminPassword(ctx context.Context, username, password string) (AdminUser, bool, error) {
@@ -232,10 +239,14 @@ func (s *Store) UpdateUserCredentials(
 			return User{}, ErrDuplicateUsername
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `
-UPDATE users SET username=?,password_hash=?,updated_at=? WHERE id=?`,
-		targetUsername, targetHash, now, userID); err != nil {
+	resUpd, err := tx.ExecContext(ctx, `
+UPDATE users SET username=?,password_hash=?,updated_at=? WHERE id=? AND password_hash=? AND enabled=1`,
+		targetUsername, targetHash, now, userID, storedHash)
+	if err != nil {
 		return User{}, err
+	}
+	if n, _ := resUpd.RowsAffected(); n == 0 {
+		return User{}, ErrInvalidCredentials
 	}
 	if cur.IsAdmin() {
 		_, _ = tx.ExecContext(ctx, `
@@ -282,6 +293,15 @@ func (s *Store) CreateSession(
 func (s *Store) CreateSessionForUser(
 	ctx context.Context,
 	userID, username string,
+	remember bool,
+	userAgent string,
+) (string, AuthSession, error) {
+	return s.CreateSessionForUserIfPasswordHash(ctx, userID, username, "", remember, userAgent)
+}
+
+func (s *Store) CreateSessionForUserIfPasswordHash(
+	ctx context.Context,
+	userID, username, expectedPasswordHash string,
 	_ bool,
 	userAgent string,
 ) (string, AuthSession, error) {
@@ -299,12 +319,28 @@ func (s *Store) CreateSessionForUser(
 	if len(ua) > 256 {
 		ua = ua[:256]
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if expectedPasswordHash != "" {
+		res, err := s.db.ExecContext(ctx, `
+INSERT INTO auth_sessions(token_hash,user_id,username,remember,user_agent,created_at,last_seen_at,expires_at)
+SELECT ?,?,?,1,?,?,?,?
+WHERE EXISTS (SELECT 1 FROM users WHERE id=? AND enabled=1 AND password_hash=?)`,
+			tokenHash, userID, username, ua, createdText, createdText, expiresText,
+			userID, expectedPasswordHash,
+		)
+		if err != nil {
+			return "", AuthSession{}, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return "", AuthSession{}, ErrInvalidCredentials
+		}
+	} else {
+		if _, err := s.db.ExecContext(ctx, `
 INSERT INTO auth_sessions(token_hash,user_id,username,remember,user_agent,created_at,last_seen_at,expires_at)
 VALUES(?,?,?,1,?,?,?,?)`,
-		tokenHash, userID, username, ua, createdText, createdText, expiresText,
-	); err != nil {
-		return "", AuthSession{}, err
+			tokenHash, userID, username, ua, createdText, createdText, expiresText,
+		); err != nil {
+			return "", AuthSession{}, err
+		}
 	}
 	return rawToken, AuthSession{
 		ID:         tokenHash[:16],
@@ -451,6 +487,10 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string) (string, APIKey, 
 }
 
 func (s *Store) CreateAPIKeyForUser(ctx context.Context, userID, name string) (string, APIKey, error) {
+	return s.CreateAPIKeyForUserIfSession(ctx, userID, "", name)
+}
+
+func (s *Store) CreateAPIKeyForUserIfSession(ctx context.Context, userID, rawSessionToken, name string) (string, APIKey, error) {
 	userID = normalizeUserID(userID)
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 80 {
@@ -468,10 +508,28 @@ func (s *Store) CreateAPIKeyForUser(ctx context.Context, userID, name string) (s
 	prefix := rawKey[:12]
 	keyHash := sha256Hex(rawKey)
 	now := nowText()
-	if _, err := s.db.ExecContext(ctx, `
+	if strings.TrimSpace(rawSessionToken) != "" {
+		sessHash := sha256Hex(strings.TrimSpace(rawSessionToken))
+		res, err := s.db.ExecContext(ctx, `
+INSERT INTO auth_api_keys(id,user_id,name,key_prefix,key_hash,created_at)
+SELECT ?,?,?,?,?,?
+WHERE EXISTS (SELECT 1 FROM users WHERE id=? AND enabled=1)
+  AND EXISTS (SELECT 1 FROM auth_sessions WHERE user_id=? AND token_hash=? AND expires_at>?)`,
+			id, userID, name, prefix, keyHash, now,
+			userID, userID, sessHash, now,
+		)
+		if err != nil {
+			return "", APIKey{}, err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return "", APIKey{}, ErrInvalidCredentials
+		}
+	} else {
+		if _, err := s.db.ExecContext(ctx, `
 INSERT INTO auth_api_keys(id,user_id,name,key_prefix,key_hash,created_at)
 VALUES(?,?,?,?,?,?)`, id, userID, name, prefix, keyHash, now); err != nil {
-		return "", APIKey{}, err
+			return "", APIKey{}, err
+		}
 	}
 	return rawKey, APIKey{
 		ID:        id,

@@ -396,9 +396,19 @@
   });
 
   async function api(url, opts = {}) {
+    const method = (opts.method || 'GET').toUpperCase();
     const headers = Object.assign({ 'X-FK115-UI': '1' }, opts.headers || {});
+    if (
+      state.auth && state.auth.authenticated && state.auth.userId &&
+      method !== 'GET' && method !== 'HEAD' &&
+      !url.startsWith('/admin/api/auth/login') &&
+      !url.startsWith('/admin/api/auth/logout') &&
+      !url.startsWith('/admin/api/auth/setup')
+    ) {
+      headers['X-FK115-User-Id'] = state.auth.userId;
+    }
     const fetchOpts = {
-      method: opts.method || 'GET',
+      method,
       credentials: 'same-origin',
       headers,
     };
@@ -407,6 +417,14 @@
       fetchOpts.body = JSON.stringify(opts.body);
     }
     const resp = await fetch(url, fetchOpts);
+    if (resp.status === 409) {
+      let errData = {};
+      try { errData = await resp.clone().json(); } catch (_) {}
+      if (errData && errData.error === 'USER_CONTEXT_MISMATCH') {
+        route();
+        throw new Error('登录账号已切换，页面已刷新，请重试');
+      }
+    }
     if (resp.status === 401 && !opts.allow401) {
       let errData = {};
       try { errData = await resp.json(); } catch (_) {}
@@ -1771,6 +1789,8 @@
   // --- Book Detail View (/book/:id & /books/:id) ---
 
   async function renderBookDetail(bookID) {
+    const seq = routeSeq;
+    const uid = state.auth.userId || '';
     renderShell('libraries', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在读取单册详情…</p></div>`);
     try {
       const [detail, jobs] = await Promise.all([
@@ -1779,8 +1799,12 @@
           ? api(`/admin/api/maintenance-jobs?targetType=book&targetId=${encodeURIComponent(bookID)}&limit=6`).catch(() => [])
           : Promise.resolve([]),
       ]);
+      if (seq !== routeSeq || (state.auth.userId || '') !== uid) return;
       paintBookDetail(bookID, detail, jobs || []);
-    } catch (err) { toast(err.message, 'error'); }
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
   }
 
   function paintBookDetail(bookID, detail, jobs) {
@@ -4408,11 +4432,15 @@
       </div>
     `;
 
+    if (!body || !body.isConnected) return;
     const userByID = new Map(userList.map((u) => [u.id, u]));
 
-    document.getElementById('btn-create-user').onclick = () => {
-      openUserFormModal(null, topLibs, () => renderAdminUsers(body));
-    };
+    const createBtn = body.querySelector('#btn-create-user');
+    if (createBtn) {
+      createBtn.onclick = () => {
+        openUserFormModal(null, topLibs, () => renderAdminUsers(body));
+      };
+    }
 
     body.querySelectorAll('button[data-usr-edit]').forEach((btn) => {
       btn.onclick = () => {
@@ -4580,7 +4608,12 @@
           e.preventDefault();
           const username = document.getElementById('usr-f-name').value.trim();
           const allLibraries = document.querySelector('input[name="usr-lib-mode"]:checked')?.value !== 'custom';
-          const allowedLibraryIds = allLibraries ? [] : Array.from(document.querySelectorAll('input[name="usr-lib-id"]:checked')).map((el) => el.value);
+          const visibleLibSet = new Set(topLibs.map((l) => l.id));
+          const preservedHiddenGrants = isEdit
+            ? Array.from(curAllowedSet).filter((lid) => !visibleLibSet.has(lid))
+            : [];
+          const pickedVisible = Array.from(document.querySelectorAll('input[name="usr-lib-id"]:checked')).map((el) => el.value);
+          const allowedLibraryIds = allLibraries ? [] : Array.from(new Set([...pickedVisible, ...preservedHiddenGrants]));
           const allowNsfw = Boolean(document.getElementById('usr-f-nsfw').checked);
           const btn = document.getElementById('usr-f-submit');
           btn.disabled = true;
@@ -4734,6 +4767,7 @@
         const updated = await api('/admin/api/auth/credentials', {
           method: 'PUT',
           body: { currentPassword, newUsername, newPassword },
+          allow401: true,
         });
         if (updated && updated.username) state.auth.username = updated.username;
         toast('管理员凭据已更新');
@@ -4744,10 +4778,14 @@
     document.getElementById('ak-create').onclick = async () => {
       const name = document.getElementById('ak-name').value.trim();
       if (!name) { toast('请填写 API Key 备注名称', 'error'); return; }
+      const startSeq = routeSeq;
+      const startUser = state.auth.userId || '';
       try {
         const res = await api('/admin/api/auth/api-keys', { method: 'POST', body: { name } });
+        if (startSeq !== routeSeq || (state.auth.userId || '') !== startUser || !body.isConnected) return;
         await renderAdminSecurity(body);
-        const rev = document.getElementById('ak-revealed');
+        if (startSeq !== routeSeq || (state.auth.userId || '') !== startUser || !body.isConnected) return;
+        const rev = body.querySelector('#ak-revealed');
         if (rev) {
           rev.style.display = '';
           rev.innerHTML = `
@@ -6092,15 +6130,22 @@
       const nsfwToggle = document.getElementById('acc-show-nsfw');
       if (nsfwToggle) {
         nsfwToggle.onchange = async (e) => {
-          const showNsfw = e.target.checked;
+          const want = e.target.checked;
+          const startUser = state.auth.userId || '';
+          nsfwToggle.disabled = true;
           try {
-            await api('/admin/api/me/preferences', { method: 'PUT', body: { showNsfw } });
-            state.auth.showNsfw = showNsfw;
+            const res = await api('/admin/api/me/preferences', { method: 'PUT', body: { showNsfw: want } });
+            if ((state.auth.userId || '') !== startUser) return;
+            const persisted = (res && typeof res.showNsfw === 'boolean') ? res.showNsfw : want;
+            nsfwToggle.checked = persisted;
+            state.auth.showNsfw = persisted;
             state.taxonomies.loaded = false;
-            toast(showNsfw ? '已开启显示 NSFW 作品' : '已隐藏 NSFW 作品');
+            toast(persisted ? '已开启显示 NSFW 作品' : '已隐藏 NSFW 作品');
           } catch (err) {
-            e.target.checked = !showNsfw;
+            nsfwToggle.checked = !want;
             toast(err.message, 'error');
+          } finally {
+            nsfwToggle.disabled = false;
           }
         };
       }
@@ -6116,6 +6161,7 @@
           await api('/admin/api/auth/credentials', {
             method: 'PUT',
             body: { currentPassword, newPassword },
+            allow401: true,
           });
           toast('登录密码已更新，其他设备会话已自动下线');
           renderAccountPage();
@@ -6153,9 +6199,13 @@
       document.getElementById('acc-ak-create').onclick = async () => {
         const name = document.getElementById('acc-ak-name').value.trim();
         if (!name) { toast('请填写 API Key 备注名称', 'error'); return; }
+        const startSeq = routeSeq;
+        const startUser = state.auth.userId || '';
         try {
           const res = await api('/admin/api/auth/api-keys', { method: 'POST', body: { name } });
+          if (startSeq !== routeSeq || (state.auth.userId || '') !== startUser) return;
           await renderAccountPage();
+          if (startSeq !== routeSeq || (state.auth.userId || '') !== startUser) return;
           const rev = document.getElementById('acc-ak-revealed');
           if (rev) {
             rev.style.display = '';

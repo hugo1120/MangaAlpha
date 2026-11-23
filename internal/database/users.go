@@ -386,10 +386,29 @@ type UpdateUserInput struct {
 
 func (s *Store) UpdateUser(ctx context.Context, userID string, in UpdateUserInput) (User, error) {
 	userID = strings.TrimSpace(userID)
-	cur, err := s.UserByID(ctx, userID)
+	now := nowText()
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, err
 	}
+	defer tx.Rollback()
+
+	var cur User
+	var enabledInt, allLibsInt, allowNSFWInt, showNSFWInt int
+	err = tx.QueryRowContext(ctx, `
+SELECT id,username,role,enabled,all_libraries,allow_nsfw,show_nsfw,created_at,updated_at
+FROM users WHERE id=?`, userID).Scan(
+		&cur.ID, &cur.Username, &cur.Role, &enabledInt, &allLibsInt, &allowNSFWInt, &showNSFWInt,
+		&cur.CreatedAt, &cur.UpdatedAt,
+	)
+	if err != nil {
+		return User{}, err
+	}
+	cur.Enabled = enabledInt != 0
+	cur.AllLibraries = allLibsInt != 0
+	cur.AllowNSFW = allowNSFWInt != 0
+	cur.ShowNSFW = showNSFWInt != 0
+
 	if cur.IsAdmin() {
 		if in.Enabled != nil && !*in.Enabled {
 			return User{}, ErrCannotModifyAdmin
@@ -421,13 +440,6 @@ func (s *Store) UpdateUser(ctx context.Context, userID string, in UpdateUserInpu
 	if !nextAllowNSFW {
 		nextShowNSFW = false
 	}
-
-	now := nowText()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return User{}, err
-	}
-	defer tx.Rollback()
 
 	if !strings.EqualFold(nextUsername, cur.Username) {
 		var dup int
@@ -484,6 +496,9 @@ func (s *Store) ResetUserPassword(ctx context.Context, userID, newPassword strin
 	if err != nil {
 		return err
 	}
+	if cur.IsAdmin() {
+		return ErrCannotModifyAdmin
+	}
 	hash, err := hashPassword(newPassword)
 	if err != nil {
 		return err
@@ -494,13 +509,17 @@ func (s *Store) ResetUserPassword(ctx context.Context, userID, newPassword strin
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,updated_at=? WHERE id=?`, hash, now, userID); err != nil {
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,updated_at=? WHERE id=? AND role<>?`, hash, now, userID, RoleAdmin)
+	if err != nil {
 		return err
 	}
-	if cur.IsAdmin() {
-		_, _ = tx.ExecContext(ctx, `UPDATE auth_admin SET password_hash=?,updated_at=? WHERE id=1`, hash, now)
+	if n, _ := res.RowsAffected(); n == 0 {
+		return sql.ErrNoRows
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id=?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_api_keys WHERE user_id=?`, userID); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -658,8 +677,21 @@ func (s *Store) SaveUserBangumiTrackerConfig(ctx context.Context, cfg UserBangum
 	if strings.TrimSpace(cfg.NSFWMode) == "" {
 		cfg.NSFWMode = "skip"
 	}
+	var enabledInt int
+	err := s.db.QueryRowContext(ctx, `SELECT enabled FROM users WHERE id=?`, cfg.UserID).Scan(&enabledInt)
+	if errors.Is(err, sql.ErrNoRows) {
+		var userCount int
+		_ = s.db.QueryRowContext(ctx, `SELECT count(*) FROM users`).Scan(&userCount)
+		if userCount > 0 || cfg.UserID != PrimaryAdminUserID {
+			return sql.ErrNoRows
+		}
+	} else if err != nil {
+		return err
+	} else if enabledInt == 0 {
+		return sql.ErrNoRows
+	}
 	now := nowText()
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO user_bangumi_trackers(
  user_id,enabled,auth_mode,access_token,refresh_token,expires_at,last_refresh_at,last_refresh_error,
  oauth_redirect_uri,bgm_user_id,bgm_username,bgm_nickname,nsfw_mode,private_default,updated_at
@@ -690,12 +722,42 @@ ON CONFLICT(user_id) DO UPDATE SET
 	return err
 }
 
+// UpdateUserBangumiTrackerOAuthRefresh conditionally persists refreshed OAuth tokens only if the
+// owner still exists, is enabled, and still holds the exact refresh token that was exchanged.
+func (s *Store) UpdateUserBangumiTrackerOAuthRefresh(ctx context.Context, prevRefreshToken string, cfg UserBangumiTracker) (bool, error) {
+	cfg.UserID = normalizeUserID(cfg.UserID)
+	now := nowText()
+	res, err := s.db.ExecContext(ctx, `
+UPDATE user_bangumi_trackers
+SET access_token=?, refresh_token=?, expires_at=?, last_refresh_at=?, last_refresh_error=?,
+    bgm_user_id=?, bgm_username=?, bgm_nickname=?, updated_at=?
+WHERE user_id=? AND auth_mode='oauth' AND refresh_token=?
+  AND (
+    EXISTS (SELECT 1 FROM users u WHERE u.id=user_bangumi_trackers.user_id AND u.enabled=1)
+    OR (user_bangumi_trackers.user_id='admin' AND NOT EXISTS (SELECT 1 FROM users))
+  )`,
+		strings.TrimSpace(cfg.AccessToken), strings.TrimSpace(cfg.RefreshToken),
+		strings.TrimSpace(cfg.ExpiresAt), strings.TrimSpace(cfg.LastRefreshAt),
+		strings.TrimSpace(cfg.LastRefreshError), strings.TrimSpace(cfg.BgmUserID),
+		strings.TrimSpace(cfg.BgmUsername), strings.TrimSpace(cfg.BgmNickname),
+		now, cfg.UserID, strings.TrimSpace(prevRefreshToken),
+	)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 func (s *Store) ListOAuthBangumiTrackerUserIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT t.user_id
 FROM user_bangumi_trackers t
-LEFT JOIN users u ON u.id=t.user_id
-WHERE t.auth_mode='oauth' AND t.refresh_token<>'' AND coalesce(u.enabled, 1)=1`)
+WHERE t.auth_mode='oauth' AND t.refresh_token<>''
+  AND (
+    EXISTS (SELECT 1 FROM users u WHERE u.id=t.user_id AND u.enabled=1)
+    OR (t.user_id='admin' AND NOT EXISTS (SELECT 1 FROM users))
+  )`)
 	if err != nil {
 		return nil, err
 	}

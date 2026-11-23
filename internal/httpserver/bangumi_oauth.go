@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -25,10 +26,20 @@ const (
 
 type bangumiOAuthPending struct {
 	UserID      string
+	SessionHash string
 	IsAdmin     bool
 	CallbackURL string
 	Origin      string
 	ExpiresAt   time.Time
+}
+
+func oauthSessionHash(rawSession string) string {
+	rawSession = strings.TrimSpace(rawSession)
+	if rawSession == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(rawSession))
+	return hex.EncodeToString(sum[:])
 }
 
 type bangumiOAuthStateStore struct {
@@ -42,7 +53,7 @@ func newBangumiOAuthStateStore() *bangumiOAuthStateStore {
 	}
 }
 
-func (st *bangumiOAuthStateStore) Create(userID string, isAdmin bool, origin, callbackURL string) (string, error) {
+func (st *bangumiOAuthStateStore) Create(userID, sessionHash string, isAdmin bool, origin, callbackURL string) (string, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
@@ -76,6 +87,7 @@ func (st *bangumiOAuthStateStore) Create(userID string, isAdmin bool, origin, ca
 	}
 	st.items[state] = bangumiOAuthPending{
 		UserID:      userID,
+		SessionHash: sessionHash,
 		IsAdmin:     isAdmin,
 		CallbackURL: callbackURL,
 		Origin:      origin,
@@ -84,23 +96,38 @@ func (st *bangumiOAuthStateStore) Create(userID string, isAdmin bool, origin, ca
 	return state, nil
 }
 
-func (st *bangumiOAuthStateStore) Consume(state string) (bangumiOAuthPending, bool) {
+type oauthConsumeResult int
+
+const (
+	oauthConsumeOK oauthConsumeResult = iota
+	oauthConsumeNotFound
+	oauthConsumeMismatch
+)
+
+func (st *bangumiOAuthStateStore) ConsumeFor(state, userID, sessionHash string, requireSessionMatch bool) (bangumiOAuthPending, oauthConsumeResult) {
 	state = strings.TrimSpace(state)
 	if state == "" {
-		return bangumiOAuthPending{}, false
+		return bangumiOAuthPending{}, oauthConsumeNotFound
 	}
 	now := time.Now()
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	item, ok := st.items[state]
 	if !ok {
-		return bangumiOAuthPending{}, false
+		return bangumiOAuthPending{}, oauthConsumeNotFound
+	}
+	if now.After(item.ExpiresAt) {
+		delete(st.items, state)
+		return bangumiOAuthPending{}, oauthConsumeNotFound
+	}
+	if item.UserID != "" && item.UserID != userID {
+		return bangumiOAuthPending{}, oauthConsumeMismatch
+	}
+	if requireSessionMatch && item.SessionHash != "" && item.SessionHash != sessionHash {
+		return bangumiOAuthPending{}, oauthConsumeMismatch
 	}
 	delete(st.items, state)
-	if now.After(item.ExpiresAt) {
-		return bangumiOAuthPending{}, false
-	}
-	return item, true
+	return item, oauthConsumeOK
 }
 
 func isBangumiOAuthCallbackPath(p, method string) bool {
@@ -119,7 +146,7 @@ func (s *Server) startBangumiTrackerOAuth(w http.ResponseWriter, r *http.Request
 	}
 	principal, _ := s.currentPrincipal(r)
 	callbackURL := origin + bangumiOAuthCallbackPath
-	state, err := s.bgmOAuthStates.Create(principal.UserID, principal.IsAdmin, origin, callbackURL)
+	state, err := s.bgmOAuthStates.Create(principal.UserID, oauthSessionHash(principal.RawSession), principal.IsAdmin, origin, callbackURL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "OAUTH_STATE_FAILED", "Failed to initialize OAuth authorization state.")
 		return
@@ -142,11 +169,20 @@ func (s *Server) bangumiTrackerOAuthCallback(w http.ResponseWriter, r *http.Requ
 		writeBangumiOAuthCallbackPage(w, http.StatusServiceUnavailable, "", true, false, "Bangumi 服务未初始化。")
 		return
 	}
+	principal, authed, _, _ := s.authenticateRequest(r)
+	if !authed {
+		writeBangumiOAuthCallbackPage(w, http.StatusForbidden, "", false, false, "登录会话无效或已过期，请先登录当前账号后重新发起「Bangumi OAuth 一键授权」。")
+		return
+	}
 	q := r.URL.Query()
 	state := strings.TrimSpace(q.Get("state"))
-	pending, ok := s.bgmOAuthStates.Consume(state)
-	if !ok {
-		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, "", true, false, "授权状态已过期或无效，请回到页面重新点击「Bangumi OAuth 一键授权」。")
+	pending, res := s.bgmOAuthStates.ConsumeFor(state, principal.UserID, oauthSessionHash(principal.RawSession), true)
+	if res == oauthConsumeMismatch {
+		writeBangumiOAuthCallbackPage(w, http.StatusForbidden, "", principal.IsAdmin, false, "该授权回调与当前登录会话不匹配，已拒绝绑定。请使用当前账号重新发起授权。")
+		return
+	}
+	if res != oauthConsumeOK {
+		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, "", principal.IsAdmin, false, "授权状态已过期或无效，请回到页面重新点击「Bangumi OAuth 一键授权」。")
 		return
 	}
 	if errCode := strings.TrimSpace(q.Get("error")); errCode != "" {
@@ -162,7 +198,7 @@ func (s *Server) bangumiTrackerOAuthCallback(w http.ResponseWriter, r *http.Requ
 		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, pending.Origin, pending.IsAdmin, false, "回调缺少授权码（code），请重新发起授权。")
 		return
 	}
-	userCtx := database.WithUserID(r.Context(), pending.UserID)
+	userCtx := withPrincipalContext(r.Context(), principal)
 	st, err := s.bangumi.ExchangeTrackerOAuthCode(userCtx, code, pending.CallbackURL)
 	if err != nil {
 		writeBangumiOAuthCallbackPage(w, http.StatusBadGateway, pending.Origin, pending.IsAdmin, false, err.Error())
@@ -213,15 +249,20 @@ func (s *Server) exchangeBangumiTrackerOAuthCode(w http.ResponseWriter, r *http.
 		}
 	}
 	principal, _ := s.currentPrincipal(r)
-	callbackURL := ""
-	if pending, ok := s.bgmOAuthStates.Consume(state); ok {
-		if pending.UserID != "" && principal.UserID != "" && pending.UserID != principal.UserID {
-			writeError(w, http.StatusForbidden, "OAUTH_STATE_MISMATCH", "该授权状态属于其他账号，请使用当前账号重新发起授权。")
-			return
+	pending, res := s.bgmOAuthStates.ConsumeFor(state, principal.UserID, oauthSessionHash(principal.RawSession), false)
+	if res == oauthConsumeMismatch {
+		writeError(w, http.StatusForbidden, "OAUTH_STATE_MISMATCH", "该授权状态属于其他账号，请使用当前账号重新发起授权。")
+		return
+	}
+	if res != oauthConsumeOK {
+		writeError(w, http.StatusBadRequest, "INVALID_OAUTH_STATE", "授权状态缺失或已过期，请先点击「Bangumi OAuth 一键授权」生成新的授权链接后再提交。")
+		return
+	}
+	callbackURL := pending.CallbackURL
+	if callbackURL == "" {
+		if origin := s.requestOrigin(r); origin != "" {
+			callbackURL = origin + bangumiOAuthCallbackPath
 		}
-		callbackURL = pending.CallbackURL
-	} else if origin := s.requestOrigin(r); origin != "" {
-		callbackURL = origin + bangumiOAuthCallbackPath
 	}
 	st, err := s.bangumi.ExchangeTrackerOAuthCode(r.Context(), code, callbackURL)
 	if err != nil {

@@ -380,6 +380,17 @@ func (s *Store) ApplyScrapedMetadata(
 	}
 	if !current.NSFWLock {
 		current.IsNSFW = incoming.IsNSFW
+		if !current.IsNSFW {
+			var hasNSFWSource int
+			if qErr := s.db.QueryRowContext(ctx, `
+SELECT 1
+FROM union_series_sources uss
+JOIN series_metadata ssm ON ssm.series_id=uss.source_series_id
+WHERE uss.union_series_id=? AND ssm.is_nsfw=1
+LIMIT 1`, series.ID).Scan(&hasNSFWSource); qErr == nil && hasNSFWSource == 1 {
+				current.IsNSFW = true
+			}
+		}
 	}
 	if err := s.saveSeriesMetadata(ctx, current, now); err != nil {
 		return SeriesMetadata{}, err

@@ -49,12 +49,22 @@ func (h *sseHub) Publish(eventType string, payload any) {
 }
 
 func (h *sseHub) PublishForUser(userID, eventType string, payload any) {
-	if h == nil || eventType == "" {
-		return
-	}
+	h.PublishMatching(eventType, payload, func(uid string) bool {
+		return uid == normalizeSSEUserID(userID)
+	})
+}
+
+func normalizeSSEUserID(userID string) string {
 	userID = strings.TrimSpace(userID)
 	if userID == "" {
-		userID = database.PrimaryAdminUserID
+		return database.PrimaryAdminUserID
+	}
+	return userID
+}
+
+func (h *sseHub) PublishMatching(eventType string, payload any, allow func(userID string) bool) {
+	if h == nil || eventType == "" {
+		return
 	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -62,10 +72,19 @@ func (h *sseHub) PublishForUser(userID, eventType string, payload any) {
 	}
 	evt := sseEvent{Event: eventType, Data: string(raw)}
 	h.mu.Lock()
+	var targets []chan sseEvent
+	checked := make(map[string]bool)
 	for ch, uid := range h.clients {
-		if uid != userID {
-			continue
+		ok, seen := checked[uid]
+		if !seen {
+			ok = allow == nil || allow(uid)
+			checked[uid] = ok
 		}
+		if ok {
+			targets = append(targets, ch)
+		}
+	}
+	for _, ch := range targets {
 		select {
 		case ch <- evt:
 		default:

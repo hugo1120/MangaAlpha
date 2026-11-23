@@ -113,9 +113,19 @@ func TestV27BangumiOAuthFlowAndSecretRedaction(t *testing.T) {
 		t.Fatalf("unexpected oauth start response: %+v", startBody)
 	}
 
-	// 2. Callback works WITHOUT session cookie (state-authenticated, one-time)
+	// 2. Callback requires matching initiating session (unauthenticated callback MUST be rejected without consuming state)
 	cbURL := ts.URL + bangumiOAuthCallbackPath + "?code=auth_code_ok&state=" + url.QueryEscape(startBody.State)
-	cbResp, err := http.Get(cbURL)
+	unauthCbResp, err := http.Get(cbURL)
+	if err != nil {
+		t.Fatalf("unauth oauth callback: %v", err)
+	}
+	unauthCbResp.Body.Close()
+	if unauthCbResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 on unauthenticated oauth callback, got %d", unauthCbResp.StatusCode)
+	}
+	cbReq, _ := http.NewRequest(http.MethodGet, cbURL, nil)
+	cbReq.Header.Set("Cookie", cookie)
+	cbResp, err := http.DefaultClient.Do(cbReq)
 	if err != nil {
 		t.Fatalf("oauth callback: %v", err)
 	}
@@ -126,7 +136,9 @@ func TestV27BangumiOAuthFlowAndSecretRedaction(t *testing.T) {
 	}
 
 	// 3. Replay of same state MUST be rejected (one-time consume)
-	replayResp, err := http.Get(cbURL)
+	replayReq, _ := http.NewRequest(http.MethodGet, cbURL, nil)
+	replayReq.Header.Set("Cookie", cookie)
+	replayResp, err := http.DefaultClient.Do(replayReq)
 	if err != nil {
 		t.Fatalf("replay callback: %v", err)
 	}
@@ -175,9 +187,34 @@ func TestV27BangumiOAuthFlowAndSecretRedaction(t *testing.T) {
 		}
 	}
 
-	// 6. Manual fallback exchange endpoint accepts pasted callback URL
+	// 6. Manual fallback exchange rejects unknown state and accepts a valid initiated state
+	badExReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/api/bangumi/tracker/oauth/exchange",
+		strings.NewReader(`{"codeOrUrl":"http://example.local/admin/api/bangumi/tracker/oauth/callback?code=manual_code_1&state=bogus"}`))
+	badExReq.Header.Set("Cookie", cookie)
+	badExReq.Header.Set("Content-Type", "application/json")
+	badExResp, err := http.DefaultClient.Do(badExReq)
+	if err != nil {
+		t.Fatalf("bad manual exchange: %v", err)
+	}
+	badExResp.Body.Close()
+	if badExResp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 on manual oauth exchange with unknown state, got %d", badExResp.StatusCode)
+	}
+
+	startReq2, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/api/bangumi/tracker/oauth/start", nil)
+	startReq2.Header.Set("Cookie", cookie)
+	startResp2, err := http.DefaultClient.Do(startReq2)
+	if err != nil {
+		t.Fatalf("oauth start 2: %v", err)
+	}
+	var startBody2 struct {
+		State string `json:"state"`
+	}
+	_ = json.NewDecoder(startResp2.Body).Decode(&startBody2)
+	startResp2.Body.Close()
+
 	exReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/admin/api/bangumi/tracker/oauth/exchange",
-		strings.NewReader(`{"codeOrUrl":"http://example.local/admin/api/bangumi/tracker/oauth/callback?code=manual_code_1&state=any"}`))
+		strings.NewReader(`{"codeOrUrl":"http://example.local/admin/api/bangumi/tracker/oauth/callback?code=manual_code_1&state=`+startBody2.State+`"}`))
 	exReq.Header.Set("Cookie", cookie)
 	exReq.Header.Set("Content-Type", "application/json")
 	exResp, err := http.DefaultClient.Do(exReq)

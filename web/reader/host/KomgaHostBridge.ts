@@ -230,23 +230,26 @@ class KomgaBridgeImpl {
     }
 
     private seriesMapKey(): string {
-        return `${LEGACY_SERIES_MAP_KEY}:u:${this.currentUserId || 'admin'}`;
+        return this.currentUserId ? `${LEGACY_SERIES_MAP_KEY}:u:${this.currentUserId}` : '';
     }
 
     private globalMetaKey(): string {
-        return `${LEGACY_GLOBAL_META_KEY}:u:${this.currentUserId || 'admin'}`;
+        return this.currentUserId ? `${LEGACY_GLOBAL_META_KEY}:u:${this.currentUserId}` : '';
     }
 
     private seriesMetaKey(seriesId: string): string {
-        return `${LEGACY_SERIES_META_PREFIX}u:${this.currentUserId || 'admin'}:${seriesId}`;
+        return this.currentUserId ? `${LEGACY_SERIES_META_PREFIX}u:${this.currentUserId}:${seriesId}` : '';
     }
 
     private isPrimaryAdmin(): boolean {
-        return (this.currentUserId || 'admin') === 'admin';
+        return this.currentUserId === 'admin';
     }
 
+    private identityMismatch = false;
+
     private loadSeriesMapForCurrentUser(): void {
-        const uid = this.currentUserId || 'admin';
+        const uid = this.currentUserId;
+        if (!uid) return;
         if (this.seriesMapLoadedForUser === uid) return;
         this.seriesMapLoadedForUser = uid;
         this.seriesToMangaId.clear();
@@ -276,25 +279,61 @@ class KomgaBridgeImpl {
         if (!this.userContextPromise) {
             this.userContextPromise = komgaFetch<{ id?: string }>('/api/v2/users/me')
                 .then((me) => {
-                    const uid = (me?.id && String(me.id).trim()) || 'admin';
+                    const uid = me?.id ? String(me.id).trim() : '';
+                    if (!uid) {
+                        this.userContextPromise = null;
+                        return '';
+                    }
                     this.currentUserId = uid;
                     this.loadSeriesMapForCurrentUser();
                     return uid;
                 })
                 .catch(() => {
-                    this.currentUserId = 'admin';
-                    this.loadSeriesMapForCurrentUser();
-                    return 'admin';
+                    // Do NOT fall back to 'admin' on transient lookup failure; allow retry.
+                    this.userContextPromise = null;
+                    return '';
                 });
         }
         return this.userContextPromise;
     }
 
+    private cancelAllPendingProgress(): void {
+        this.pendingProgressTimers.forEach((t) => clearTimeout(t));
+        this.pendingProgressTimers.clear();
+        this.pendingProgressPayloads.clear();
+    }
+
+    private async revalidateUserContext(): Promise<void> {
+        if (!this.currentUserId || this.identityMismatch) return;
+        try {
+            const me = await komgaFetch<{ id?: string }>('/api/v2/users/me');
+            const uid = me?.id ? String(me.id).trim() : '';
+            if (uid && uid !== this.currentUserId) {
+                this.identityMismatch = true;
+                this.cancelAllPendingProgress();
+                window.location.reload();
+            }
+        } catch {
+            // Session expired or transient network error; do not flush stale progress
+        }
+    }
+
+    private userBoundHeaders(): Record<string, string> {
+        return this.currentUserId ? { 'X-FK115-User-Id': this.currentUserId } : {};
+    }
+
     constructor() {
         window.addEventListener('pagehide', () => this.flushAllProgress());
+        window.addEventListener('pageshow', (e) => {
+            if (e.persisted) {
+                void this.revalidateUserContext();
+            }
+        });
         document.addEventListener('visibilitychange', () => {
             if (document.hidden) {
                 this.flushAllProgress();
+            } else {
+                void this.revalidateUserContext();
             }
         });
     }
@@ -306,11 +345,14 @@ class KomgaBridgeImpl {
         const assigned = this.nextMangaId++;
         this.seriesToMangaId.set(seriesId, assigned);
         this.mangaIdToSeries.set(assigned, seriesId);
-        const obj: Record<string, number> = {};
-        this.seriesToMangaId.forEach((v, k) => {
-            obj[k] = v;
-        });
-        writeJSONStorage(this.seriesMapKey(), obj);
+        const mapKey = this.seriesMapKey();
+        if (mapKey) {
+            const obj: Record<string, number> = {};
+            this.seriesToMangaId.forEach((v, k) => {
+                obj[k] = v;
+            });
+            writeJSONStorage(mapKey, obj);
+        }
         return assigned;
     }
 
@@ -323,15 +365,16 @@ class KomgaBridgeImpl {
     }
 
     private async ensureClientSettingsSynced(): Promise<void> {
-        await this.ensureUserContext();
+        const uid = await this.ensureUserContext();
+        if (!uid) return;
         if (this.clientSettingsLoaded) return;
         this.clientSettingsLoaded = true;
         try {
             const remote = await komgaFetch<Record<string, { value?: string }>>('/api/v1/client-settings/user/list');
             const globalEntry = remote?.['webui.reader.globalMeta']?.value;
-            if (globalEntry) {
+            const key = this.globalMetaKey();
+            if (globalEntry && key) {
                 const parsed = JSON.parse(globalEntry) as Record<string, string>;
-                const key = this.globalMetaKey();
                 const local = readJSONStorageWithLegacy<Record<string, string>>(
                     key,
                     this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
@@ -345,10 +388,12 @@ class KomgaBridgeImpl {
     }
 
     private syncClientSetting(key: string, metaMap: Record<string, string>): void {
+        if (!this.currentUserId || this.identityMismatch) return;
         const serialized = JSON.stringify(metaMap);
         if (serialized.length > 7800) return;
         komgaFetch('/api/v1/client-settings/user', {
             method: 'PATCH',
+            headers: this.userBoundHeaders(),
             body: JSON.stringify({
                 [key]: {
                     value: serialized,
@@ -442,6 +487,7 @@ class KomgaBridgeImpl {
     }
 
     private scheduleProgressSync(bookId: string, pageOneBased: number, completed: boolean): void {
+        if (this.identityMismatch || !this.currentUserId) return;
         const prevTimer = this.pendingProgressTimers.get(bookId);
         if (prevTimer) {
             clearTimeout(prevTimer);
@@ -452,6 +498,7 @@ class KomgaBridgeImpl {
             this.pendingProgressPayloads.delete(bookId);
             komgaFetch(`/api/v1/books/${encodeURIComponent(bookId)}/read-progress`, {
                 method: 'PATCH',
+                headers: this.userBoundHeaders(),
                 body: JSON.stringify(payload),
                 keepalive: true,
             }).catch(() => {});
@@ -460,11 +507,13 @@ class KomgaBridgeImpl {
         this.pendingProgressPayloads.set(bookId, payload);
         const timer = setTimeout(() => {
             this.pendingProgressTimers.delete(bookId);
+            if (this.identityMismatch || !this.currentUserId) return;
             const item = this.pendingProgressPayloads.get(bookId);
             if (!item) return;
             this.pendingProgressPayloads.delete(bookId);
             komgaFetch(`/api/v1/books/${encodeURIComponent(bookId)}/read-progress`, {
                 method: 'PATCH',
+                headers: this.userBoundHeaders(),
                 body: JSON.stringify(item),
                 keepalive: true,
             }).catch(() => {});
@@ -473,6 +522,10 @@ class KomgaBridgeImpl {
     }
 
     public flushAllProgress(): void {
+        if (this.identityMismatch || !this.currentUserId) {
+            this.cancelAllPendingProgress();
+            return;
+        }
         this.pendingProgressTimers.forEach((t) => clearTimeout(t));
         this.pendingProgressTimers.clear();
         this.pendingProgressPayloads.forEach((payload, bookId) => {
@@ -483,6 +536,7 @@ class KomgaBridgeImpl {
                 headers: {
                     'Content-Type': 'application/json',
                     'X-FK115-UI': '1',
+                    ...this.userBoundHeaders(),
                 },
                 body: JSON.stringify(payload),
             }).catch(() => {});
@@ -492,11 +546,14 @@ class KomgaBridgeImpl {
 
     private buildMangaGql(bundle: SeriesBundle) {
         const s = bundle.series;
-        const metaMap = readJSONStorageWithLegacy<Record<string, string>>(
-            this.seriesMetaKey(bundle.seriesId),
-            this.isPrimaryAdmin() ? `${LEGACY_SERIES_META_PREFIX}${bundle.seriesId}` : null,
-            {},
-        );
+        const smKey = this.seriesMetaKey(bundle.seriesId);
+        const metaMap = smKey
+            ? readJSONStorageWithLegacy<Record<string, string>>(
+                  smKey,
+                  this.isPrimaryAdmin() ? `${LEGACY_SERIES_META_PREFIX}${bundle.seriesId}` : null,
+                  {},
+              )
+            : {};
         const metaNodes = Object.entries(metaMap).map(([key, value]) => ({
             __typename: 'MangaMetaType',
             mangaId: bundle.mangaId,
@@ -578,11 +635,14 @@ class KomgaBridgeImpl {
         switch (operationName) {
             case 'GET_GLOBAL_METADATAS': {
                 await this.ensureClientSettingsSynced();
-                const globalMap = readJSONStorageWithLegacy<Record<string, string>>(
-                    this.globalMetaKey(),
-                    this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
-                    {},
-                );
+                const gKey = this.globalMetaKey();
+                const globalMap = gKey
+                    ? readJSONStorageWithLegacy<Record<string, string>>(
+                          gKey,
+                          this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
+                          {},
+                      )
+                    : {};
                 const nodes = Object.entries(globalMap).map(([key, value]) => ({
                     __typename: 'GlobalMetaType',
                     key,
@@ -605,11 +665,14 @@ class KomgaBridgeImpl {
             }
 
             case 'GET_GLOBAL_METADATA': {
-                const globalMap = readJSONStorageWithLegacy<Record<string, string>>(
-                    this.globalMetaKey(),
-                    this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
-                    {},
-                );
+                const gKey = this.globalMetaKey();
+                const globalMap = gKey
+                    ? readJSONStorageWithLegacy<Record<string, string>>(
+                          gKey,
+                          this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
+                          {},
+                      )
+                    : {};
                 const key = String(variables?.key ?? '');
                 return {
                     meta:
@@ -621,11 +684,13 @@ class KomgaBridgeImpl {
 
             case 'UPDATE_GLOBAL_METADATA': {
                 const gKey = this.globalMetaKey();
-                const globalMap = readJSONStorageWithLegacy<Record<string, string>>(
-                    gKey,
-                    this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
-                    {},
-                );
+                const globalMap = gKey
+                    ? readJSONStorageWithLegacy<Record<string, string>>(
+                          gKey,
+                          this.isPrimaryAdmin() ? LEGACY_GLOBAL_META_KEY : null,
+                          {},
+                      )
+                    : {};
                 const applyDeletes = (keys?: string[]) => {
                     (keys ?? []).forEach((k) => {
                         delete globalMap[k];
@@ -640,8 +705,10 @@ class KomgaBridgeImpl {
                 if (variables?.hasUpdates) applySets(variables.updateInput?.metas);
                 if (variables?.hasPostUpdateDeletions) applyDeletes(variables.postUpdateDeleteInput?.keys);
                 if (variables?.isMigration) applySets(variables.migrateInput?.metas);
-                writeJSONStorage(gKey, globalMap);
-                this.syncClientSetting('webui.reader.globalMeta', globalMap);
+                if (gKey) {
+                    writeJSONStorage(gKey, globalMap);
+                    this.syncClientSetting('webui.reader.globalMeta', globalMap);
+                }
 
                 const nodes = Object.entries(globalMap).map(([key, value]) => ({
                     __typename: 'GlobalMetaType',
@@ -769,11 +836,13 @@ class KomgaBridgeImpl {
                 const mangaId = Number(firstMangaId);
                 const seriesId = this.mangaIdToSeries.get(mangaId) ?? String(mangaId);
                 const storageKey = this.seriesMetaKey(seriesId);
-                const metaMap = readJSONStorageWithLegacy<Record<string, string>>(
-                    storageKey,
-                    this.isPrimaryAdmin() ? `${LEGACY_SERIES_META_PREFIX}${seriesId}` : null,
-                    {},
-                );
+                const metaMap = storageKey
+                    ? readJSONStorageWithLegacy<Record<string, string>>(
+                          storageKey,
+                          this.isPrimaryAdmin() ? `${LEGACY_SERIES_META_PREFIX}${seriesId}` : null,
+                          {},
+                      )
+                    : {};
                 const applyDeletes = (keys?: string[]) => {
                     (keys ?? []).forEach((k) => {
                         delete metaMap[k];
@@ -788,8 +857,10 @@ class KomgaBridgeImpl {
                 if (variables?.hasUpdates) applySets(variables.updateInput?.metas);
                 if (variables?.hasPostUpdateDeletions) applyDeletes(variables.postUpdateDeleteInput?.keys);
                 if (variables?.isMigration) applySets(variables.migrateInput?.metas);
-                writeJSONStorage(storageKey, metaMap);
-                this.syncClientSetting(`webui.reader.series.${seriesId}`, metaMap);
+                if (storageKey) {
+                    writeJSONStorage(storageKey, metaMap);
+                    this.syncClientSetting(`webui.reader.series.${seriesId}`, metaMap);
+                }
 
                 const nodes = Object.entries(metaMap).map(([key, value]) => ({
                     __typename: 'MangaMetaType',
@@ -916,9 +987,12 @@ class KomgaBridgeImpl {
                             const finalPage = c.pageCount > 0 ? c.pageCount : c.lastPageRead + 1;
                             this.scheduleProgressSync(c.bookId, finalPage, true);
                         } else if (patch.isRead === false && patch.lastPageRead === undefined) {
-                            komgaFetch(`/api/v1/books/${encodeURIComponent(c.bookId)}/read-progress`, {
-                                method: 'DELETE',
-                            }).catch(() => {});
+                            if (!this.identityMismatch && this.currentUserId) {
+                                komgaFetch(`/api/v1/books/${encodeURIComponent(c.bookId)}/read-progress`, {
+                                    method: 'DELETE',
+                                    headers: this.userBoundHeaders(),
+                                }).catch(() => {});
+                            }
                         } else if (typeof patch.lastPageRead === 'number') {
                             this.scheduleProgressSync(c.bookId, c.lastPageRead + 1, c.isRead);
                         }

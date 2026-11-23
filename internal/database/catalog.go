@@ -1076,12 +1076,15 @@ WHERE b.series_id IN (
 }
 
 func intersectLibraryIDs(requested, enabled []string) ([]string, bool) {
+	if len(enabled) == 0 {
+		return nil, true
+	}
 	if len(requested) == 0 {
-		return enabled, len(enabled) == 0
+		return enabled, false
 	}
 	reqClean := cleanStringSliceCaseSensitive(requested)
-	if len(enabled) == 0 {
-		return reqClean, len(reqClean) == 0
+	if len(reqClean) == 0 {
+		return nil, true
 	}
 	allowed := make(map[string]bool, len(enabled))
 	for _, id := range enabled {

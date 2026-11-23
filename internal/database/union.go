@@ -1394,6 +1394,20 @@ SELECT EXISTS(
 )`, unionLibraryID).Scan(&hasMissing); err != nil {
 		return 0, err
 	}
+	// Conservatively propagate NSFW status from ANY backing source series to unlocked union metadata
+	// so a non-NSFW metadata winner can never expose NSFW volumes from another source.
+	if _, err := tx.ExecContext(ctx, `
+UPDATE series_metadata
+SET is_nsfw=1, updated_at=?
+WHERE nsfw_lock=0 AND is_nsfw=0 AND series_id IN (
+  SELECT us.id
+  FROM series us
+  JOIN union_series_sources uss ON uss.union_series_id=us.id
+  JOIN series_metadata ssm ON ssm.series_id=uss.source_series_id
+  WHERE us.library_id=? AND ssm.is_nsfw=1
+)`, now, unionLibraryID); err != nil {
+		return 0, err
+	}
 	if hasMissing == 0 {
 		return 0, nil
 	}
@@ -1457,7 +1471,13 @@ SELECT
  sm.release_date,sm.release_date_lock,sm.genres_json,sm.genres_lock,
  sm.tags_json,sm.tags_lock,sm.authors_json,sm.authors_lock,
  sm.alternate_titles_json,sm.alternate_titles_lock,sm.links_json,sm.links_lock,
- sm.sharing_labels_json,sm.sharing_labels_lock,sm.is_nsfw,sm.nsfw_lock,?
+ sm.sharing_labels_json,sm.sharing_labels_lock,
+ CASE WHEN EXISTS (
+   SELECT 1 FROM union_series_sources uss
+   JOIN series_metadata ssm ON ssm.series_id=uss.source_series_id
+   WHERE uss.union_series_id=p.union_series_id AND ssm.is_nsfw=1
+ ) THEN 1 ELSE sm.is_nsfw END,
+ sm.nsfw_lock,?
 FROM temp._fk115_union_meta_pick p
 JOIN series_metadata sm ON sm.series_id=p.source_series_id
 ORDER BY p.union_series_id`, now); err != nil {
@@ -1781,6 +1801,7 @@ ORDER BY uss.priority ASC`, unionSeriesID)
 	if err != nil {
 		return nil, nil, err
 	}
+	scope, hasScope := UserScopeFromContext(ctx)
 	var seriesSources []UnionSeriesSource
 	for sRows.Next() {
 		var item UnionSeriesSource
@@ -1790,6 +1811,9 @@ ORDER BY uss.priority ASC`, unionSeriesID)
 		); err != nil {
 			sRows.Close()
 			return nil, nil, err
+		}
+		if hasScope && !scope.IsAdmin && !scope.AllowsLibrary(item.SourceLibraryID) {
+			continue
 		}
 		seriesSources = append(seriesSources, item)
 	}
@@ -1813,6 +1837,7 @@ ORDER BY ubs.union_book_id ASC, ubs.priority ASC`, unionSeriesID)
 	}
 	defer bRows.Close()
 	bookSources := make(map[string][]UnionBookSource)
+	seenBookSource := make(map[string]int)
 	for bRows.Next() {
 		var item UnionBookSource
 		if err := bRows.Scan(
@@ -1821,7 +1846,12 @@ ORDER BY ubs.union_book_id ASC, ubs.priority ASC`, unionSeriesID)
 		); err != nil {
 			return nil, nil, err
 		}
-		item.Active = len(bookSources[item.UnionBookID]) == 0
+		isPrimary := seenBookSource[item.UnionBookID] == 0
+		seenBookSource[item.UnionBookID]++
+		if hasScope && !scope.IsAdmin && !scope.AllowsLibrary(item.SourceLibraryID) {
+			continue
+		}
+		item.Active = isPrimary
 		bookSources[item.UnionBookID] = append(bookSources[item.UnionBookID], item)
 	}
 	return seriesSources, bookSources, bRows.Err()

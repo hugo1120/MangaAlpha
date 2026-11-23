@@ -15,7 +15,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/xJogger/fake-komga-115/internal/buildinfo"
 )
 
 const (
@@ -301,7 +300,7 @@ func (s *Server) buildAgentGuideMarkdown(origin string) string {
 	manualKeyURL := origin + "/admin?tab=security&presetKey=" + url.QueryEscape("AI Agent (Bangumi 匹配)")
 	raw := `# MangaAlpha AI Agent 接入与 Bangumi 匹配指引
 
-> 服务端版本：{{VERSION}} · API 基址：{{BT}}{{ORIGIN}}/api/agent/v1{{BT}}
+> API 基址：{{BT}}{{ORIGIN}}/api/agent/v1{{BT}}
 
 本指引不含任何私密书库数据，可安全公开读取。完成第 1 步获得授权后，再按第 2 步执行未匹配条目的 Bangumi 精确匹配。
 
@@ -378,7 +377,6 @@ curl -fsS -X POST "{{ORIGIN}}/api/agent/v1/series/batch" \
    - 跳过清单及原因（如：同人志未收录、同名歧义、信息不足）。
 `
 	replacer := strings.NewReplacer(
-		"{{VERSION}}", buildinfo.Version,
 		"{{ORIGIN}}", origin,
 		"{{MANUAL_KEY_URL}}", manualKeyURL,
 		"{{FENCE}}", "```",
@@ -402,7 +400,6 @@ func (s *Server) agentGuide(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"name":                 "MangaAlpha Agent Guide",
-			"appVersion":           buildinfo.Version,
 			"basePath":             "/api/agent/v1",
 			"authRequestEndpoint":  origin + "/api/agent/v1/auth/requests",
 			"manualKeyUrl":         manualKeyURL,

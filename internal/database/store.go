@@ -327,6 +327,7 @@ ORDER BY ul.union_library_id,ul.priority ASC,ul.member_library_id ASC`, args...)
 		return err
 	}
 	defer rows.Close()
+	scope, hasScope := UserScopeFromContext(ctx)
 	for rows.Next() {
 		var layer UnionLayer
 		if err := rows.Scan(
@@ -334,6 +335,9 @@ ORDER BY ul.union_library_id,ul.priority ASC,ul.member_library_id ASC`, args...)
 			&layer.ProviderType, &layer.WebDAVAccountName, &layer.Priority,
 		); err != nil {
 			return err
+		}
+		if hasScope && !scope.IsAdmin && !scope.AllowsLibrary(layer.MemberLibraryID) {
+			continue
 		}
 		if idx, ok := unionIdx[layer.UnionLibraryID]; ok {
 			libs[idx].UnionLayers = append(libs[idx].UnionLayers, layer)

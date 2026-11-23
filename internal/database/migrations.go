@@ -1050,8 +1050,8 @@ SELECT 'admin',book_id,series_id,deleted_at FROM book_read_progress_tombstones`,
   updated_at TEXT NOT NULL,
   UNIQUE(user_id, name COLLATE NOCASE)
 )`,
-				`INSERT INTO collections_v3(id,user_id,name,ordered,created_at,updated_at)
-SELECT id,'admin',name,ordered,created_at,updated_at FROM collections`,
+				`INSERT INTO collections_v3(rowid,id,user_id,name,ordered,created_at,updated_at)
+SELECT rowid,id,'admin',name,ordered,created_at,updated_at FROM collections`,
 				`DROP TABLE collections`,
 				`ALTER TABLE collections_v3 RENAME TO collections`,
 				`CREATE INDEX IF NOT EXISTS idx_collections_user ON collections(user_id, name COLLATE NOCASE)`,

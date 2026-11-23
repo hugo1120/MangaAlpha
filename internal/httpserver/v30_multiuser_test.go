@@ -464,4 +464,121 @@ func TestV30MultiUserRBACIsolationAndCodename(t *testing.T) {
 	if delAdmin.StatusCode != http.StatusBadRequest {
 		t.Fatalf("deleting primary admin must return 400, got %d", delAdmin.StatusCode)
 	}
+
+	// 11. Codex cross-review hardening regressions:
+	// 11a. Creating user with allowedLibraryIds and omitted allLibraries must NOT default to allLibraries=true
+	noAllResp := doReq("POST", "/admin/api/users", map[string]any{
+		"username":          "zero_or_scoped",
+		"password":          "ZeroPass123!",
+		"allowedLibraryIds": []string{},
+	}, "adminuser", "AdminPass123!", "")
+	if noAllResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create zero-lib user status=%d", noAllResp.StatusCode)
+	}
+	var zeroUser database.User
+	_ = json.NewDecoder(noAllResp.Body).Decode(&zeroUser)
+	noAllResp.Body.Close()
+	if zeroUser.AllLibraries {
+		t.Fatalf("omitted allLibraries must default false, got true")
+	}
+	// 11b. Zero-library user passing explicit ?library_id=lib1 must fail CLOSED (0 tags/genres/publishers/authors/series)
+	for _, path := range []string{
+		"/api/v1/series?library_id=lib1",
+		"/api/v1/genres?library_id=lib1",
+		"/api/v1/tags?library_id=lib1",
+		"/api/v1/publishers?library_id=lib1",
+	} {
+		rZero := doReq("GET", path, nil, "zero_or_scoped", "ZeroPass123!", "")
+		bodyBytes, _ := io.ReadAll(rZero.Body)
+		rZero.Body.Close()
+		if rZero.StatusCode != http.StatusOK {
+			t.Fatalf("zero-lib GET %s status=%d", path, rZero.StatusCode)
+		}
+		if strings.Contains(string(bodyBytes), "SeriesOne") || strings.Contains(string(bodyBytes), "SharedWork") {
+			t.Fatalf("zero-lib user leaked data on %s: %s", path, string(bodyBytes))
+		}
+	}
+
+	// 11c. ResetUserPassword rejects primary admin (400) AND revokes target user's API keys
+	rstAdmin := doReq("POST", "/admin/api/users/admin/reset-password", map[string]any{"password": "NewAdmin999!"}, "adminuser", "AdminPass123!", "")
+	rstAdmin.Body.Close()
+	if rstAdmin.StatusCode != http.StatusBadRequest {
+		t.Fatalf("reset primary admin password must return 400, got %d", rstAdmin.StatusCode)
+	}
+	akZeroResp := doReq("POST", "/admin/api/auth/api-keys", map[string]any{"name": "zero-key"}, "zero_or_scoped", "ZeroPass123!", "")
+	var akZero struct {
+		Key string `json:"key"`
+	}
+	_ = json.NewDecoder(akZeroResp.Body).Decode(&akZero)
+	akZeroResp.Body.Close()
+	rstZero := doReq("POST", "/admin/api/users/"+zeroUser.ID+"/reset-password", map[string]any{"password": "ZeroPass999!"}, "adminuser", "AdminPass123!", "")
+	rstZero.Body.Close()
+	if rstZero.StatusCode != http.StatusOK {
+		t.Fatalf("reset zero user password status=%d", rstZero.StatusCode)
+	}
+	akZeroAfter := doReq("GET", "/api/v2/users/me", nil, "", "", akZero.Key)
+	akZeroAfter.Body.Close()
+	if akZeroAfter.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("API key must be revoked after password reset, got %d", akZeroAfter.StatusCode)
+	}
+
+	// 11d. Cross-origin CSRF guard applies to browser HTTP Basic Auth requests
+	csrfReq, _ := http.NewRequest("POST", ts.URL+"/admin/api/users/"+zeroUser.ID+"/kick", nil)
+	csrfReq.SetBasicAuth("adminuser", "AdminPass123!")
+	csrfReq.Header.Set("Origin", "https://evil.example")
+	csrfResp, err := http.DefaultClient.Do(csrfReq)
+	if err != nil {
+		t.Fatalf("csrf basic req: %v", err)
+	}
+	csrfResp.Body.Close()
+	if csrfResp.StatusCode != http.StatusForbidden {
+		t.Fatalf("cross-origin Basic Auth POST must return 403, got %d", csrfResp.StatusCode)
+	}
+
+	// 11e. X-FK115-User-Id header mismatch rejects stale reader write with 409
+	mmReq, _ := http.NewRequest("PATCH", ts.URL+"/api/v1/books/b1_nsfw/read-progress", strings.NewReader(`{"page":1,"completed":false}`))
+	mmReq.SetBasicAuth("adminuser", "AdminPass123!")
+	mmReq.Header.Set("Content-Type", "application/json")
+	mmReq.Header.Set("X-FK115-User-Id", "u_other_account")
+	mmResp, err := http.DefaultClient.Do(mmReq)
+	if err != nil {
+		t.Fatalf("mismatch req: %v", err)
+	}
+	mmResp.Body.Close()
+	if mmResp.StatusCode != http.StatusConflict {
+		t.Fatalf("X-FK115-User-Id mismatch must return 409, got %d", mmResp.StatusCode)
+	}
+
+	// 11f. Unencrypted comic page must send Cache-Control: private, no-store (no cross-account browser cache reuse)
+	plainPageResp := doReq("GET", "/api/v1/books/b2_sec/pages/1", nil, "adminuser", "AdminPass123!", "")
+	plainPageResp.Body.Close()
+	if plainPageResp.StatusCode != http.StatusOK {
+		t.Fatalf("admin GET b2_sec page 1 status=%d", plainPageResp.StatusCode)
+	}
+	if cc := plainPageResp.Header.Get("Cache-Control"); cc != "private, no-store" {
+		t.Fatalf("expected private, no-store on protected comic page, got %q", cc)
+	}
+
+	// 11g. Public Agent guide does not leak server build version
+	guideResp, gErr := http.Get(ts.URL + "/api/agent/v1/guide?format=json")
+	if gErr != nil {
+		t.Fatalf("GET agent guide: %v", gErr)
+	}
+	guideBytes, _ := io.ReadAll(guideResp.Body)
+	guideResp.Body.Close()
+	if strings.Contains(string(guideBytes), buildinfo.Version) {
+		t.Fatalf("public agent guide must not leak build version %q: %s", buildinfo.Version, string(guideBytes))
+	}
+
+	// 11h. Non-3.x build version must NOT emit codename
+	prevVer := buildinfo.Version
+	buildinfo.Version = "v2.9.0"
+	if cn, _ := buildinfo.CodenameForVersion(buildinfo.Version); cn != "" {
+		t.Fatalf("v2.9.0 must not emit codename, got %q", cn)
+	}
+	buildinfo.Version = "v3.0.0"
+	if cn, _ := buildinfo.CodenameForVersion(buildinfo.Version); cn != buildinfo.Codename {
+		t.Fatalf("v3.0.0 must emit codename %q, got %q", buildinfo.Codename, cn)
+	}
+	buildinfo.Version = prevVer
 }

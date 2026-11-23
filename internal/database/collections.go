@@ -42,8 +42,20 @@ func (s *Store) ListCollections(
 		args = append(args, "%"+escapeLike(q)+"%")
 	}
 	if len(libraryIDs) > 0 {
-		libs := cleanStringSliceCaseSensitive(libraryIDs)
-		clauses = append(clauses, `EXISTS (SELECT 1 FROM collection_series cs JOIN series s ON s.id=cs.series_id WHERE cs.collection_id=c.id AND s.library_id IN `+Placeholders(len(libs))+`)`)
+		enabledLibs, err := s.enabledLibraryIDs(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		libs, empty := intersectLibraryIDs(libraryIDs, enabledLibs)
+		if empty {
+			return []Collection{}, 0, nil
+		}
+		sub := `EXISTS (SELECT 1 FROM collection_series cs JOIN series s ON s.id=cs.series_id JOIN libraries l ON l.id=s.library_id LEFT JOIN series_metadata sm ON sm.series_id=s.id WHERE cs.collection_id=c.id AND l.enabled=1 AND s.library_id IN ` + Placeholders(len(libs))
+		if !s.ShowNSFW(ctx) {
+			sub += ` AND COALESCE(sm.is_nsfw, 0)=0`
+		}
+		sub += `)`
+		clauses = append(clauses, sub)
 		for _, id := range libs {
 			args = append(args, id)
 		}
@@ -312,18 +324,25 @@ func (s *Store) replaceCollectionSeriesTx(ctx context.Context, tx *sql.Tx, colle
 		return err
 	}
 	scope, hasScope := UserScopeFromContext(ctx)
+	excludeNSFW := !s.ShowNSFW(ctx)
 	unique := cleanStringSliceCaseSensitive(seriesIDs)
 	pos := 0
 	for _, sid := range unique {
 		var libID string
-		err := tx.QueryRowContext(ctx, `SELECT library_id FROM series WHERE id=?`, sid).Scan(&libID)
+		var enabled, isNSFW int
+		err := tx.QueryRowContext(ctx, `
+SELECT s.library_id, l.enabled, COALESCE(sm.is_nsfw, 0)
+FROM series s
+JOIN libraries l ON l.id=s.library_id
+LEFT JOIN series_metadata sm ON sm.series_id=s.id
+WHERE s.id=?`, sid).Scan(&libID, &enabled, &isNSFW)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		if hasScope && !scope.AllowsLibrary(libID) {
+		if hasScope && !scope.IsAdmin && (enabled == 0 || !scope.AllowsLibrary(libID) || (excludeNSFW && isNSFW != 0)) {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -471,8 +490,20 @@ func (s *Store) ListReadLists(
 		args = append(args, "%"+escapeLike(q)+"%")
 	}
 	if len(libraryIDs) > 0 {
-		libs := cleanStringSliceCaseSensitive(libraryIDs)
-		clauses = append(clauses, `EXISTS (SELECT 1 FROM readlist_books rb JOIN books b ON b.id=rb.book_id WHERE rb.readlist_id=r.id AND b.library_id IN `+Placeholders(len(libs))+`)`)
+		enabledLibs, err := s.enabledLibraryIDs(ctx)
+		if err != nil {
+			return nil, 0, err
+		}
+		libs, empty := intersectLibraryIDs(libraryIDs, enabledLibs)
+		if empty {
+			return []ReadList{}, 0, nil
+		}
+		sub := `EXISTS (SELECT 1 FROM readlist_books rb JOIN books b ON b.id=rb.book_id JOIN libraries l ON l.id=b.library_id LEFT JOIN series_metadata sm ON sm.series_id=b.series_id WHERE rb.readlist_id=r.id AND l.enabled=1 AND b.library_id IN ` + Placeholders(len(libs))
+		if !s.ShowNSFW(ctx) {
+			sub += ` AND COALESCE(sm.is_nsfw, 0)=0`
+		}
+		sub += `)`
+		clauses = append(clauses, sub)
 		for _, id := range libs {
 			args = append(args, id)
 		}
@@ -746,18 +777,25 @@ func (s *Store) replaceReadListBooksTx(ctx context.Context, tx *sql.Tx, readList
 		return err
 	}
 	scope, hasScope := UserScopeFromContext(ctx)
+	excludeNSFW := !s.ShowNSFW(ctx)
 	unique := cleanStringSliceCaseSensitive(bookIDs)
 	pos := 0
 	for _, bid := range unique {
 		var libID string
-		err := tx.QueryRowContext(ctx, `SELECT library_id FROM books WHERE id=?`, bid).Scan(&libID)
+		var enabled, isNSFW int
+		err := tx.QueryRowContext(ctx, `
+SELECT b.library_id, l.enabled, COALESCE(sm.is_nsfw, 0)
+FROM books b
+JOIN libraries l ON l.id=b.library_id
+LEFT JOIN series_metadata sm ON sm.series_id=b.series_id
+WHERE b.id=?`, bid).Scan(&libID, &enabled, &isNSFW)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return err
 		}
-		if hasScope && !scope.AllowsLibrary(libID) {
+		if hasScope && !scope.IsAdmin && (enabled == 0 || !scope.AllowsLibrary(libID) || (excludeNSFW && isNSFW != 0)) {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,

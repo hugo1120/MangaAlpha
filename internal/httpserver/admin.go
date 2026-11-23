@@ -585,7 +585,13 @@ func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if s.sse != nil {
-			s.sse.Publish("LibraryAdded", map[string]any{"libraryId": lib.ID})
+			s.sse.PublishMatching("LibraryAdded", map[string]any{"libraryId": lib.ID}, func(uid string) bool {
+				u, uErr := s.store.UserByID(r.Context(), uid)
+				if uErr != nil || !u.Enabled {
+					return false
+				}
+				return u.IsAdmin() || u.AllLibraries
+			})
 		}
 		writeJSON(w, 201, map[string]any{
 			"library": lib,
@@ -1407,7 +1413,15 @@ func (s *Server) bookRichDetail(w http.ResponseWriter, r *http.Request) {
 
 	var unionSources []database.UnionBookSource
 	if library.EffectiveProvider() == database.ProviderUnion {
-		_, unionSources, _ = s.store.UnionBookSourceBooks(r.Context(), book.ID)
+		_, allSources, _ := s.store.UnionBookSourceBooks(r.Context(), book.ID)
+		scope, hasScope := database.UserScopeFromContext(r.Context())
+		for i, src := range allSources {
+			if hasScope && !scope.IsAdmin && !scope.AllowsLibrary(src.SourceLibraryID) {
+				continue
+			}
+			src.Active = i == 0
+			unionSources = append(unionSources, src)
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -1550,7 +1564,7 @@ func (s *Server) bangumiSubjectCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", data.MediaType)
-	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("Cache-Control", "private, no-store")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data.Bytes)))
 	_, _ = w.Write(data.Bytes)
 }

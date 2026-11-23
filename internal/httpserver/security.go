@@ -162,15 +162,17 @@ type authFailRecord struct {
 }
 
 type authRateLimiter struct {
-	mu      sync.Mutex
-	entries map[string]*authFailRecord
-	nowFunc func() time.Time
+	mu        sync.Mutex
+	entries   map[string]*authFailRecord
+	ipEntries map[string]*authFailRecord
+	nowFunc   func() time.Time
 }
 
 func newAuthRateLimiter() *authRateLimiter {
 	return &authRateLimiter{
-		entries: make(map[string]*authFailRecord),
-		nowFunc: time.Now,
+		entries:   make(map[string]*authFailRecord),
+		ipEntries: make(map[string]*authFailRecord),
+		nowFunc:   time.Now,
 	}
 }
 
@@ -181,15 +183,11 @@ func (l *authRateLimiter) now() time.Time {
 	return time.Now()
 }
 
-// Allow reports whether clientKey may attempt authentication; when false it returns retryAfter.
-func (l *authRateLimiter) Allow(clientKey string) (bool, time.Duration) {
-	if l == nil || clientKey == "" {
+func (l *authRateLimiter) allowInMap(m map[string]*authFailRecord, key string, now time.Time) (bool, time.Duration) {
+	if key == "" {
 		return true, 0
 	}
-	now := l.now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	rec, ok := l.entries[clientKey]
+	rec, ok := m[key]
 	if !ok {
 		return true, 0
 	}
@@ -197,38 +195,42 @@ func (l *authRateLimiter) Allow(clientKey string) (bool, time.Duration) {
 		return false, rec.blockedTil.Sub(now)
 	}
 	if now.Sub(rec.windowStart) > authFailWindow && now.Sub(rec.lastSeen) > authFailWindow {
-		delete(l.entries, clientKey)
+		delete(m, key)
 	}
 	return true, 0
 }
 
-// RecordFailure records a failed authentication attempt for clientKey.
-func (l *authRateLimiter) RecordFailure(clientKey string) {
-	if l == nil || clientKey == "" {
+func (l *authRateLimiter) recordFailureInMap(m map[string]*authFailRecord, key string, now time.Time, threshold int) {
+	if key == "" {
 		return
 	}
-	now := l.now()
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if len(l.entries) >= authLimiterMaxHosts {
-		for k, v := range l.entries {
+	if len(m) >= authLimiterMaxHosts {
+		for k, v := range m {
 			if now.After(v.blockedTil) && now.Sub(v.lastSeen) > authFailWindow {
-				delete(l.entries, k)
+				delete(m, k)
 			}
 		}
-		if len(l.entries) >= authLimiterMaxHosts {
-			l.entries = make(map[string]*authFailRecord)
+		if len(m) >= authLimiterMaxHosts {
+			// Evict oldest non-blocked entries only so active lockouts are never wiped by key flooding.
+			for k, v := range m {
+				if !v.blockedTil.After(now) {
+					delete(m, k)
+					if len(m) < authLimiterMaxHosts*3/4 {
+						break
+					}
+				}
+			}
 		}
 	}
-	rec, ok := l.entries[clientKey]
+	rec, ok := m[key]
 	if !ok || (now.Sub(rec.windowStart) > authFailWindow && now.After(rec.blockedTil)) {
 		rec = &authFailRecord{windowStart: now}
-		l.entries[clientKey] = rec
+		m[key] = rec
 	}
 	rec.failures++
 	rec.lastSeen = now
-	if rec.failures >= authFailThreshold {
-		shift := rec.failures - authFailThreshold
+	if rec.failures >= threshold {
+		shift := rec.failures - threshold
 		if shift > 4 {
 			shift = 4
 		}
@@ -240,6 +242,54 @@ func (l *authRateLimiter) RecordFailure(clientKey string) {
 	}
 }
 
+// Allow reports whether clientKey may attempt authentication; when false it returns retryAfter.
+func (l *authRateLimiter) Allow(clientKey string) (bool, time.Duration) {
+	if l == nil || clientKey == "" {
+		return true, 0
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.allowInMap(l.entries, clientKey, now)
+}
+
+// AllowAccount enforces both the per-IP backstop (20 failures) and per-(IP, username) limit (5 failures).
+func (l *authRateLimiter) AllowAccount(clientIP, username string) (bool, time.Duration) {
+	if l == nil {
+		return true, 0
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if ok, retry := l.allowInMap(l.ipEntries, clientIP, now); !ok {
+		return false, retry
+	}
+	return l.allowInMap(l.entries, authRateLimitKey(clientIP, username), now)
+}
+
+// RecordFailure records a failed authentication attempt for clientKey.
+func (l *authRateLimiter) RecordFailure(clientKey string) {
+	if l == nil || clientKey == "" {
+		return
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.recordFailureInMap(l.entries, clientKey, now, authFailThreshold)
+}
+
+// RecordAccountFailure increments both the per-(IP, username) counter and the per-IP backstop.
+func (l *authRateLimiter) RecordAccountFailure(clientIP, username string) {
+	if l == nil {
+		return
+	}
+	now := l.now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.recordFailureInMap(l.entries, authRateLimitKey(clientIP, username), now, authFailThreshold)
+	l.recordFailureInMap(l.ipEntries, clientIP, now, authFailThreshold*4)
+}
+
 // RecordSuccess clears any accumulated failure history for clientKey.
 func (l *authRateLimiter) RecordSuccess(clientKey string) {
 	if l == nil || clientKey == "" {
@@ -248,6 +298,11 @@ func (l *authRateLimiter) RecordSuccess(clientKey string) {
 	l.mu.Lock()
 	delete(l.entries, clientKey)
 	l.mu.Unlock()
+}
+
+// RecordAccountSuccess clears only the exact (clientIP, username) bucket without resetting other accounts or the IP backstop.
+func (l *authRateLimiter) RecordAccountSuccess(clientIP, username string) {
+	l.RecordSuccess(authRateLimitKey(clientIP, username))
 }
 
 func writeRateLimited(w http.ResponseWriter, retryAfter time.Duration) {

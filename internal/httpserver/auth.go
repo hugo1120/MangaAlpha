@@ -208,8 +208,12 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		if principal.Method == "session" && isUnsafeHTTPMethod(r.Method) && !checkSameOriginCSRF(r) {
+		if (principal.Method == "session" || principal.Method == "basic") && isUnsafeHTTPMethod(r.Method) && !checkSameOriginCSRF(r) {
 			writeError(w, http.StatusForbidden, "CSRF_REJECTED", "Cross-origin request rejected.")
+			return
+		}
+		if expectedUID := strings.TrimSpace(r.Header.Get("X-FK115-User-Id")); expectedUID != "" && expectedUID != principal.UserID {
+			writeError(w, http.StatusConflict, "USER_CONTEXT_MISMATCH", "Active session user changed; please reload.")
 			return
 		}
 
@@ -238,19 +242,19 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool, bool
 			}
 		}
 	}
-	// 3. HTTP Basic Auth (protected by per-IP brute-force limiter)
+	// 3. HTTP Basic Auth (protected by per-(IP, account) + per-IP backstop brute-force limiter)
 	if username, password, ok := r.BasicAuth(); ok {
 		clientIP := s.trustedProxies.clientIP(r)
-		if allowed, retryAfter := s.authLimiter.Allow(clientIP); !allowed {
+		if allowed, retryAfter := s.authLimiter.AllowAccount(clientIP, username); !allowed {
 			return authPrincipal{}, false, true, retryAfter
 		}
 		user, valid, err := s.store.VerifyUserPassword(r.Context(), username, password)
 		if err == nil && valid && user.Enabled {
-			s.authLimiter.RecordSuccess(clientIP)
+			s.authLimiter.RecordAccountSuccess(clientIP, username)
 			return principalFromUser(user, "basic", "", false), true, false, 0
 		}
 		if err == nil {
-			s.authLimiter.RecordFailure(clientIP)
+			s.authLimiter.RecordAccountFailure(clientIP, username)
 		}
 	}
 	return authPrincipal{}, false, false, 0
@@ -407,8 +411,10 @@ func (s *Server) authStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	if authed {
 		resp["version"] = buildinfo.Version
-		resp["codename"] = buildinfo.Codename
-		resp["codenameQuote"] = buildinfo.CodenameQuote
+		if codename, quote := buildinfo.CodenameForVersion(buildinfo.Version); codename != "" {
+			resp["codename"] = codename
+			resp["codenameQuote"] = quote
+		}
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -452,12 +458,16 @@ func (s *Server) authSetupHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func authRateLimitKey(clientIP, username string) string {
+	u := strings.ToLower(strings.TrimSpace(username))
+	if u == "" {
+		return clientIP
+	}
+	return clientIP + "\x00" + u
+}
+
 func (s *Server) authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	clientIP := s.trustedProxies.clientIP(r)
-	if allowed, retryAfter := s.authLimiter.Allow(clientIP); !allowed {
-		writeRateLimited(w, retryAfter)
-		return
-	}
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -466,19 +476,27 @@ func (s *Server) authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	user, ok, err := s.store.VerifyUserPassword(r.Context(), req.Username, req.Password)
+	if allowed, retryAfter := s.authLimiter.AllowAccount(clientIP, req.Username); !allowed {
+		writeRateLimited(w, retryAfter)
+		return
+	}
+	user, verifiedHash, ok, err := s.store.VerifyUserPasswordWithHash(r.Context(), req.Username, req.Password)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
 	}
 	if !ok || !user.Enabled {
-		s.authLimiter.RecordFailure(clientIP)
+		s.authLimiter.RecordAccountFailure(clientIP, req.Username)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "用户名或密码不正确")
 		return
 	}
-	s.authLimiter.RecordSuccess(clientIP)
-	rawToken, _, err := s.store.CreateSessionForUser(r.Context(), user.ID, user.Username, req.Remember, r.UserAgent())
+	s.authLimiter.RecordAccountSuccess(clientIP, req.Username)
+	rawToken, _, err := s.store.CreateSessionForUserIfPasswordHash(r.Context(), user.ID, user.Username, verifiedHash, req.Remember, r.UserAgent())
 	if err != nil {
+		if errors.Is(err, database.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "账号状态或密码已变更，请重试")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "SESSION_ERROR", err.Error())
 		return
 	}
@@ -580,8 +598,12 @@ func (s *Server) createAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, _ := s.currentPrincipal(r)
-	rawKey, info, err := s.store.CreateAPIKeyForUser(r.Context(), principal.UserID, req.Name)
+	rawKey, info, err := s.store.CreateAPIKeyForUserIfSession(r.Context(), principal.UserID, principal.RawSession, req.Name)
 	if err != nil {
+		if errors.Is(err, database.ErrInvalidCredentials) {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Session is no longer valid.")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "INVALID_API_KEY", err.Error())
 		return
 	}

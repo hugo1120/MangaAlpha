@@ -42,28 +42,28 @@ import (
 var staticFiles embed.FS
 
 type Server struct {
-	store     *database.Store
-	client    *oneonefive.Client
-	webdav    *webdav.Manager
-	bangumi   *bangumi.Service
-	scanner   *scanner.Manager
-	pipelines *pipeline.Manager
-	cache     *cache.Manager
-	archive   *archive.Service
-	thumbs    *thumbnail.Service
-	covers    *thumbnail.BatchManager
-	tasks     *maintenance.Manager
-	diag      *diagnostics.Recorder
-	updater   *updater.Service
-	logger    *slog.Logger
-	router    chi.Router
-	web       *template.Template
-	runtime           RuntimeInfo
-	sse               *sseHub
-	trustedProxies    *trustedProxyChecker
-	authLimiter       *authRateLimiter
-	bgmOAuthStates    *bangumiOAuthStateStore
-	agentAuth         *agentAuthStore
+	store          *database.Store
+	client         *oneonefive.Client
+	webdav         *webdav.Manager
+	bangumi        *bangumi.Service
+	scanner        *scanner.Manager
+	pipelines      *pipeline.Manager
+	cache          *cache.Manager
+	archive        *archive.Service
+	thumbs         *thumbnail.Service
+	covers         *thumbnail.BatchManager
+	tasks          *maintenance.Manager
+	diag           *diagnostics.Recorder
+	updater        *updater.Service
+	logger         *slog.Logger
+	router         chi.Router
+	web            *template.Template
+	runtime        RuntimeInfo
+	sse            *sseHub
+	trustedProxies *trustedProxyChecker
+	authLimiter    *authRateLimiter
+	bgmOAuthStates *bangumiOAuthStateStore
+	agentAuth      *agentAuthStore
 
 	placeholder []byte
 }
@@ -94,16 +94,16 @@ func New(
 		store: store, client: client, webdav: webdav.NewManager(),
 		scanner: scanManager, cache: cacheManager,
 		archive: archiveService, thumbs: thumbnailService, covers: coverManager,
-		tasks:   maintenanceManager,
-		runtime:           runtimeInfo,
-		logger:            logger,
-		sse:               newSSEHub(),
-		trustedProxies:    newTrustedProxyChecker(runtimeInfo.TrustedProxies),
-		authLimiter:       newAuthRateLimiter(),
-		bgmOAuthStates:    newBangumiOAuthStateStore(),
-		agentAuth:         newAgentAuthStore(),
-		placeholder:       makePlaceholder(),
-		web:               template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
+		tasks:          maintenanceManager,
+		runtime:        runtimeInfo,
+		logger:         logger,
+		sse:            newSSEHub(),
+		trustedProxies: newTrustedProxyChecker(runtimeInfo.TrustedProxies),
+		authLimiter:    newAuthRateLimiter(),
+		bgmOAuthStates: newBangumiOAuthStateStore(),
+		agentAuth:      newAgentAuthStore(),
+		placeholder:    makePlaceholder(),
+		web:            template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
 	s.router = s.routes()
 	return s

@@ -90,7 +90,7 @@
 
 ### 方式一：Windows 下载即用
 
-1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `_windows_amd64.zip` 压缩包（例如 `mangaalpha_v2.6.0_windows_amd64.zip`）并解压。
+1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `_windows_amd64.zip` 压缩包（例如 `mangaalpha_v2.7.0_windows_amd64.zip`）并解压。
 2. 双击运行 `mangaalpha.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`（保持兼容，原地升级无需迁移目录）。
 
@@ -115,7 +115,7 @@ docker run -d \
   -v fake-komga-115-data:/data \
   -v /share/manga:/manga:ro \
   -e TZ=Asia/Shanghai \
-  blacktal/fake-komga-115:v2.6.0
+  blacktal/fake-komga-115:v2.7.0
 ```
 
 > 从 `v2.3.0` 起，GitHub Release 桌面/服务端压缩包与本地构建产物名统一为 `mangaalpha`；Docker 镜像名 `blacktal/fake-komga-115`、容器入口、`FK115_*` 环境变量与既有默认数据路径保持不变。已有容器升级时请保留 `/data` 数据卷，建议固定版本标签升级。

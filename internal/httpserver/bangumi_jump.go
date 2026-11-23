@@ -234,13 +234,14 @@ func (s *Server) downloadBangumiUserscript(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) createUserscriptPairKey(w http.ResponseWriter, r *http.Request) {
-	revoked, err := s.store.DeleteAPIKeysByNamePrefix(r.Context(), userscriptKeyNamePrefix)
+	principal, _ := s.currentPrincipal(r)
+	revoked, err := s.store.DeleteAPIKeysByNamePrefixForUser(r.Context(), principal.UserID, userscriptKeyNamePrefix)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
 	}
 	keyName := fmt.Sprintf("%s (%s)", userscriptKeyNamePrefix, time.Now().UTC().Format("2006-01-02"))
-	createdKey, info, err := s.store.CreateAPIKey(r.Context(), keyName)
+	createdKey, info, err := s.store.CreateAPIKeyForUser(r.Context(), principal.UserID, keyName)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
@@ -258,6 +259,12 @@ func (s *Server) createUserscriptPairKey(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) serveUserscriptPairPage(w http.ResponseWriter, r *http.Request) {
+	backHref := "/admin?tab=bangumi"
+	backLabel := "返回 Bangumi 刮削中心"
+	if principal, ok := s.currentPrincipal(r); ok && !principal.IsAdmin {
+		backHref = "/account"
+		backLabel = "返回账号设置"
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-store")
@@ -292,7 +299,7 @@ func (s *Server) serveUserscriptPairPage(w http.ResponseWriter, r *http.Request)
     </div>
   </div>
   <div style="display:flex;flex-wrap:wrap;gap:10px">
-    <a class="btn btn-primary btn-sm" href="/admin?tab=bangumi">返回 Bangumi 刮削中心</a>
+    <a class="btn btn-primary btn-sm" href="%s">%s</a>
     <a class="btn btn-sm" href="https://bgm.tv/" target="_blank" rel="noopener noreferrer">打开 Bangumi ↗</a>
   </div>
 </main>
@@ -334,5 +341,5 @@ func (s *Server) serveUserscriptPairPage(w http.ResponseWriter, r *http.Request)
   })();
 </script>
 </body>
-</html>`, userscriptLatestPath)
+</html>`, userscriptLatestPath, backHref, html.EscapeString(backLabel))
 }

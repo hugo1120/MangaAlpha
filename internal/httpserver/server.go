@@ -173,6 +173,10 @@ func (s *Server) routes() chi.Router {
 	r.Get("/bgm/userscript/pair", s.serveUserscriptPairPage)
 	r.Get("/bgm/{subjectID}", s.serveBangumiJump)
 	r.Get("/agent-auth/{requestID}", s.serveSPA)
+	r.Get("/account", s.serveSPA)
+	r.Get("/account/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/account", http.StatusTemporaryRedirect)
+	})
 	r.Get("/admin", s.serveSPA)
 	r.Get("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)
@@ -224,16 +228,7 @@ func (s *Server) serveSPA(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) serveLibraryPageOrSPA(w http.ResponseWriter, r *http.Request) {
 	libraryID := chi.URLParam(r, "libraryID")
-	lib, err := s.store.LibraryBasic(r.Context(), libraryID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			s.renderNotFound(w)
-			return
-		}
-		s.renderWebError(w, err)
-		return
-	}
-	if !lib.Enabled || lib.UnionParentID != "" {
+	if !s.store.IsLibraryVisible(r.Context(), libraryID) {
 		s.renderNotFound(w)
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
@@ -156,25 +157,27 @@ func (tm *trackerManager) ExchangeOAuthCode(ctx context.Context, code, redirectU
 	tm.refreshMu.Lock()
 	defer tm.refreshMu.Unlock()
 
-	if err := tm.svc.store.SetSetting(ctx, SettingTrackerToken, strings.TrimSpace(tokResp.AccessToken)); err != nil {
-		return TrackerStatus{}, err
-	}
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerRefreshToken, strings.TrimSpace(tokResp.RefreshToken))
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerAuthMode, TrackerAuthModeOAuth)
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerOAuthRedirectURI, redirectURI)
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerExpiresAt, expiresAt)
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshAt, now.Format(time.RFC3339))
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshError, "")
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerUsername, user.Username)
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerNickname, user.Nickname)
+	latest := tm.loadConfig(ctx)
+	latest.Token = strings.TrimSpace(tokResp.AccessToken)
+	latest.RefreshToken = strings.TrimSpace(tokResp.RefreshToken)
+	latest.AuthMode = TrackerAuthModeOAuth
+	latest.OAuthRedirectURI = redirectURI
+	latest.ExpiresAt = expiresAt
+	latest.LastRefreshAt = now.Format(time.RFC3339)
+	latest.LastRefreshError = ""
+	latest.Username = user.Username
+	latest.Nickname = user.Nickname
 	uid := user.ID
 	if uid <= 0 {
 		uid = tokResp.UserID
 	}
 	if uid > 0 {
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerUserID, strconv.FormatInt(uid, 10))
+		latest.UserID = strconv.FormatInt(uid, 10)
 	}
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerEnabled, "true")
+	latest.Enabled = true
+	if err := tm.saveUserConfig(ctx, latest); err != nil {
+		return TrackerStatus{}, err
+	}
 
 	diagnostics.Default().Record(diagnostics.Event{
 		Level:     diagnostics.LevelInfo,
@@ -218,7 +221,8 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 	if err != nil {
 		_, proxyRaw := tm.svc.live.httpClient()
 		cleanErr := SanitizeProxyError(err, proxyRaw)
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshError, cleanErr)
+		cfg.LastRefreshError = cleanErr
+		_ = tm.saveUserConfig(ctx, cfg)
 		diagnostics.Default().Record(diagnostics.Event{
 			Level:     diagnostics.LevelWarn,
 			Component: "bangumi",
@@ -231,7 +235,8 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 	}
 	if strings.TrimSpace(tokResp.AccessToken) == "" {
 		errMsg := "Bangumi OAuth refresh returned empty access_token"
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshError, errMsg)
+		cfg.LastRefreshError = errMsg
+		_ = tm.saveUserConfig(ctx, cfg)
 		return TrackerStatus{}, errors.New(errMsg)
 	}
 
@@ -243,23 +248,24 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 		expiresAt = ts.UTC().Format(time.RFC3339)
 	}
 
-	if err := tm.svc.store.SetSetting(ctx, SettingTrackerToken, strings.TrimSpace(tokResp.AccessToken)); err != nil {
-		return TrackerStatus{}, err
-	}
+	cfg.Token = strings.TrimSpace(tokResp.AccessToken)
 	if strings.TrimSpace(tokResp.RefreshToken) != "" {
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerRefreshToken, strings.TrimSpace(tokResp.RefreshToken))
+		cfg.RefreshToken = strings.TrimSpace(tokResp.RefreshToken)
 	}
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerExpiresAt, expiresAt)
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshAt, now.Format(time.RFC3339))
-	_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshError, "")
+	cfg.ExpiresAt = expiresAt
+	cfg.LastRefreshAt = now.Format(time.RFC3339)
+	cfg.LastRefreshError = ""
 
 	// Best-effort profile refresh so username/nickname stay fresh.
 	if user, uErr := tm.VerifyToken(ctx, tokResp.AccessToken); uErr == nil {
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerUsername, user.Username)
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerNickname, user.Nickname)
+		cfg.Username = user.Username
+		cfg.Nickname = user.Nickname
 		if user.ID > 0 {
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerUserID, strconv.FormatInt(user.ID, 10))
+			cfg.UserID = strconv.FormatInt(user.ID, 10)
 		}
+	}
+	if err := tm.saveUserConfig(ctx, cfg); err != nil {
+		return TrackerStatus{}, err
 	}
 
 	diagnostics.Default().RecordVerbose(diagnostics.Event{
@@ -371,13 +377,23 @@ func (tm *trackerManager) refreshLoop() {
 	defer ticker.Stop()
 
 	check := func() {
-		checkCtx, cancel := context.WithTimeout(tm.svc.ctx, 30*time.Second)
-		defer cancel()
-		cfg := tm.loadConfig(checkCtx)
-		if cfg.AuthMode != TrackerAuthModeOAuth || strings.TrimSpace(cfg.RefreshToken) == "" {
+		if tm.svc.store == nil {
 			return
 		}
-		_, _ = tm.RefreshOAuthToken(checkCtx, false)
+		listCtx, cancelList := context.WithTimeout(tm.svc.ctx, 15*time.Second)
+		userIDs, err := tm.svc.store.ListOAuthBangumiTrackerUserIDs(listCtx)
+		cancelList()
+		if err != nil {
+			return
+		}
+		for _, uid := range userIDs {
+			userCtx, cancel := context.WithTimeout(database.WithUserID(tm.svc.ctx, uid), 30*time.Second)
+			cfg := tm.loadConfig(userCtx)
+			if cfg.AuthMode == TrackerAuthModeOAuth && strings.TrimSpace(cfg.RefreshToken) != "" {
+				_, _ = tm.RefreshOAuthToken(userCtx, false)
+			}
+			cancel()
+		}
 	}
 
 	for {

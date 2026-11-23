@@ -71,8 +71,8 @@
   - 后台一键下载校验离线索引并本地秒级批量匹配，默认接入与官方 100% 同构的 **中文简介增强镜像（[`xJogger/bangumi-archive-zh`](https://github.com/xJogger/bangumi-archive-zh)）**，全站非 NSFW 外文简介已翻译为简体中文；也可随时切回 `bangumi/Archive` 官方原版或自定义兼容源，支持每周/每月定时检查更新并自动增量 diff 同步未锁定字段。
   - 作品详情页支持 `api.bgm.tv/v0` 实时搜索或粘贴 Subject ID / 链接精准绑定；深度兼容双序方括号、`x` 合著作者、中英混排、扫图组噪音清洗与 `台版 / 港版 / 番外篇` 子目录父级回溯。
   - 支持独立专用代理（`http` / `https` / `socks5` / `socks5h`），统一加速 Bangumi、封面中转与 GitHub 更新检测，**不影响 115 与 WebDAV 直连流量**。
-- **NSFW 精准分级与默认隐藏**：严格依据 Bangumi 官方 `nsfw: true` 字段判定（辅助未命中目录成人关键词识别，并支持手动锁定），默认全局隐藏，后台可一键切换。
-- **单管理员强鉴权、全平台更新检测与 AI Agent API**：首次访问强制设密（`argon2id`），兼容持久 Session Cookie、`HTTP Basic Auth`、`Bearer` 与 `X-API-Key`；内置 24 小时跨平台更新检测（Android 端支持 `SHA256SUMS` 校验与应用内 `PackageInstaller` 安装）、全平台白名单脱敏诊断日志导出，以及 `/api/agent/v1` AI Agent 批量治理接口（见 [docs/AGENT_API.md](docs/AGENT_API.md)）。
+- **NSFW 精准分级与默认隐藏**：严格依据 Bangumi 官方 `nsfw: true` 字段判定（辅助未命中目录成人关键词识别，并支持手动锁定），默认隐藏；支持按用户授权与个人开关独立控制。
+- **多用户分权体系、跨平台更新检测与 AI Agent API**：支持 1 个主管理员 + 多个普通用户（`argon2id` 密码哈希），支持按账号精细分配书库白名单与 NSFW 访问权限；每位用户拥有完全独立的阅读进度、阅读历史、收藏夹、阅读列表、阅读器偏好、个人 API Key 与 Bangumi 进度追踪器，兼容 Session Cookie、`HTTP Basic Auth`、`Bearer` 与 `X-API-Key`；内置 24 小时跨平台更新检测（Android 端支持 `SHA256SUMS` 校验与应用内 `PackageInstaller` 安装）、全平台白名单脱敏诊断日志导出，以及管理员专属 `/api/agent/v1` AI Agent 批量治理接口（见 [docs/AGENT_API.md](docs/AGENT_API.md)）。
 
 ---
 
@@ -80,7 +80,7 @@
 
 - 固实（Solid）RAR、分卷 RAR、7z（非固实加密 ZIP / RAR4 / RAR5 已支持在网页阅读器输入并记住解压密码，同文件夹自动复用并在后台集中查看或清空）
 - 对远程网盘或本地磁盘上的原始文件执行上传、删除、移动或重命名（书库始终只读访问你的漫画源文件）
-- 多用户分权体系（当前采用单管理员安全模型）
+- 公开自助注册（普通用户均由管理员在后台统一创建与授权）
 - 上游 `downurl` 或 WebDAV 服务端不支持 HTTP `Range` 时静默整包下载（会明确返回 `501 RANGE_NOT_SUPPORTED`）
 
 ---
@@ -222,6 +222,7 @@ systemctl --user start fake-komga-115
 - **[Mihon](https://mihon.app/) 与 [Koharia](https://github.com/Mister-album/Koharia)**：优秀的 Android 漫画阅读客户端（Koharia 原生支持 Komga 生态），推动了 Komga 客户端体验的普及与打磨。
 - **[KOReader](https://koreader.rocks/) 与 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin)**（[@hugo1120](https://github.com/hugo1120)）：为墨水屏设备带来了体验极佳的 OPDS 逐页流式漫画阅读、预取低内存解码与章节导航能力。
 - **Go 核心开源库**：感谢 [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite)（纯 Go 无 CGO SQLite 引擎）、[`nwaples/rardecode`](https://github.com/nwaples/rardecode)（纯 Go RAR4/RAR5 解码器）、[`go-chi/chi`](https://github.com/go-chi/chi) 与 Go 标准库及 `golang.org/x` 团队。
+- **[霞鹜文楷 (LXGW WenKai)](https://github.com/lxgw/LxgwWenKai)**（SIL OFL 1.1）：大版本代号展示所用中文字形子集取材自霞鹜文楷开源字体。
 
 <p align="center">
   <img src="docs/images/mangaalpha-stamp.png" alt="MangaAlpha 的 Café Alpha 风格线稿小鱼印章" width="96">
@@ -233,3 +234,4 @@ systemctl --user start fake-komga-115
 
 - 主服务代码、内置书架与管理后台前端遵循 [MIT License](LICENSE) 开源。
 - 内置网页阅读器（`web/reader/` 与 `/reader/*` 构建产物）基于上游 [Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI) 修改集成，该子模块与衍生适配文件遵循 [Mozilla Public License 2.0 (MPL-2.0)](web/reader/LICENSE)。
+- 内嵌的大版本代号字形子集（`internal/httpserver/static/ui/codename-subset.woff2`）源自 [LXGW WenKai](https://github.com/lxgw/LxgwWenKai)，遵循 [SIL Open Font License 1.1](internal/httpserver/static/ui/LICENSE-LXGW-WenKai-OFL.txt)。

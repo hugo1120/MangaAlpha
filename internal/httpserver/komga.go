@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -37,7 +38,7 @@ func (s *Server) komgaRoutes(r chi.Router) {
 	r.Post("/series/list", s.komgaSeriesList)
 	r.Get("/series/{seriesID}", s.komgaSeriesByID)
 	r.Get("/series/{seriesID}/collections", s.komgaSeriesCollections)
-	r.Patch("/series/{seriesID}/metadata", s.patchKomgaSeriesMetadata)
+	r.With(s.requireAdmin).Patch("/series/{seriesID}/metadata", s.patchKomgaSeriesMetadata)
 	r.Post("/series/{seriesID}/read-progress", s.markKomgaSeriesRead)
 	r.Delete("/series/{seriesID}/read-progress", s.deleteKomgaSeriesReadProgress)
 	r.Get("/series/{seriesID}/books", s.komgaSeriesBooks)
@@ -123,6 +124,7 @@ func (s *Server) komgaCapabilities(w http.ResponseWriter, _ *http.Request) {
 			"opdsV1":                 true,
 			"opdsPse":                true,
 			"koreaderOpds":           true,
+			"multiUser":              true,
 		},
 	})
 }
@@ -257,11 +259,12 @@ func (s *Server) markKomgaSeriesRead(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadProgressSeriesChanged", map[string]any{
 		"seriesId": series.ID,
-		"userId":   "admin",
+		"userId":   userID,
 	})
-	s.notifyBangumiTracker(series.ID)
+	s.notifyBangumiTracker(r.Context(), series.ID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -275,9 +278,10 @@ func (s *Server) deleteKomgaSeriesReadProgress(w http.ResponseWriter, r *http.Re
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("ReadProgressSeriesDeleted", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadProgressSeriesDeleted", map[string]any{
 		"seriesId": series.ID,
-		"userId":   "admin",
+		"userId":   userID,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -559,9 +563,10 @@ func (s *Server) deleteKomgaBookReadProgress(w http.ResponseWriter, r *http.Requ
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("ReadProgressDeleted", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadProgressDeleted", map[string]any{
 		"bookId": book.ID,
-		"userId": "admin",
+		"userId": userID,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -596,11 +601,12 @@ func (s *Server) patchKomgaBookReadProgress(w http.ResponseWriter, r *http.Reque
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("ReadProgressChanged", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadProgressChanged", map[string]any{
 		"bookId": book.ID,
-		"userId": "admin",
+		"userId": userID,
 	})
-	s.notifyBangumiTracker(book.SeriesID)
+	s.notifyBangumiTracker(r.Context(), book.SeriesID)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -765,19 +771,20 @@ func (s *Server) putSeriesProgress(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("ReadProgressSeriesChanged", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadProgressSeriesChanged", map[string]any{
 		"seriesId": series.ID,
-		"userId":   "admin",
+		"userId":   userID,
 	})
 	if request.LastBookNumberSortRead > 0 {
-		s.notifyBangumiTracker(series.ID)
+		s.notifyBangumiTracker(r.Context(), series.ID)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) notifyBangumiTracker(seriesID string) {
+func (s *Server) notifyBangumiTracker(ctx context.Context, seriesID string) {
 	if s.bangumi != nil && seriesID != "" {
-		s.bangumi.NotifyProgress(seriesID)
+		s.bangumi.NotifyProgressForUser(database.UserIDFromContext(ctx), seriesID)
 	}
 }
 

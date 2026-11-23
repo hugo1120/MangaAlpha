@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
 func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
@@ -30,8 +32,21 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"versions": []any{}})
 		return
 	}
+	visibleLibs, err := s.store.LibrariesBasic(ctx, true)
+	if err != nil {
+		s.writeDBErrorMessage(w, r, err, "Could not load visible libraries.")
+		return
+	}
+	if len(visibleLibs) == 0 {
+		writeJSON(w, 200, map[string]any{"versions": []any{}})
+		return
+	}
 	where := " WHERE gm.bgm_subject_id=? AND s.one_shot=0 AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)"
 	args := []any{*meta.BgmSubjectID}
+	where += " AND s.library_id IN " + database.Placeholders(len(visibleLibs))
+	for _, lib := range visibleLibs {
+		args = append(args, lib.ID)
+	}
 	if !s.store.ShowNSFW(ctx) {
 		where += " AND gm.is_nsfw=0"
 	}
@@ -75,9 +90,11 @@ func (s *Server) bookshelfVersions(w http.ResponseWriter, r *http.Request) {
 	var page int
 	var done bool
 	if len(versions) > 1 {
+		userID := database.UserIDFromContext(ctx)
+		lastArgs := append([]any{userID}, args...)
 		err := s.store.DB().QueryRowContext(ctx, "SELECT s.id,b.id,coalesce(p.page,1),p.completed"+joins+
-			" JOIN books b ON b.series_id=s.id JOIN book_read_progress p ON p.book_id=b.id"+
-			where+" ORDER BY p.updated_at DESC,b.id LIMIT 1", args...).Scan(&seriesID, &bookID, &page, &done)
+			" JOIN books b ON b.series_id=s.id JOIN book_read_progress p ON p.book_id=b.id AND p.user_id=?"+
+			where+" ORDER BY p.updated_at DESC,b.id LIMIT 1", lastArgs...).Scan(&seriesID, &bookID, &page, &done)
 		if err == nil {
 			result["lastRead"] = map[string]any{"seriesId": seriesID, "bookId": bookID, "page": page, "completed": done}
 		}

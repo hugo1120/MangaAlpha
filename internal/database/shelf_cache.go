@@ -113,6 +113,12 @@ func (s *Store) shelfRevision(ctx context.Context, includesProgress bool) (shelf
 // same transaction as data, including writes by scanner and Agent endpoints.
 func shelfCached[T any](ctx context.Context, s *Store, key string, progress bool, fn func(context.Context) (T, error)) (T, error) {
 	var zero T
+	visKey := s.VisibilityCacheKey(ctx)
+	if progress {
+		key = key + "|u=" + UserIDFromContext(ctx) + "|v=" + visKey
+	} else {
+		key = key + "|v=" + visKey
+	}
 	lookup := func(rev shelfRevision) (T, bool) {
 		s.shelf.mu.Lock()
 		defer s.shelf.mu.Unlock()

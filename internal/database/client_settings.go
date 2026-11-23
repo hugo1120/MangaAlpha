@@ -13,9 +13,10 @@ type ClientSetting struct {
 }
 
 func (s *Store) ClientSettings(ctx context.Context) (map[string]ClientSetting, error) {
+	userID := UserIDFromContext(ctx)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT key,value,allow_unauthenticated,updated_at
-FROM client_settings ORDER BY key`)
+FROM client_settings WHERE user_id=? ORDER BY key`, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -41,30 +42,33 @@ func (s *Store) UpsertClientSetting(
 	key, value string,
 	allowUnauthenticated bool,
 ) error {
+	userID := UserIDFromContext(ctx)
 	allowValue := 0
 	if allowUnauthenticated {
 		allowValue = 1
 	}
 	_, err := s.db.ExecContext(ctx, `
-INSERT INTO client_settings(key,value,allow_unauthenticated,updated_at)
-VALUES(?,?,?,?)
-ON CONFLICT(key) DO UPDATE SET
+INSERT INTO client_settings(user_id,key,value,allow_unauthenticated,updated_at)
+VALUES(?,?,?,?,?)
+ON CONFLICT(user_id,key) DO UPDATE SET
  value=excluded.value,
  allow_unauthenticated=excluded.allow_unauthenticated,
  updated_at=excluded.updated_at`,
-		key, value, allowValue, nowText())
+		userID, key, value, allowValue, nowText())
 	return err
 }
 
 func (s *Store) DeleteClientSetting(ctx context.Context, key string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM client_settings WHERE key=?`, key)
+	userID := UserIDFromContext(ctx)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM client_settings WHERE user_id=? AND key=?`, userID, key)
 	return err
 }
 
 func (s *Store) ClientSettingValue(ctx context.Context, key string) (string, bool, error) {
+	userID := UserIDFromContext(ctx)
 	var value string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT value FROM client_settings WHERE key=?`, key).Scan(&value)
+		`SELECT value FROM client_settings WHERE user_id=? AND key=?`, userID, key).Scan(&value)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return "", false, nil

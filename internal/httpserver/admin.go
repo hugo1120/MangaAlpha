@@ -29,7 +29,8 @@ import (
 )
 
 func (s *Server) adminRoutes(r chi.Router) {
-	// Auth & API Key routes
+	// Auth, self-service account & personal API key / session routes (available to any authenticated user;
+	// /auth/status, /auth/setup, /auth/login, /auth/logout are gated by authMiddleware)
 	r.Get("/auth/status", s.authStatusHandler)
 	r.Post("/auth/setup", s.authSetupHandler)
 	r.Post("/auth/login", s.authLoginHandler)
@@ -40,76 +41,19 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/auth/api-keys", s.listAPIKeysHandler)
 	r.Post("/auth/api-keys", s.createAPIKeyHandler)
 	r.Delete("/auth/api-keys/{keyID}", s.deleteAPIKeyHandler)
-	r.Post("/books/{bookID}/unlock", s.unlockBookArchiveHandler)
-	r.Get("/archive-passwords", s.listArchivePasswordsHandler)
-	r.Delete("/archive-passwords", s.clearArchivePasswordsHandler)
-	r.Delete("/archive-passwords/{passwordID}", s.deleteArchivePasswordHandler)
-	r.Delete("/archive-passwords/bindings/{bookID}", s.deleteArchivePasswordBindingHandler)
-	r.Get("/agent/auth-requests/{requestID}", s.getAdminAgentAuthRequest)
-	r.Post("/agent/auth-requests/{requestID}/approve", s.approveAdminAgentAuthRequest)
-	r.Post("/agent/auth-requests/{requestID}/reject", s.rejectAdminAgentAuthRequest)
 
-	// Status & 115 account
-	r.Get("/status", s.adminStatus)
-	r.Get("/account", s.getAccount)
-	r.Put("/account", s.putAccount)
-	r.Post("/account/test", s.testAccount)
-	r.Post("/account/refresh", s.refreshAccount)
-	r.Get("/115/folders", s.list115Folders)
+	// Personal account overview & preferences
+	r.Get("/me", s.getMyAccount)
+	r.Put("/me/preferences", s.putMyPreferences)
 
-	// Local & WebDAV storage sources
-	r.Get("/local/folders", s.listLocalFolders)
-	r.Get("/webdav-accounts", s.listWebDAVAccounts)
-	r.Post("/webdav-accounts", s.createWebDAVAccount)
-	r.Put("/webdav-accounts/{accountID}", s.updateWebDAVAccount)
-	r.Delete("/webdav-accounts/{accountID}", s.deleteWebDAVAccount)
-	r.Post("/webdav-accounts/test", s.testWebDAVAccount)
-	r.Get("/webdav-accounts/{accountID}/folders", s.listWebDAVFolders)
-
-	// Libraries, union refresh, schedules, pipelines, settings, scans, covers, maintenance, cache
-	r.Get("/libraries", s.listLibraries)
-	r.Post("/libraries", s.createLibrary)
-	r.Put("/libraries/{libraryID}", s.updateLibrary)
-	r.Delete("/libraries/{libraryID}", s.deleteLibrary)
-	r.Post("/libraries/{libraryID}/union-refresh", s.refreshUnionLibrary)
-	r.Get("/schedules", s.listLibrarySchedules)
-	r.Put("/libraries/{libraryID}/schedule", s.putLibrarySchedule)
-	r.Get("/pipelines", s.listPipelineRuns)
-	r.Post("/pipelines", s.startPipelineRun)
-	r.Post("/pipelines/{runID}/cancel", s.cancelPipelineRun)
-	r.Get("/settings", s.getSettings)
-	r.Put("/settings", s.putSettings)
-	r.Get("/scans", s.listScans)
-	r.Post("/scans", s.startScan)
-	r.Post("/scans/{runID}/cancel", s.cancelScan)
+	// Built-in bookshelf & reader endpoints available to any authorized user (library & NSFW visibility enforced per user)
 	r.Get("/bookshelf/series", s.bookshelfSeries)
 	r.Get("/bookshelf/versions/{seriesID}", s.bookshelfVersions)
-	r.Get("/cover-jobs", s.listCoverJobs)
-	r.Post("/cover-jobs", s.startCoverJob)
-	r.Post("/cover-jobs/{runID}/cancel", s.cancelCoverJob)
-	r.Get("/maintenance-jobs", s.listMaintenanceJobs)
-	r.Post("/maintenance-jobs", s.startMaintenanceJob)
-	r.Post("/maintenance-jobs/{runID}/cancel", s.cancelMaintenanceJob)
-	r.Get("/cache", s.cacheStats)
-	r.Delete("/cache/{cacheType}", s.clearCache)
-
-	// Sanitized diagnostics log preview, verbose toggle, export & clear
-	r.Get("/diagnostics", s.getDiagnostics)
-	r.Put("/diagnostics/config", s.putDiagnosticsConfig)
-	r.Get("/diagnostics/export", s.exportDiagnostics)
-	r.Delete("/diagnostics", s.clearDiagnostics)
-
-	// Cross-platform release update detection
-	r.Get("/update", s.getUpdateStatus)
-	r.Get("/update/status", s.getUpdateStatus)
-	r.Post("/update/check", s.postUpdateCheck)
-	r.Put("/update/config", s.putUpdateConfig)
-
-	// Rich detail endpoints for built-in Bookshelf & WebView
 	r.Get("/series/{seriesID}/detail", s.seriesRichDetail)
 	r.Get("/books/{bookID}/detail", s.bookRichDetail)
+	r.Post("/books/{bookID}/unlock", s.unlockBookArchiveHandler)
 
-	// Bangumi scraping, archive index management, tracker & userscript
+	// Per-user Bangumi userscript pairing & Bangumi progress tracker
 	r.Get("/bangumi/userscript.user.js", s.downloadBangumiUserscript)
 	r.Post("/bangumi/userscript/pair-key", s.createUserscriptPairKey)
 	r.Get("/bangumi/tracker", s.getBangumiTracker)
@@ -120,23 +64,103 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Post("/bangumi/tracker/oauth/exchange", s.exchangeBangumiTrackerOAuthCode)
 	r.Post("/bangumi/tracker/oauth/refresh", s.refreshBangumiTrackerOAuth)
 	r.Post("/series/{seriesID}/bangumi/tracker/retry", s.retrySeriesBangumiTracker)
-	r.Get("/bangumi/status", s.bangumiStatus)
-	r.Put("/bangumi/config", s.putBangumiConfig)
-	r.Post("/bangumi/proxy/test", s.testBangumiProxy)
-	r.Get("/bangumi/subjects/{subjectID}/cover", s.bangumiSubjectCover)
-	r.Get("/bangumi/archive/source", s.getBangumiArchiveSource)
-	r.Put("/bangumi/archive/source", s.putBangumiArchiveSource)
-	r.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
-	r.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
-	r.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
-	r.Post("/bangumi/archive/cancel", s.cancelBangumiArchiveUpdate)
-	r.Get("/bangumi/runs", s.listBangumiRuns)
-	r.Post("/bangumi/runs", s.startBangumiRun)
-	r.Post("/bangumi/runs/{runID}/cancel", s.cancelBangumiRun)
-	r.Get("/series/{seriesID}/bangumi/candidates", s.searchSeriesBangumi)
-	r.Post("/series/{seriesID}/bangumi/bind", s.bindSeriesBangumi)
-	r.Post("/series/{seriesID}/bangumi/auto", s.autoMatchSeriesBangumi)
-	r.Delete("/series/{seriesID}/bangumi/bind", s.clearSeriesBangumi)
+
+	// Administrator-only management routes
+	r.Group(func(ar chi.Router) {
+		ar.Use(s.requireAdmin)
+
+		// Multi-user management
+		ar.Get("/users", s.adminListUsers)
+		ar.Post("/users", s.adminCreateUser)
+		ar.Put("/users/{userID}", s.adminUpdateUser)
+		ar.Post("/users/{userID}/reset-password", s.adminResetUserPassword)
+		ar.Post("/users/{userID}/kick", s.adminKickUserSessions)
+		ar.Delete("/users/{userID}", s.adminDeleteUser)
+
+		// Encrypted archive password vault management (plaintext passwords are admin-only)
+		ar.Get("/archive-passwords", s.listArchivePasswordsHandler)
+		ar.Delete("/archive-passwords", s.clearArchivePasswordsHandler)
+		ar.Delete("/archive-passwords/{passwordID}", s.deleteArchivePasswordHandler)
+		ar.Delete("/archive-passwords/bindings/{bookID}", s.deleteArchivePasswordBindingHandler)
+
+		// Agent Device Auth approval
+		ar.Get("/agent/auth-requests/{requestID}", s.getAdminAgentAuthRequest)
+		ar.Post("/agent/auth-requests/{requestID}/approve", s.approveAdminAgentAuthRequest)
+		ar.Post("/agent/auth-requests/{requestID}/reject", s.rejectAdminAgentAuthRequest)
+
+		// Status & 115 account
+		ar.Get("/status", s.adminStatus)
+		ar.Get("/account", s.getAccount)
+		ar.Put("/account", s.putAccount)
+		ar.Post("/account/test", s.testAccount)
+		ar.Post("/account/refresh", s.refreshAccount)
+		ar.Get("/115/folders", s.list115Folders)
+
+		// Local & WebDAV storage sources
+		ar.Get("/local/folders", s.listLocalFolders)
+		ar.Get("/webdav-accounts", s.listWebDAVAccounts)
+		ar.Post("/webdav-accounts", s.createWebDAVAccount)
+		ar.Put("/webdav-accounts/{accountID}", s.updateWebDAVAccount)
+		ar.Delete("/webdav-accounts/{accountID}", s.deleteWebDAVAccount)
+		ar.Post("/webdav-accounts/test", s.testWebDAVAccount)
+		ar.Get("/webdav-accounts/{accountID}/folders", s.listWebDAVFolders)
+
+		// Libraries, union refresh, schedules, pipelines, settings, scans, covers, maintenance, cache
+		ar.Get("/libraries", s.listLibraries)
+		ar.Post("/libraries", s.createLibrary)
+		ar.Put("/libraries/{libraryID}", s.updateLibrary)
+		ar.Delete("/libraries/{libraryID}", s.deleteLibrary)
+		ar.Post("/libraries/{libraryID}/union-refresh", s.refreshUnionLibrary)
+		ar.Get("/schedules", s.listLibrarySchedules)
+		ar.Put("/libraries/{libraryID}/schedule", s.putLibrarySchedule)
+		ar.Get("/pipelines", s.listPipelineRuns)
+		ar.Post("/pipelines", s.startPipelineRun)
+		ar.Post("/pipelines/{runID}/cancel", s.cancelPipelineRun)
+		ar.Get("/settings", s.getSettings)
+		ar.Put("/settings", s.putSettings)
+		ar.Get("/scans", s.listScans)
+		ar.Post("/scans", s.startScan)
+		ar.Post("/scans/{runID}/cancel", s.cancelScan)
+		ar.Get("/cover-jobs", s.listCoverJobs)
+		ar.Post("/cover-jobs", s.startCoverJob)
+		ar.Post("/cover-jobs/{runID}/cancel", s.cancelCoverJob)
+		ar.Get("/maintenance-jobs", s.listMaintenanceJobs)
+		ar.Post("/maintenance-jobs", s.startMaintenanceJob)
+		ar.Post("/maintenance-jobs/{runID}/cancel", s.cancelMaintenanceJob)
+		ar.Get("/cache", s.cacheStats)
+		ar.Delete("/cache/{cacheType}", s.clearCache)
+
+		// Sanitized diagnostics log preview, verbose toggle, export & clear
+		ar.Get("/diagnostics", s.getDiagnostics)
+		ar.Put("/diagnostics/config", s.putDiagnosticsConfig)
+		ar.Get("/diagnostics/export", s.exportDiagnostics)
+		ar.Delete("/diagnostics", s.clearDiagnostics)
+
+		// Cross-platform release update detection
+		ar.Get("/update", s.getUpdateStatus)
+		ar.Get("/update/status", s.getUpdateStatus)
+		ar.Post("/update/check", s.postUpdateCheck)
+		ar.Put("/update/config", s.putUpdateConfig)
+
+		// Global Bangumi scraping, proxy & offline archive management
+		ar.Get("/bangumi/status", s.bangumiStatus)
+		ar.Put("/bangumi/config", s.putBangumiConfig)
+		ar.Post("/bangumi/proxy/test", s.testBangumiProxy)
+		ar.Get("/bangumi/subjects/{subjectID}/cover", s.bangumiSubjectCover)
+		ar.Get("/bangumi/archive/source", s.getBangumiArchiveSource)
+		ar.Put("/bangumi/archive/source", s.putBangumiArchiveSource)
+		ar.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
+		ar.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
+		ar.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
+		ar.Post("/bangumi/archive/cancel", s.cancelBangumiArchiveUpdate)
+		ar.Get("/bangumi/runs", s.listBangumiRuns)
+		ar.Post("/bangumi/runs", s.startBangumiRun)
+		ar.Post("/bangumi/runs/{runID}/cancel", s.cancelBangumiRun)
+		ar.Get("/series/{seriesID}/bangumi/candidates", s.searchSeriesBangumi)
+		ar.Post("/series/{seriesID}/bangumi/bind", s.bindSeriesBangumi)
+		ar.Post("/series/{seriesID}/bangumi/auto", s.autoMatchSeriesBangumi)
+		ar.Delete("/series/{seriesID}/bangumi/bind", s.clearSeriesBangumi)
+	})
 }
 
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
@@ -1713,6 +1737,10 @@ func (s *Server) getBangumiTracker(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
+	if principal, ok := s.currentPrincipal(r); ok && !principal.IsAdmin {
+		st.CustomOAuthClientID = ""
+		st.HasCustomOAuthSecret = false
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 
@@ -1725,6 +1753,12 @@ func (s *Server) putBangumiTrackerConfig(w http.ResponseWriter, r *http.Request)
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if principal, ok := s.currentPrincipal(r); ok && !principal.IsAdmin {
+		if req.CustomOAuthClientID != nil || req.CustomOAuthClientSecret != nil || req.ClearCustomOAuthApp {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "仅管理员可修改全局自定义 Bangumi OAuth 应用配置。")
+			return
+		}
+	}
 	st, err := s.bangumi.UpdateTrackerConfig(r.Context(), req)
 	if err != nil {
 		switch {
@@ -1736,6 +1770,10 @@ func (s *Server) putBangumiTrackerConfig(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusBadRequest, "INVALID_TRACKER_CONFIG", err.Error())
 		}
 		return
+	}
+	if principal, ok := s.currentPrincipal(r); ok && !principal.IsAdmin {
+		st.CustomOAuthClientID = ""
+		st.HasCustomOAuthSecret = false
 	}
 	writeJSON(w, http.StatusOK, st)
 }

@@ -43,9 +43,12 @@ var argonSem = make(chan struct{}, 4)
 
 func (s *Store) HasAdmin(ctx context.Context) (bool, error) {
 	var exists int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM auth_admin WHERE id=1`).Scan(&exists)
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=? AND role='admin'`, PrimaryAdminUserID).Scan(&exists)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		err = s.db.QueryRowContext(ctx, `SELECT 1 FROM auth_admin WHERE id=1`).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
 	}
 	return err == nil, err
 }
@@ -53,10 +56,15 @@ func (s *Store) HasAdmin(ctx context.Context) (bool, error) {
 func (s *Store) Admin(ctx context.Context) (AdminUser, bool, error) {
 	var user AdminUser
 	err := s.db.QueryRowContext(ctx,
-		`SELECT username,created_at,updated_at FROM auth_admin WHERE id=1`,
+		`SELECT username,created_at,updated_at FROM users WHERE id=? AND role='admin'`, PrimaryAdminUserID,
 	).Scan(&user.Username, &user.CreatedAt, &user.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return AdminUser{}, false, nil
+		err = s.db.QueryRowContext(ctx,
+			`SELECT username,created_at,updated_at FROM auth_admin WHERE id=1`,
+		).Scan(&user.Username, &user.CreatedAt, &user.UpdatedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			return AdminUser{}, false, nil
+		}
 	}
 	if err != nil {
 		return AdminUser{}, false, err
@@ -77,132 +85,207 @@ func (s *Store) ClaimAdmin(ctx context.Context, username, password string) (Admi
 		return AdminUser{}, err
 	}
 	now := nowText()
-	_, err = s.db.ExecContext(ctx, `
-INSERT INTO auth_admin(id,username,password_hash,created_at,updated_at)
-VALUES(1,?,?,?,?)`, username, hash, now, now)
+	showNSFW := 0
+	if s.BoolSetting(ctx, "show_nsfw", false) {
+		showNSFW = 1
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return AdminUser{}, err
+	}
+	defer tx.Rollback()
+
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM users WHERE id=?`, PrimaryAdminUserID).Scan(&exists); err != nil {
+		return AdminUser{}, err
+	}
+	if exists > 0 {
+		return AdminUser{}, ErrAlreadyClaimed
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO users(id,username,password_hash,role,enabled,all_libraries,allow_nsfw,show_nsfw,created_at,updated_at)
+VALUES(?,?,?,'admin',1,1,1,?,?,?)`, PrimaryAdminUserID, username, hash, showNSFW, now, now); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") ||
 			strings.Contains(strings.ToLower(err.Error()), "constraint") {
 			return AdminUser{}, ErrAlreadyClaimed
 		}
 		return AdminUser{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO auth_admin(id,username,password_hash,created_at,updated_at)
+VALUES(1,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,updated_at=excluded.updated_at`,
+		username, hash, now, now); err != nil {
+		return AdminUser{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return AdminUser{}, err
+	}
 	s.clearBasicAuthCache()
 	return AdminUser{Username: username, CreatedAt: now, UpdatedAt: now}, nil
 }
 
-func (s *Store) VerifyAdminPassword(ctx context.Context, username, password string) (AdminUser, bool, error) {
+// VerifyUserPassword authenticates any enabled user (admin or sub-user) in constant time.
+func (s *Store) VerifyUserPassword(ctx context.Context, username, password string) (User, bool, error) {
 	username = strings.TrimSpace(username)
 	if username == "" || password == "" {
-		return AdminUser{}, false, nil
+		return User{}, false, nil
 	}
-	var (
-		user       AdminUser
-		storedHash string
-	)
-	err := s.db.QueryRowContext(ctx, `
-SELECT username,password_hash,created_at,updated_at FROM auth_admin WHERE id=1`,
-	).Scan(&user.Username, &storedHash, &user.CreatedAt, &user.UpdatedAt)
+	user, storedHash, err := s.UserByUsername(ctx, username)
 	if errors.Is(err, sql.ErrNoRows) {
-		return AdminUser{}, false, nil
+		_, _ = verifyPasswordCtx(ctx, password, dummyArgonHash)
+		return User{}, false, nil
 	}
 	if err != nil {
-		return AdminUser{}, false, err
+		return User{}, false, err
 	}
-	if subtle.ConstantTimeCompare([]byte(strings.ToLower(user.Username)), []byte(strings.ToLower(username))) != 1 {
+	if !user.Enabled {
 		_, _ = verifyPasswordCtx(ctx, password, dummyArgonHash)
-		return AdminUser{}, false, nil
+		return User{}, false, nil
 	}
-	cacheKey := basicCacheKey(user.Username, password, storedHash)
+	cacheKey := basicCacheKey(user.ID+":"+user.Username, password, storedHash)
 	if s.checkBasicAuthCache(cacheKey) {
 		return user, true, nil
 	}
 	ok, err := verifyPasswordCtx(ctx, password, storedHash)
 	if err != nil {
-		return AdminUser{}, false, err
+		return User{}, false, err
 	}
 	if !ok {
-		return AdminUser{}, false, nil
+		return User{}, false, nil
 	}
 	s.putBasicAuthCache(cacheKey)
 	return user, true, nil
+}
+
+func (s *Store) VerifyAdminPassword(ctx context.Context, username, password string) (AdminUser, bool, error) {
+	u, ok, err := s.VerifyUserPassword(ctx, username, password)
+	if err != nil || !ok || !u.IsAdmin() {
+		return AdminUser{}, false, err
+	}
+	return AdminUser{Username: u.Username, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}, true, nil
 }
 
 func (s *Store) UpdateAdminCredentials(
 	ctx context.Context,
 	currentPassword, newUsername, newPassword, keepSessionToken string,
 ) (AdminUser, error) {
-	var (
-		existingUser AdminUser
-		storedHash   string
-	)
-	err := s.db.QueryRowContext(ctx, `
-SELECT username,password_hash,created_at,updated_at FROM auth_admin WHERE id=1`,
-	).Scan(&existingUser.Username, &storedHash, &existingUser.CreatedAt, &existingUser.UpdatedAt)
+	u, err := s.UpdateUserCredentials(ctx, PrimaryAdminUserID, currentPassword, newUsername, newPassword, keepSessionToken)
 	if err != nil {
 		return AdminUser{}, err
 	}
+	return AdminUser{Username: u.Username, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}, nil
+}
+
+func (s *Store) UpdateUserCredentials(
+	ctx context.Context,
+	userID, currentPassword, newUsername, newPassword, keepSessionToken string,
+) (User, error) {
+	userID = normalizeUserID(userID)
+	var storedHash string
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=?`, userID).Scan(&storedHash); err != nil {
+		return User{}, err
+	}
+	cur, err := s.UserByID(ctx, userID)
+	if err != nil {
+		return User{}, err
+	}
 	if !verifyPassword(currentPassword, storedHash) {
-		return AdminUser{}, ErrInvalidCredentials
+		return User{}, ErrInvalidCredentials
 	}
 	targetUsername := strings.TrimSpace(newUsername)
 	if targetUsername == "" {
-		targetUsername = existingUser.Username
+		targetUsername = cur.Username
+	}
+	if !cur.IsAdmin() && !strings.EqualFold(targetUsername, cur.Username) {
+		return User{}, errors.New("only administrators can change usernames")
 	}
 	if err := validateAdminUsername(targetUsername); err != nil {
-		return AdminUser{}, err
+		return User{}, err
 	}
 	targetHash := storedHash
 	if newPassword != "" {
 		if err := validateAdminPassword(newPassword); err != nil {
-			return AdminUser{}, err
+			return User{}, err
 		}
 		targetHash, err = hashPassword(newPassword)
 		if err != nil {
-			return AdminUser{}, err
+			return User{}, err
 		}
 	}
 	now := nowText()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return AdminUser{}, err
+		return User{}, err
 	}
 	defer tx.Rollback()
+
+	if !strings.EqualFold(targetUsername, cur.Username) {
+		var dup int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT count(*) FROM users WHERE username=? COLLATE NOCASE AND id<>?`, targetUsername, userID,
+		).Scan(&dup); err != nil {
+			return User{}, err
+		}
+		if dup > 0 {
+			return User{}, ErrDuplicateUsername
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `
+UPDATE users SET username=?,password_hash=?,updated_at=? WHERE id=?`,
+		targetUsername, targetHash, now, userID); err != nil {
+		return User{}, err
+	}
+	if cur.IsAdmin() {
+		_, _ = tx.ExecContext(ctx, `
 UPDATE auth_admin SET username=?,password_hash=?,updated_at=? WHERE id=1`,
-		targetUsername, targetHash, now); err != nil {
-		return AdminUser{}, err
+			targetUsername, targetHash, now)
 	}
 	if keepSessionToken != "" {
 		keepHash := sha256Hex(keepSessionToken)
 		if _, err := tx.ExecContext(ctx,
-			`DELETE FROM auth_sessions WHERE token_hash<>?`, keepHash); err != nil {
-			return AdminUser{}, err
+			`DELETE FROM auth_sessions WHERE user_id=? AND token_hash<>?`, userID, keepHash); err != nil {
+			return User{}, err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE auth_sessions SET username=? WHERE token_hash=?`, targetUsername, keepHash); err != nil {
-			return AdminUser{}, err
+			`UPDATE auth_sessions SET username=? WHERE user_id=? AND token_hash=?`, targetUsername, userID, keepHash); err != nil {
+			return User{}, err
 		}
 	} else {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions`); err != nil {
-			return AdminUser{}, err
+		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id=?`, userID); err != nil {
+			return User{}, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return AdminUser{}, err
+		return User{}, err
 	}
 	s.clearBasicAuthCache()
-	existingUser.Username = targetUsername
-	existingUser.UpdatedAt = now
-	return existingUser, nil
+	cur.Username = targetUsername
+	cur.UpdatedAt = now
+	return cur, nil
 }
 
 func (s *Store) CreateSession(
 	ctx context.Context,
 	username string,
+	remember bool,
+	userAgent string,
+) (string, AuthSession, error) {
+	userID := UserIDFromContext(ctx)
+	if u, _, err := s.UserByUsername(ctx, username); err == nil {
+		userID = u.ID
+	}
+	return s.CreateSessionForUser(ctx, userID, username, remember, userAgent)
+}
+
+func (s *Store) CreateSessionForUser(
+	ctx context.Context,
+	userID, username string,
 	_ bool,
 	userAgent string,
 ) (string, AuthSession, error) {
+	userID = normalizeUserID(userID)
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE expires_at<=?`, nowText())
 	rawToken, err := randomURLToken(32)
 	if err != nil {
@@ -217,14 +300,15 @@ func (s *Store) CreateSession(
 		ua = ua[:256]
 	}
 	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO auth_sessions(token_hash,username,remember,user_agent,created_at,last_seen_at,expires_at)
-VALUES(?,?,1,?,?,?,?)`,
-		tokenHash, username, ua, createdText, createdText, expiresText,
+INSERT INTO auth_sessions(token_hash,user_id,username,remember,user_agent,created_at,last_seen_at,expires_at)
+VALUES(?,?,?,1,?,?,?,?)`,
+		tokenHash, userID, username, ua, createdText, createdText, expiresText,
 	); err != nil {
 		return "", AuthSession{}, err
 	}
 	return rawToken, AuthSession{
 		ID:         tokenHash[:16],
+		UserID:     userID,
 		Username:   username,
 		Remember:   true,
 		UserAgent:  ua,
@@ -243,18 +327,32 @@ func (s *Store) ValidateSession(ctx context.Context, rawToken string) (AuthSessi
 	var (
 		session     AuthSession
 		rememberInt int
+		userEnabled sql.NullInt64
+		liveName    sql.NullString
 	)
 	err := s.db.QueryRowContext(ctx, `
-SELECT username,remember,user_agent,created_at,last_seen_at,expires_at
-FROM auth_sessions WHERE token_hash=?`, tokenHash).Scan(
-		&session.Username, &rememberInt, &session.UserAgent,
+SELECT s.user_id,s.username,s.remember,s.user_agent,s.created_at,s.last_seen_at,s.expires_at,
+ u.enabled,u.username
+FROM auth_sessions s
+LEFT JOIN users u ON u.id=s.user_id
+WHERE s.token_hash=?`, tokenHash).Scan(
+		&session.UserID, &session.Username, &rememberInt, &session.UserAgent,
 		&session.CreatedAt, &session.LastSeenAt, &session.ExpiresAt,
+		&userEnabled, &liveName,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AuthSession{}, false, nil
 	}
 	if err != nil {
 		return AuthSession{}, false, err
+	}
+	// Reject sessions belonging to deleted or disabled users.
+	if !userEnabled.Valid || userEnabled.Int64 == 0 {
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE token_hash=?`, tokenHash)
+		return AuthSession{}, false, nil
+	}
+	if liveName.Valid && liveName.String != "" {
+		session.Username = liveName.String
 	}
 	now := time.Now().UTC()
 	if session.ExpiresAt != PermanentSessionExpiresAt {
@@ -288,12 +386,17 @@ func (s *Store) DeleteSession(ctx context.Context, rawToken string) error {
 }
 
 func (s *Store) DeleteSessionByPrefix(ctx context.Context, prefix string) error {
+	return s.DeleteSessionByPrefixForUser(ctx, UserIDFromContext(ctx), prefix)
+}
+
+func (s *Store) DeleteSessionByPrefixForUser(ctx context.Context, userID, prefix string) error {
 	prefix = strings.TrimSpace(prefix)
 	if len(prefix) != 16 {
 		return sql.ErrNoRows
 	}
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM auth_sessions WHERE substr(token_hash,1,16)=?`, prefix)
+		`DELETE FROM auth_sessions WHERE user_id=? AND substr(token_hash,1,16)=?`,
+		normalizeUserID(userID), prefix)
 	if err != nil {
 		return err
 	}
@@ -305,6 +408,10 @@ func (s *Store) DeleteSessionByPrefix(ctx context.Context, prefix string) error 
 }
 
 func (s *Store) ListSessions(ctx context.Context, currentRawToken string) ([]AuthSession, error) {
+	return s.ListSessionsForUser(ctx, UserIDFromContext(ctx), currentRawToken)
+}
+
+func (s *Store) ListSessionsForUser(ctx context.Context, userID, currentRawToken string) ([]AuthSession, error) {
 	now := nowText()
 	_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE expires_at<=?`, now)
 	currentHash := ""
@@ -312,8 +419,8 @@ func (s *Store) ListSessions(ctx context.Context, currentRawToken string) ([]Aut
 		currentHash = sha256Hex(strings.TrimSpace(currentRawToken))
 	}
 	rows, err := s.db.QueryContext(ctx, `
-SELECT token_hash,username,remember,user_agent,created_at,last_seen_at,expires_at
-FROM auth_sessions ORDER BY last_seen_at DESC`)
+SELECT token_hash,user_id,username,remember,user_agent,created_at,last_seen_at,expires_at
+FROM auth_sessions WHERE user_id=? ORDER BY last_seen_at DESC`, normalizeUserID(userID))
 	if err != nil {
 		return nil, err
 	}
@@ -326,7 +433,7 @@ FROM auth_sessions ORDER BY last_seen_at DESC`)
 			rememberInt int
 		)
 		if err := rows.Scan(
-			&tokenHash, &item.Username, &rememberInt, &item.UserAgent,
+			&tokenHash, &item.UserID, &item.Username, &rememberInt, &item.UserAgent,
 			&item.CreatedAt, &item.LastSeenAt, &item.ExpiresAt,
 		); err != nil {
 			return nil, err
@@ -340,6 +447,11 @@ FROM auth_sessions ORDER BY last_seen_at DESC`)
 }
 
 func (s *Store) CreateAPIKey(ctx context.Context, name string) (string, APIKey, error) {
+	return s.CreateAPIKeyForUser(ctx, UserIDFromContext(ctx), name)
+}
+
+func (s *Store) CreateAPIKeyForUser(ctx context.Context, userID, name string) (string, APIKey, error) {
+	userID = normalizeUserID(userID)
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 80 {
 		return "", APIKey{}, errors.New("API key name must be between 1 and 80 characters")
@@ -357,12 +469,13 @@ func (s *Store) CreateAPIKey(ctx context.Context, name string) (string, APIKey, 
 	keyHash := sha256Hex(rawKey)
 	now := nowText()
 	if _, err := s.db.ExecContext(ctx, `
-INSERT INTO auth_api_keys(id,name,key_prefix,key_hash,created_at)
-VALUES(?,?,?,?,?)`, id, name, prefix, keyHash, now); err != nil {
+INSERT INTO auth_api_keys(id,user_id,name,key_prefix,key_hash,created_at)
+VALUES(?,?,?,?,?,?)`, id, userID, name, prefix, keyHash, now); err != nil {
 		return "", APIKey{}, err
 	}
 	return rawKey, APIKey{
 		ID:        id,
+		UserID:    userID,
 		Name:      name,
 		KeyPrefix: prefix,
 		CreatedAt: now,
@@ -375,15 +488,24 @@ func (s *Store) ValidateAPIKey(ctx context.Context, rawKey string) (APIKey, bool
 		return APIKey{}, false, nil
 	}
 	keyHash := sha256Hex(rawKey)
-	var item APIKey
+	var (
+		item        APIKey
+		userEnabled sql.NullInt64
+	)
 	err := s.db.QueryRowContext(ctx, `
-SELECT id,name,key_prefix,created_at,last_used_at FROM auth_api_keys WHERE key_hash=?`,
-		keyHash).Scan(&item.ID, &item.Name, &item.KeyPrefix, &item.CreatedAt, &item.LastUsedAt)
+SELECT k.id,k.user_id,k.name,k.key_prefix,k.created_at,k.last_used_at,u.enabled
+FROM auth_api_keys k
+LEFT JOIN users u ON u.id=k.user_id
+WHERE k.key_hash=?`,
+		keyHash).Scan(&item.ID, &item.UserID, &item.Name, &item.KeyPrefix, &item.CreatedAt, &item.LastUsedAt, &userEnabled)
 	if errors.Is(err, sql.ErrNoRows) {
 		return APIKey{}, false, nil
 	}
 	if err != nil {
 		return APIKey{}, false, err
+	}
+	if !userEnabled.Valid || userEnabled.Int64 == 0 {
+		return APIKey{}, false, nil
 	}
 	now := nowText()
 	if item.LastUsedAt == nil {
@@ -395,8 +517,13 @@ SELECT id,name,key_prefix,created_at,last_used_at FROM auth_api_keys WHERE key_h
 }
 
 func (s *Store) ListAPIKeys(ctx context.Context) ([]APIKey, error) {
+	return s.ListAPIKeysForUser(ctx, UserIDFromContext(ctx))
+}
+
+func (s *Store) ListAPIKeysForUser(ctx context.Context, userID string) ([]APIKey, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT id,name,key_prefix,created_at,last_used_at FROM auth_api_keys ORDER BY created_at DESC`)
+SELECT id,user_id,name,key_prefix,created_at,last_used_at
+FROM auth_api_keys WHERE user_id=? ORDER BY created_at DESC`, normalizeUserID(userID))
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +532,7 @@ SELECT id,name,key_prefix,created_at,last_used_at FROM auth_api_keys ORDER BY cr
 	for rows.Next() {
 		var item APIKey
 		if err := rows.Scan(
-			&item.ID, &item.Name, &item.KeyPrefix, &item.CreatedAt, &item.LastUsedAt,
+			&item.ID, &item.UserID, &item.Name, &item.KeyPrefix, &item.CreatedAt, &item.LastUsedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -415,7 +542,12 @@ SELECT id,name,key_prefix,created_at,last_used_at FROM auth_api_keys ORDER BY cr
 }
 
 func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM auth_api_keys WHERE id=?`, strings.TrimSpace(id))
+	return s.DeleteAPIKeyForUser(ctx, UserIDFromContext(ctx), id)
+}
+
+func (s *Store) DeleteAPIKeyForUser(ctx context.Context, userID, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM auth_api_keys WHERE user_id=? AND id=?`,
+		normalizeUserID(userID), strings.TrimSpace(id))
 	if err != nil {
 		return err
 	}
@@ -425,16 +557,20 @@ func (s *Store) DeleteAPIKey(ctx context.Context, id string) error {
 	return nil
 }
 
-// DeleteAPIKeysByNamePrefix removes API keys whose name equals prefix or starts with prefix + " ".
+// DeleteAPIKeysByNamePrefix removes API keys owned by the current user whose name equals prefix or starts with prefix + " ".
 func (s *Store) DeleteAPIKeysByNamePrefix(ctx context.Context, prefix string) (int64, error) {
+	return s.DeleteAPIKeysByNamePrefixForUser(ctx, UserIDFromContext(ctx), prefix)
+}
+
+func (s *Store) DeleteAPIKeysByNamePrefixForUser(ctx context.Context, userID, prefix string) (int64, error) {
 	prefix = strings.TrimSpace(prefix)
 	if prefix == "" {
 		return 0, nil
 	}
 	res, err := s.db.ExecContext(ctx, `
 DELETE FROM auth_api_keys
-WHERE name=? OR name LIKE ? ESCAPE '\'`,
-		prefix, escapeLike(prefix)+" %",
+WHERE user_id=? AND (name=? OR name LIKE ? ESCAPE '\')`,
+		normalizeUserID(userID), prefix, escapeLike(prefix)+" %",
 	)
 	if err != nil {
 		return 0, err

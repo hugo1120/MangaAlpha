@@ -27,15 +27,74 @@ const (
 type authContextKey struct{}
 
 type authPrincipal struct {
-	Username   string
-	Method     string // "session", "apikey", "basic"
-	RawSession string
-	Refreshed  bool
+	UserID            string
+	Username          string
+	Role              string
+	IsAdmin           bool
+	AllowNSFW         bool
+	ShowNSFW          bool
+	AllLibraries      bool
+	AllowedLibraryIDs []string
+	Method            string // "session", "apikey", "basic"
+	RawSession        string
+	Refreshed         bool
+}
+
+func principalFromUser(u database.User, method, rawSession string, refreshed bool) authPrincipal {
+	allowed := append([]string(nil), u.AllowedLibraryIDs...)
+	if allowed == nil {
+		allowed = []string{}
+	}
+	return authPrincipal{
+		UserID:            u.ID,
+		Username:          u.Username,
+		Role:              u.Role,
+		IsAdmin:           u.IsAdmin(),
+		AllowNSFW:         u.AllowNSFW,
+		ShowNSFW:          u.ShowNSFW,
+		AllLibraries:      u.AllLibraries || u.IsAdmin(),
+		AllowedLibraryIDs: allowed,
+		Method:            method,
+		RawSession:        rawSession,
+		Refreshed:         refreshed,
+	}
+}
+
+func (p authPrincipal) userScope() database.UserScope {
+	return database.UserScope{
+		UserID:            p.UserID,
+		Username:          p.Username,
+		IsAdmin:           p.IsAdmin,
+		AllowNSFW:         p.AllowNSFW,
+		ShowNSFW:          p.ShowNSFW,
+		AllLibraries:      p.AllLibraries,
+		AllowedLibraryIDs: p.AllowedLibraryIDs,
+	}
+}
+
+func withPrincipalContext(ctx context.Context, p authPrincipal) context.Context {
+	ctx = context.WithValue(ctx, authContextKey{}, p)
+	return database.WithUserScope(ctx, p.userScope())
 }
 
 func (s *Server) currentPrincipal(r *http.Request) (authPrincipal, bool) {
 	val, ok := r.Context().Value(authContextKey{}).(authPrincipal)
 	return val, ok
+}
+
+func (s *Server) requireAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		principal, ok := s.currentPrincipal(r)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Authentication required.")
+			return
+		}
+		if !principal.IsAdmin {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "Administrator privileges required.")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
@@ -96,7 +155,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 		if p == "/admin/api/auth/status" && r.Method == http.MethodGet {
 			if authed {
-				r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, principal))
+				r = r.WithContext(withPrincipalContext(r.Context(), principal))
 			}
 			next.ServeHTTP(w, r)
 			return
@@ -107,7 +166,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				return
 			}
 			if authed {
-				r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, principal))
+				r = r.WithContext(withPrincipalContext(r.Context(), principal))
 			}
 			next.ServeHTTP(w, r)
 			return
@@ -157,7 +216,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if principal.Method == "session" && principal.Refreshed && principal.RawSession != "" {
 			s.setSessionCookies(w, r, principal.RawSession, true)
 		}
-		r = r.WithContext(context.WithValue(r.Context(), authContextKey{}, principal))
+		r = r.WithContext(withPrincipalContext(r.Context(), principal))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -166,26 +225,17 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool, bool
 	// 1. Session Cookie (fk115_session or KOMGA-SESSION) or X-Auth-Token header
 	for _, token := range candidateSessionTokens(r) {
 		if sess, ok, err := s.store.ValidateSession(r.Context(), token); err == nil && ok {
-			return authPrincipal{
-				Username:   sess.Username,
-				Method:     "session",
-				RawSession: token,
-				Refreshed:  sess.Refreshed,
-			}, true, false, 0
+			if user, uErr := s.store.UserByID(r.Context(), sess.UserID); uErr == nil && user.Enabled {
+				return principalFromUser(user, "session", token, sess.Refreshed), true, false, 0
+			}
 		}
 	}
 	// 2. X-API-Key header or Authorization: Bearer <api-key>
 	for _, rawKey := range candidateAPIKeys(r) {
-		if _, ok, err := s.store.ValidateAPIKey(r.Context(), rawKey); err == nil && ok {
-			admin, has, _ := s.store.Admin(r.Context())
-			username := "admin"
-			if has && admin.Username != "" {
-				username = admin.Username
+		if keyRec, ok, err := s.store.ValidateAPIKey(r.Context(), rawKey); err == nil && ok {
+			if user, uErr := s.store.UserByID(r.Context(), keyRec.UserID); uErr == nil && user.Enabled {
+				return principalFromUser(user, "apikey", "", false), true, false, 0
 			}
-			return authPrincipal{
-				Username: username,
-				Method:   "apikey",
-			}, true, false, 0
 		}
 	}
 	// 3. HTTP Basic Auth (protected by per-IP brute-force limiter)
@@ -194,13 +244,10 @@ func (s *Server) authenticateRequest(r *http.Request) (authPrincipal, bool, bool
 		if allowed, retryAfter := s.authLimiter.Allow(clientIP); !allowed {
 			return authPrincipal{}, false, true, retryAfter
 		}
-		user, valid, err := s.store.VerifyAdminPassword(r.Context(), username, password)
-		if err == nil && valid {
+		user, valid, err := s.store.VerifyUserPassword(r.Context(), username, password)
+		if err == nil && valid && user.Enabled {
 			s.authLimiter.RecordSuccess(clientIP)
-			return authPrincipal{
-				Username: user.Username,
-				Method:   "basic",
-			}, true, false, 0
+			return principalFromUser(user, "basic", "", false), true, false, 0
 		}
 		if err == nil {
 			s.authLimiter.RecordFailure(clientIP)
@@ -349,11 +396,19 @@ func (s *Server) authStatusHandler(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]any{
 		"claimed":       claimed,
 		"authenticated": authed,
+		"userId":        principal.UserID,
 		"username":      principal.Username,
+		"role":          principal.Role,
+		"isAdmin":       principal.IsAdmin,
+		"allowNsfw":     principal.AllowNSFW,
+		"showNsfw":      principal.AllowNSFW && principal.ShowNSFW,
+		"allLibraries":  principal.AllLibraries,
 		"method":        principal.Method,
 	}
 	if authed {
 		resp["version"] = buildinfo.Version
+		resp["codename"] = buildinfo.Codename
+		resp["codenameQuote"] = buildinfo.CodenameQuote
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -383,11 +438,17 @@ func (s *Server) authSetupHandler(w http.ResponseWriter, r *http.Request) {
 	if req.Remember != nil {
 		remember = *req.Remember
 	}
-	if rawToken, _, sErr := s.store.CreateSession(r.Context(), admin.Username, remember, r.UserAgent()); sErr == nil {
+	if rawToken, _, sErr := s.store.CreateSessionForUser(r.Context(), database.PrimaryAdminUserID, admin.Username, remember, r.UserAgent()); sErr == nil {
 		s.setSessionCookies(w, r, rawToken, remember)
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"username": admin.Username,
+		"userId":       database.PrimaryAdminUserID,
+		"username":     admin.Username,
+		"role":         database.RoleAdmin,
+		"isAdmin":      true,
+		"allowNsfw":    true,
+		"showNsfw":     false,
+		"allLibraries": true,
 	})
 }
 
@@ -405,25 +466,31 @@ func (s *Server) authLoginHandler(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	user, ok, err := s.store.VerifyAdminPassword(r.Context(), req.Username, req.Password)
+	user, ok, err := s.store.VerifyUserPassword(r.Context(), req.Username, req.Password)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
 	}
-	if !ok {
+	if !ok || !user.Enabled {
 		s.authLimiter.RecordFailure(clientIP)
 		writeError(w, http.StatusUnauthorized, "INVALID_CREDENTIALS", "用户名或密码不正确")
 		return
 	}
 	s.authLimiter.RecordSuccess(clientIP)
-	rawToken, _, err := s.store.CreateSession(r.Context(), user.Username, req.Remember, r.UserAgent())
+	rawToken, _, err := s.store.CreateSessionForUser(r.Context(), user.ID, user.Username, req.Remember, r.UserAgent())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "SESSION_ERROR", err.Error())
 		return
 	}
 	s.setSessionCookies(w, r, rawToken, req.Remember)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"username": user.Username,
+		"userId":       user.ID,
+		"username":     user.Username,
+		"role":         user.Role,
+		"isAdmin":      user.IsAdmin(),
+		"allowNsfw":    user.AllowNSFW,
+		"showNsfw":     user.EffectiveShowNSFW(),
+		"allLibraries": user.AllLibraries,
 	})
 }
 
@@ -445,13 +512,23 @@ func (s *Server) updateCredentialsHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 	principal, _ := s.currentPrincipal(r)
-	updated, err := s.store.UpdateAdminCredentials(
-		r.Context(), req.CurrentPassword, req.NewUsername, req.NewPassword, principal.RawSession,
+	newUsername := strings.TrimSpace(req.NewUsername)
+	if !principal.IsAdmin && newUsername != "" && newUsername != principal.Username {
+		writeError(w, http.StatusForbidden, "USERNAME_CHANGE_FORBIDDEN", "普通用户不允许自行修改用户名，请联系管理员处理。")
+		return
+	}
+	if !principal.IsAdmin {
+		newUsername = ""
+	}
+	updated, err := s.store.UpdateUserCredentials(
+		r.Context(), principal.UserID, req.CurrentPassword, newUsername, req.NewPassword, principal.RawSession,
 	)
 	if err != nil {
 		switch {
 		case errors.Is(err, database.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", "当前密码不正确")
+		case errors.Is(err, database.ErrDuplicateUsername):
+			writeError(w, http.StatusConflict, "DUPLICATE_USERNAME", "该用户名已被其他账号占用")
 		case errors.Is(err, database.ErrInvalidUsername), errors.Is(err, database.ErrWeakPassword):
 			writeError(w, http.StatusBadRequest, "INVALID_CREDENTIALS", err.Error())
 		default:
@@ -464,7 +541,7 @@ func (s *Server) updateCredentialsHandler(w http.ResponseWriter, r *http.Request
 
 func (s *Server) listSessionsHandler(w http.ResponseWriter, r *http.Request) {
 	principal, _ := s.currentPrincipal(r)
-	items, err := s.store.ListSessions(r.Context(), principal.RawSession)
+	items, err := s.store.ListSessionsForUser(r.Context(), principal.UserID, principal.RawSession)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
@@ -473,7 +550,8 @@ func (s *Server) listSessionsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteSessionByPrefix(r.Context(), chi.URLParam(r, "sessionID")); err != nil {
+	principal, _ := s.currentPrincipal(r)
+	if err := s.store.DeleteSessionByPrefixForUser(r.Context(), principal.UserID, chi.URLParam(r, "sessionID")); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Session not found.")
 			return
@@ -485,7 +563,8 @@ func (s *Server) deleteSessionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAPIKeysHandler(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListAPIKeys(r.Context())
+	principal, _ := s.currentPrincipal(r)
+	items, err := s.store.ListAPIKeysForUser(r.Context(), principal.UserID)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
@@ -500,7 +579,8 @@ func (s *Server) createAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	rawKey, info, err := s.store.CreateAPIKey(r.Context(), req.Name)
+	principal, _ := s.currentPrincipal(r)
+	rawKey, info, err := s.store.CreateAPIKeyForUser(r.Context(), principal.UserID, req.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_API_KEY", err.Error())
 		return
@@ -512,7 +592,8 @@ func (s *Server) createAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deleteAPIKeyHandler(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteAPIKey(r.Context(), chi.URLParam(r, "keyID")); err != nil {
+	principal, _ := s.currentPrincipal(r)
+	if err := s.store.DeleteAPIKeyForUser(r.Context(), principal.UserID, chi.URLParam(r, "keyID")); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "API key not found.")
 			return
@@ -581,7 +662,7 @@ func (s *Server) komgaSetCookie(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	rawToken, _, err := s.store.CreateSession(r.Context(), principal.Username, remember, r.UserAgent())
+	rawToken, _, err := s.store.CreateSessionForUser(r.Context(), principal.UserID, principal.Username, remember, r.UserAgent())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "SESSION_ERROR", err.Error())
 		return
@@ -605,7 +686,7 @@ func (s *Server) komgaPatchMyPassword(w http.ResponseWriter, r *http.Request) {
 			req.CurrentPassword = pass
 		}
 	}
-	if _, err := s.store.UpdateAdminCredentials(r.Context(), req.CurrentPassword, "", req.Password, principal.RawSession); err != nil {
+	if _, err := s.store.UpdateUserCredentials(r.Context(), principal.UserID, req.CurrentPassword, "", req.Password, principal.RawSession); err != nil {
 		if errors.Is(err, database.ErrInvalidCredentials) {
 			writeError(w, http.StatusUnauthorized, "INVALID_PASSWORD", err.Error())
 			return

@@ -37,18 +37,30 @@ type komgaSearchRequest struct {
 }
 
 func (s *Server) komgaMe(w http.ResponseWriter, r *http.Request) {
+	userID := database.PrimaryAdminUserID
 	email := "local@fake-komga-115"
+	roles := []string{"USER", "ADMIN", "FILE_DOWNLOAD", "PAGE_STREAMING"}
+	sharedAll := true
+	sharedLibs := []string{}
 	if principal, ok := s.currentPrincipal(r); ok && principal.Username != "" {
+		userID = principal.UserID
 		email = principal.Username
+		if !principal.IsAdmin {
+			roles = []string{"USER", "FILE_DOWNLOAD", "PAGE_STREAMING"}
+		}
+		sharedAll = principal.AllLibraries
+		if !sharedAll && len(principal.AllowedLibraryIDs) > 0 {
+			sharedLibs = append([]string(nil), principal.AllowedLibraryIDs...)
+		}
 	} else if admin, has, err := s.store.Admin(r.Context()); err == nil && has && admin.Username != "" {
 		email = admin.Username
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"id":                 "admin",
+		"id":                 userID,
 		"email":              email,
-		"roles":              []string{"USER", "ADMIN", "FILE_DOWNLOAD", "PAGE_STREAMING"},
-		"sharedAllLibraries": true,
-		"sharedLibrariesIds": []string{},
+		"roles":              roles,
+		"sharedAllLibraries": sharedAll,
+		"sharedLibrariesIds": sharedLibs,
 		"labelsAllow":        []string{},
 		"labelsExclude":      []string{},
 		"ageRestriction":     nil,

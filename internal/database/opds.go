@@ -99,6 +99,9 @@ func (s *Store) LibraryByRowID(ctx context.Context, rowID int64) (Library, error
 	if !lib.Enabled || lib.UnionParentID != "" {
 		return Library{}, sql.ErrNoRows
 	}
+	if scope, ok := UserScopeFromContext(ctx); ok && !scope.AllowsLibrary(lib.ID) {
+		return Library{}, sql.ErrNoRows
+	}
 	return lib, nil
 }
 
@@ -163,8 +166,10 @@ func (s *Store) OnDeckBooksPage(ctx context.Context, page, size int) ([]Book, in
 	if len(enabledLibs) == 0 {
 		return []Book{}, 0, nil
 	}
+	userID := UserIDFromContext(ctx)
 	excludeNSFW := !s.ShowNSFW(ctx)
-	args := make([]any, 0, len(enabledLibs))
+	args := make([]any, 0, 1+len(enabledLibs))
+	args = append(args, userID)
 	for _, id := range enabledLibs {
 		args = append(args, id)
 	}
@@ -177,7 +182,7 @@ func (s *Store) OnDeckBooksPage(ctx context.Context, page, size int) ([]Book, in
 SELECT p.series_id
 FROM book_read_progress p
 JOIN series s ON s.id=p.series_id
-WHERE s.library_id IN ` + Placeholders(len(enabledLibs)) + nsfwClause + `
+WHERE p.user_id=? AND s.library_id IN ` + Placeholders(len(enabledLibs)) + nsfwClause + `
 GROUP BY p.series_id
 HAVING SUM(CASE WHEN p.completed=1 THEN 1 ELSE 0 END) > 0
    AND SUM(CASE WHEN p.completed=0 THEN 1 ELSE 0 END) = 0
@@ -212,9 +217,9 @@ ORDER BY MAX(p.updated_at) DESC, p.series_id ASC`
 SELECT b.id
 FROM books b
 WHERE b.series_id=?
-  AND NOT EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id)
+  AND NOT EXISTS (SELECT 1 FROM book_read_progress p WHERE p.user_id=? AND p.book_id=b.id)
 ORDER BY b.number_sort ASC, b.name COLLATE NOCASE ASC, b.id ASC
-LIMIT 1`, sid).Scan(&bookID)
+LIMIT 1`, sid, userID).Scan(&bookID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				continue

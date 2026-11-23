@@ -34,8 +34,9 @@ func (s *Store) ListCollections(
 	if size <= 0 || size > 500 {
 		size = 20
 	}
-	var clauses []string
-	var args []any
+	userID := UserIDFromContext(ctx)
+	clauses := []string{`c.user_id=?`}
+	args := []any{userID}
 	if q := strings.TrimSpace(search); q != "" {
 		clauses = append(clauses, `c.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
 		args = append(args, "%"+escapeLike(q)+"%")
@@ -47,10 +48,7 @@ func (s *Store) ListCollections(
 			args = append(args, id)
 		}
 	}
-	where := ""
-	if len(clauses) > 0 {
-		where = " WHERE " + strings.Join(clauses, " AND ")
-	}
+	where := " WHERE " + strings.Join(clauses, " AND ")
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM collections c`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -100,11 +98,12 @@ func (s *Store) ListCollections(
 }
 
 func (s *Store) CollectionByID(ctx context.Context, id string) (Collection, error) {
+	userID := UserIDFromContext(ctx)
 	var c Collection
 	var ordered int
 	var created, updated string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,name,ordered,created_at,updated_at FROM collections WHERE id=?`, id,
+		`SELECT id,name,ordered,created_at,updated_at FROM collections WHERE user_id=? AND id=?`, userID, id,
 	).Scan(&c.ID, &c.Name, &ordered, &created, &updated)
 	if err != nil {
 		return Collection{}, err
@@ -121,12 +120,13 @@ func (s *Store) CollectionByID(ctx context.Context, id string) (Collection, erro
 }
 
 func (s *Store) CollectionsForSeries(ctx context.Context, seriesID string) ([]Collection, error) {
+	userID := UserIDFromContext(ctx)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT c.id,c.name,c.ordered,c.created_at,c.updated_at
 FROM collections c
 JOIN collection_series cs ON cs.collection_id=c.id
-WHERE cs.series_id=?
-ORDER BY c.name COLLATE NOCASE ASC, c.id ASC`, seriesID)
+WHERE c.user_id=? AND cs.series_id=?
+ORDER BY c.name COLLATE NOCASE ASC, c.id ASC`, userID, seriesID)
 	if err != nil {
 		return nil, err
 	}
@@ -159,6 +159,7 @@ func (s *Store) populateCollectionMembers(ctx context.Context, items []Collectio
 		return nil
 	}
 	excludeNSFW := !s.ShowNSFW(ctx)
+	scope, hasScope := UserScopeFromContext(ctx)
 	idxByID := make(map[string]int, len(items))
 	ids := make([]string, len(items))
 	for i, item := range items {
@@ -171,7 +172,7 @@ func (s *Store) populateCollectionMembers(ctx context.Context, items []Collectio
 			args[i] = id
 		}
 		query := `
-SELECT cs.collection_id, cs.series_id, l.enabled, COALESCE(sm.is_nsfw, 0)
+SELECT cs.collection_id, cs.series_id, s.library_id, l.enabled, COALESCE(sm.is_nsfw, 0)
 FROM collection_series cs
 JOIN series s ON s.id=cs.series_id
 JOIN libraries l ON l.id=s.library_id
@@ -183,14 +184,14 @@ ORDER BY cs.collection_id ASC, cs.position ASC`
 			return err
 		}
 		for rows.Next() {
-			var cid, sid string
+			var cid, sid, lid string
 			var enabled, isNSFW int
-			if err := rows.Scan(&cid, &sid, &enabled, &isNSFW); err != nil {
+			if err := rows.Scan(&cid, &sid, &lid, &enabled, &isNSFW); err != nil {
 				rows.Close()
 				return err
 			}
 			idx := idxByID[cid]
-			if enabled == 0 || (excludeNSFW && isNSFW != 0) {
+			if enabled == 0 || (hasScope && !scope.AllowsLibrary(lid)) || (excludeNSFW && isNSFW != 0) {
 				items[idx].Filtered = true
 				continue
 			}
@@ -210,8 +211,9 @@ func (s *Store) CreateCollection(ctx context.Context, name string, ordered bool,
 	if name == "" {
 		return Collection{}, ErrEmptyName
 	}
+	userID := UserIDFromContext(ctx)
 	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM collections WHERE name=? COLLATE NOCASE`, name).Scan(&exists); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM collections WHERE user_id=? AND name=? COLLATE NOCASE`, userID, name).Scan(&exists); err != nil {
 		return Collection{}, err
 	}
 	if exists > 0 {
@@ -225,11 +227,11 @@ func (s *Store) CreateCollection(ctx context.Context, name string, ordered bool,
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO collections(id,name,ordered,created_at,updated_at) VALUES(?,?,?,?,?)`,
-		id, name, boolInt(ordered), now, now); err != nil {
+		`INSERT INTO collections(id,user_id,name,ordered,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
+		id, userID, name, boolInt(ordered), now, now); err != nil {
 		return Collection{}, err
 	}
-	if err := replaceCollectionSeriesTx(ctx, tx, id, seriesIDs); err != nil {
+	if err := s.replaceCollectionSeriesTx(ctx, tx, id, seriesIDs); err != nil {
 		return Collection{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -249,6 +251,7 @@ func (s *Store) UpdateCollection(
 	if err != nil {
 		return Collection{}, err
 	}
+	userID := UserIDFromContext(ctx)
 	nextName := current.Name
 	if name != nil {
 		nextName = strings.TrimSpace(*name)
@@ -258,7 +261,7 @@ func (s *Store) UpdateCollection(
 		if !strings.EqualFold(nextName, current.Name) {
 			var exists int
 			if err := s.db.QueryRowContext(ctx,
-				`SELECT count(*) FROM collections WHERE name=? COLLATE NOCASE AND id<>?`, nextName, id).Scan(&exists); err != nil {
+				`SELECT count(*) FROM collections WHERE user_id=? AND name=? COLLATE NOCASE AND id<>?`, userID, nextName, id).Scan(&exists); err != nil {
 				return Collection{}, err
 			}
 			if exists > 0 {
@@ -276,12 +279,12 @@ func (s *Store) UpdateCollection(
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE collections SET name=?,ordered=?,updated_at=? WHERE id=?`,
-		nextName, boolInt(nextOrdered), nowText(), id); err != nil {
+		`UPDATE collections SET name=?,ordered=?,updated_at=? WHERE user_id=? AND id=?`,
+		nextName, boolInt(nextOrdered), nowText(), userID, id); err != nil {
 		return Collection{}, err
 	}
 	if seriesIDs != nil {
-		if err := replaceCollectionSeriesTx(ctx, tx, id, *seriesIDs); err != nil {
+		if err := s.replaceCollectionSeriesTx(ctx, tx, id, *seriesIDs); err != nil {
 			return Collection{}, err
 		}
 	}
@@ -292,7 +295,8 @@ func (s *Store) UpdateCollection(
 }
 
 func (s *Store) DeleteCollection(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM collections WHERE id=?`, id)
+	userID := UserIDFromContext(ctx)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM collections WHERE user_id=? AND id=?`, userID, id)
 	if err != nil {
 		return err
 	}
@@ -303,18 +307,23 @@ func (s *Store) DeleteCollection(ctx context.Context, id string) error {
 	return nil
 }
 
-func replaceCollectionSeriesTx(ctx context.Context, tx *sql.Tx, collectionID string, seriesIDs []string) error {
+func (s *Store) replaceCollectionSeriesTx(ctx context.Context, tx *sql.Tx, collectionID string, seriesIDs []string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM collection_series WHERE collection_id=?`, collectionID); err != nil {
 		return err
 	}
+	scope, hasScope := UserScopeFromContext(ctx)
 	unique := cleanStringSliceCaseSensitive(seriesIDs)
 	pos := 0
 	for _, sid := range unique {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM series WHERE id=?`, sid).Scan(&exists); err != nil {
+		var libID string
+		err := tx.QueryRowContext(ctx, `SELECT library_id FROM series WHERE id=?`, sid).Scan(&libID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
-		if exists == 0 {
+		if hasScope && !scope.AllowsLibrary(libID) {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -357,7 +366,7 @@ func (s *Store) CollectionSeriesPage(
 	if err != nil {
 		return nil, 0, err
 	}
-	where, args, empty := buildSeriesFilters(q, enabledLibs)
+	where, args, empty := buildSeriesFilters(q, enabledLibs, UserIDFromContext(ctx))
 	if empty {
 		return []Series{}, 0, nil
 	}
@@ -410,18 +419,31 @@ SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified
 }
 
 func (s *Store) CollectionFirstVisibleSeriesID(ctx context.Context, collectionID string) (string, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(enabledLibs) == 0 {
+		return "", sql.ErrNoRows
+	}
+	userID := UserIDFromContext(ctx)
+	args := make([]any, 0, 2+len(enabledLibs))
+	args = append(args, userID, collectionID)
+	for _, lid := range enabledLibs {
+		args = append(args, lid)
+	}
 	query := `
 SELECT cs.series_id
 FROM collection_series cs
+JOIN collections c ON c.id=cs.collection_id AND c.user_id=?
 JOIN series s ON s.id=cs.series_id
-JOIN libraries l ON l.id=s.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
-WHERE cs.collection_id=?`
+WHERE cs.collection_id=? AND s.library_id IN ` + Placeholders(len(enabledLibs))
 	if !s.ShowNSFW(ctx) {
 		query += ` AND s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`
 	}
 	query += ` ORDER BY cs.position ASC LIMIT 1`
 	var sid string
-	err := s.db.QueryRowContext(ctx, query, collectionID).Scan(&sid)
+	err = s.db.QueryRowContext(ctx, query, args...).Scan(&sid)
 	return sid, err
 }
 
@@ -441,8 +463,9 @@ func (s *Store) ListReadLists(
 	if size <= 0 || size > 500 {
 		size = 20
 	}
-	var clauses []string
-	var args []any
+	userID := UserIDFromContext(ctx)
+	clauses := []string{`r.user_id=?`}
+	args := []any{userID}
 	if q := strings.TrimSpace(search); q != "" {
 		clauses = append(clauses, `r.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
 		args = append(args, "%"+escapeLike(q)+"%")
@@ -454,10 +477,7 @@ func (s *Store) ListReadLists(
 			args = append(args, id)
 		}
 	}
-	where := ""
-	if len(clauses) > 0 {
-		where = " WHERE " + strings.Join(clauses, " AND ")
-	}
+	where := " WHERE " + strings.Join(clauses, " AND ")
 	var total int64
 	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM readlists r`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -507,11 +527,12 @@ func (s *Store) ListReadLists(
 }
 
 func (s *Store) ReadListByID(ctx context.Context, id string) (ReadList, error) {
+	userID := UserIDFromContext(ctx)
 	var rl ReadList
 	var ordered int
 	var created, updated string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id,name,summary,ordered,created_at,updated_at FROM readlists WHERE id=?`, id,
+		`SELECT id,name,summary,ordered,created_at,updated_at FROM readlists WHERE user_id=? AND id=?`, userID, id,
 	).Scan(&rl.ID, &rl.Name, &rl.Summary, &ordered, &created, &updated)
 	if err != nil {
 		return ReadList{}, err
@@ -528,12 +549,13 @@ func (s *Store) ReadListByID(ctx context.Context, id string) (ReadList, error) {
 }
 
 func (s *Store) ReadListsForBook(ctx context.Context, bookID string) ([]ReadList, error) {
+	userID := UserIDFromContext(ctx)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT r.id,r.name,r.summary,r.ordered,r.created_at,r.updated_at
 FROM readlists r
 JOIN readlist_books rb ON rb.readlist_id=r.id
-WHERE rb.book_id=?
-ORDER BY r.name COLLATE NOCASE ASC, r.id ASC`, bookID)
+WHERE r.user_id=? AND rb.book_id=?
+ORDER BY r.name COLLATE NOCASE ASC, r.id ASC`, userID, bookID)
 	if err != nil {
 		return nil, err
 	}
@@ -566,6 +588,7 @@ func (s *Store) populateReadListMembers(ctx context.Context, items []ReadList) e
 		return nil
 	}
 	excludeNSFW := !s.ShowNSFW(ctx)
+	scope, hasScope := UserScopeFromContext(ctx)
 	idxByID := make(map[string]int, len(items))
 	ids := make([]string, len(items))
 	for i, item := range items {
@@ -578,7 +601,7 @@ func (s *Store) populateReadListMembers(ctx context.Context, items []ReadList) e
 			args[i] = id
 		}
 		query := `
-SELECT rb.readlist_id, rb.book_id, l.enabled, COALESCE(sm.is_nsfw, 0)
+SELECT rb.readlist_id, rb.book_id, b.library_id, l.enabled, COALESCE(sm.is_nsfw, 0)
 FROM readlist_books rb
 JOIN books b ON b.id=rb.book_id
 JOIN libraries l ON l.id=b.library_id
@@ -590,14 +613,14 @@ ORDER BY rb.readlist_id ASC, rb.position ASC`
 			return err
 		}
 		for rows.Next() {
-			var rid, bid string
+			var rid, bid, lid string
 			var enabled, isNSFW int
-			if err := rows.Scan(&rid, &bid, &enabled, &isNSFW); err != nil {
+			if err := rows.Scan(&rid, &bid, &lid, &enabled, &isNSFW); err != nil {
 				rows.Close()
 				return err
 			}
 			idx := idxByID[rid]
-			if enabled == 0 || (excludeNSFW && isNSFW != 0) {
+			if enabled == 0 || (hasScope && !scope.AllowsLibrary(lid)) || (excludeNSFW && isNSFW != 0) {
 				items[idx].Filtered = true
 				continue
 			}
@@ -617,8 +640,9 @@ func (s *Store) CreateReadList(ctx context.Context, name, summary string, ordere
 	if name == "" {
 		return ReadList{}, ErrEmptyName
 	}
+	userID := UserIDFromContext(ctx)
 	var exists int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM readlists WHERE name=? COLLATE NOCASE`, name).Scan(&exists); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM readlists WHERE user_id=? AND name=? COLLATE NOCASE`, userID, name).Scan(&exists); err != nil {
 		return ReadList{}, err
 	}
 	if exists > 0 {
@@ -632,11 +656,11 @@ func (s *Store) CreateReadList(ctx context.Context, name, summary string, ordere
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO readlists(id,name,summary,ordered,created_at,updated_at) VALUES(?,?,?,?,?,?)`,
-		id, name, strings.TrimSpace(summary), boolInt(ordered), now, now); err != nil {
+		`INSERT INTO readlists(id,user_id,name,summary,ordered,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`,
+		id, userID, name, strings.TrimSpace(summary), boolInt(ordered), now, now); err != nil {
 		return ReadList{}, err
 	}
-	if err := replaceReadListBooksTx(ctx, tx, id, bookIDs); err != nil {
+	if err := s.replaceReadListBooksTx(ctx, tx, id, bookIDs); err != nil {
 		return ReadList{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -657,6 +681,7 @@ func (s *Store) UpdateReadList(
 	if err != nil {
 		return ReadList{}, err
 	}
+	userID := UserIDFromContext(ctx)
 	nextName := current.Name
 	if name != nil {
 		nextName = strings.TrimSpace(*name)
@@ -666,7 +691,7 @@ func (s *Store) UpdateReadList(
 		if !strings.EqualFold(nextName, current.Name) {
 			var exists int
 			if err := s.db.QueryRowContext(ctx,
-				`SELECT count(*) FROM readlists WHERE name=? COLLATE NOCASE AND id<>?`, nextName, id).Scan(&exists); err != nil {
+				`SELECT count(*) FROM readlists WHERE user_id=? AND name=? COLLATE NOCASE AND id<>?`, userID, nextName, id).Scan(&exists); err != nil {
 				return ReadList{}, err
 			}
 			if exists > 0 {
@@ -688,12 +713,12 @@ func (s *Store) UpdateReadList(
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE readlists SET name=?,summary=?,ordered=?,updated_at=? WHERE id=?`,
-		nextName, nextSummary, boolInt(nextOrdered), nowText(), id); err != nil {
+		`UPDATE readlists SET name=?,summary=?,ordered=?,updated_at=? WHERE user_id=? AND id=?`,
+		nextName, nextSummary, boolInt(nextOrdered), nowText(), userID, id); err != nil {
 		return ReadList{}, err
 	}
 	if bookIDs != nil {
-		if err := replaceReadListBooksTx(ctx, tx, id, *bookIDs); err != nil {
+		if err := s.replaceReadListBooksTx(ctx, tx, id, *bookIDs); err != nil {
 			return ReadList{}, err
 		}
 	}
@@ -704,7 +729,8 @@ func (s *Store) UpdateReadList(
 }
 
 func (s *Store) DeleteReadList(ctx context.Context, id string) error {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM readlists WHERE id=?`, id)
+	userID := UserIDFromContext(ctx)
+	res, err := s.db.ExecContext(ctx, `DELETE FROM readlists WHERE user_id=? AND id=?`, userID, id)
 	if err != nil {
 		return err
 	}
@@ -715,18 +741,23 @@ func (s *Store) DeleteReadList(ctx context.Context, id string) error {
 	return nil
 }
 
-func replaceReadListBooksTx(ctx context.Context, tx *sql.Tx, readListID string, bookIDs []string) error {
+func (s *Store) replaceReadListBooksTx(ctx context.Context, tx *sql.Tx, readListID string, bookIDs []string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM readlist_books WHERE readlist_id=?`, readListID); err != nil {
 		return err
 	}
+	scope, hasScope := UserScopeFromContext(ctx)
 	unique := cleanStringSliceCaseSensitive(bookIDs)
 	pos := 0
 	for _, bid := range unique {
-		var exists int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM books WHERE id=?`, bid).Scan(&exists); err != nil {
+		var libID string
+		err := tx.QueryRowContext(ctx, `SELECT library_id FROM books WHERE id=?`, bid).Scan(&libID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
 			return err
 		}
-		if exists == 0 {
+		if hasScope && !scope.AllowsLibrary(libID) {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx,
@@ -761,7 +792,7 @@ func (s *Store) ReadListBooksPage(
 	if err != nil {
 		return nil, 0, err
 	}
-	where, args, empty := buildBookFilters(q, enabledLibs, !s.ShowNSFW(ctx))
+	where, args, empty := buildBookFilters(q, enabledLibs, !s.ShowNSFW(ctx), UserIDFromContext(ctx))
 	if empty {
 		return []Book{}, 0, nil
 	}
@@ -834,17 +865,30 @@ func (s *Store) ReadListSiblingBook(ctx context.Context, readListID, bookID stri
 }
 
 func (s *Store) ReadListFirstVisibleSeriesID(ctx context.Context, readListID string) (string, error) {
+	enabledLibs, err := s.enabledLibraryIDs(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(enabledLibs) == 0 {
+		return "", sql.ErrNoRows
+	}
+	userID := UserIDFromContext(ctx)
+	args := make([]any, 0, 2+len(enabledLibs))
+	args = append(args, userID, readListID)
+	for _, lid := range enabledLibs {
+		args = append(args, lid)
+	}
 	query := `
 SELECT b.series_id
 FROM readlist_books rb
+JOIN readlists r ON r.id=rb.readlist_id AND r.user_id=?
 JOIN books b ON b.id=rb.book_id
-JOIN libraries l ON l.id=b.library_id AND l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
-WHERE rb.readlist_id=?`
+WHERE rb.readlist_id=? AND b.library_id IN ` + Placeholders(len(enabledLibs))
 	if !s.ShowNSFW(ctx) {
 		query += ` AND b.series_id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`
 	}
 	query += ` ORDER BY rb.position ASC LIMIT 1`
 	var sid string
-	err := s.db.QueryRowContext(ctx, query, readListID).Scan(&sid)
+	err = s.db.QueryRowContext(ctx, query, args...).Scan(&sid)
 	return sid, err
 }

@@ -1,6 +1,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -38,6 +39,9 @@ func applyMigrations(db *sql.DB) error {
 		return err
 	}
 	if err := ensureArchivePasswordTables(db); err != nil {
+		return err
+	}
+	if err := ensureMultiUserMigration(db); err != nil {
 		return err
 	}
 	migrations := []struct {
@@ -164,10 +168,10 @@ func ensurePerformanceIndexes(db *sql.DB) error {
 	if exists, err := tableExists(db, "book_read_progress"); err != nil {
 		return err
 	} else if exists {
-		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated ON book_read_progress(completed, updated_at DESC)`); err != nil {
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated ON book_read_progress(user_id, completed, updated_at DESC)`); err != nil {
 			return err
 		}
-		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated_all ON book_read_progress(updated_at DESC, book_id)`); err != nil {
+		if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated_all ON book_read_progress(user_id, updated_at DESC, book_id)`); err != nil {
 			return err
 		}
 	}
@@ -797,4 +801,376 @@ func addColumnIfMissing(db *sql.DB, table, column, definition string) error {
 	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)
 	_, err = db.Exec(query)
 	return err
+}
+
+func ensureMultiUserMigration(db *sql.DB) error {
+	if _, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  all_libraries INTEGER NOT NULL DEFAULT 1,
+  allow_nsfw INTEGER NOT NULL DEFAULT 0,
+  show_nsfw INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+CREATE TABLE IF NOT EXISTS user_library_access (
+  user_id TEXT NOT NULL,
+  library_id TEXT NOT NULL,
+  PRIMARY KEY(user_id, library_id),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ula_library ON user_library_access(library_id);
+
+CREATE TABLE IF NOT EXISTS user_bangumi_trackers (
+  user_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  auth_mode TEXT NOT NULL DEFAULT '',
+  access_token TEXT NOT NULL DEFAULT '',
+  refresh_token TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT '',
+  last_refresh_at TEXT NOT NULL DEFAULT '',
+  last_refresh_error TEXT NOT NULL DEFAULT '',
+  oauth_redirect_uri TEXT NOT NULL DEFAULT '',
+  bgm_user_id TEXT NOT NULL DEFAULT '',
+  bgm_username TEXT NOT NULL DEFAULT '',
+  bgm_nickname TEXT NOT NULL DEFAULT '',
+  nsfw_mode TEXT NOT NULL DEFAULT 'skip',
+  private_default INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);`); err != nil {
+		return err
+	}
+
+	// 1. Seed primary admin row in users from legacy auth_admin (id=1) + settings['show_nsfw'].
+	var adminCount int
+	if err := db.QueryRow(`SELECT count(*) FROM users WHERE id=?`, PrimaryAdminUserID).Scan(&adminCount); err != nil {
+		return err
+	}
+	if adminCount == 0 {
+		var u, h, created, updated string
+		err := db.QueryRow(`SELECT username,password_hash,created_at,updated_at FROM auth_admin WHERE id=1`).
+			Scan(&u, &h, &created, &updated)
+		if err == nil && u != "" {
+			showNSFW := 0
+			var rawShow string
+			if db.QueryRow(`SELECT value FROM settings WHERE key='show_nsfw'`).Scan(&rawShow) == nil &&
+				strings.EqualFold(strings.TrimSpace(rawShow), "true") {
+				showNSFW = 1
+			}
+			if _, err := db.Exec(`
+INSERT OR IGNORE INTO users(id,username,password_hash,role,enabled,all_libraries,allow_nsfw,show_nsfw,created_at,updated_at)
+VALUES(?,?,?,'admin',1,1,1,?,?,?)`, PrimaryAdminUserID, u, h, showNSFW, created, updated); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 2. Migrate legacy global Bangumi tracker settings into user_bangumi_trackers for 'admin'.
+	var trackerCount int
+	if err := db.QueryRow(`SELECT count(*) FROM user_bangumi_trackers WHERE user_id=?`, PrimaryAdminUserID).Scan(&trackerCount); err != nil {
+		return err
+	}
+	if trackerCount == 0 {
+		readSetting := func(k string) string {
+			var v string
+			_ = db.QueryRow(`SELECT value FROM settings WHERE key=?`, k).Scan(&v)
+			return strings.TrimSpace(v)
+		}
+		tok := readSetting("bangumi_tracker_token")
+		refTok := readSetting("bangumi_tracker_refresh_token")
+		enabledStr := readSetting("bangumi_tracker_enabled")
+		if tok != "" || refTok != "" || strings.EqualFold(enabledStr, "true") {
+			authMode := readSetting("bangumi_tracker_auth_mode")
+			if authMode == "" {
+				if refTok != "" {
+					authMode = "oauth"
+				} else if tok != "" {
+					authMode = "pat"
+				}
+			}
+			nsfwMode := readSetting("bangumi_tracker_nsfw_mode")
+			if nsfwMode == "" {
+				nsfwMode = "skip"
+			}
+			priv := 0
+			if strings.EqualFold(readSetting("bangumi_tracker_private_default"), "true") {
+				priv = 1
+			}
+			en := 0
+			if strings.EqualFold(enabledStr, "true") {
+				en = 1
+			}
+			if _, err := db.Exec(`
+INSERT OR IGNORE INTO user_bangumi_trackers(
+ user_id,enabled,auth_mode,access_token,refresh_token,expires_at,last_refresh_at,last_refresh_error,
+ oauth_redirect_uri,bgm_user_id,bgm_username,bgm_nickname,nsfw_mode,private_default,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+				PrimaryAdminUserID, en, authMode, tok, refTok,
+				readSetting("bangumi_tracker_expires_at"),
+				readSetting("bangumi_tracker_last_refresh_at"),
+				readSetting("bangumi_tracker_last_refresh_error"),
+				readSetting("bangumi_tracker_oauth_redirect_uri"),
+				readSetting("bangumi_tracker_user_id"),
+				readSetting("bangumi_tracker_username"),
+				readSetting("bangumi_tracker_nickname"),
+				nsfwMode, priv, nowText(),
+			); err != nil {
+				return err
+			}
+		}
+	}
+
+	// 3. Add user_id to auth_sessions & auth_api_keys.
+	if err := addColumnIfMissing(db, "auth_sessions", "user_id", "TEXT NOT NULL DEFAULT 'admin'"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, last_seen_at DESC)`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(db, "auth_api_keys", "user_id", "TEXT NOT NULL DEFAULT 'admin'"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_auth_api_keys_user ON auth_api_keys(user_id, created_at DESC)`); err != nil {
+		return err
+	}
+
+	// 4. Rebuild composite-PK / composite-UNIQUE tables if migrating from pre-v3.0 schema.
+	// Use a dedicated connection with PRAGMA foreign_keys = OFF outside the transaction so
+	// dropping collections/readlists during table swap NEVER cascades collection_series/readlist_books!
+	type tableRebuild struct {
+		name string
+		sql  []string
+	}
+	rebuilds := []tableRebuild{
+		{
+			name: "client_settings",
+			sql: []string{
+				`CREATE TABLE client_settings_v3 (
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  allow_unauthenticated INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, key)
+)`,
+				`INSERT INTO client_settings_v3(user_id,key,value,allow_unauthenticated,updated_at)
+SELECT 'admin',key,value,allow_unauthenticated,updated_at FROM client_settings`,
+				`DROP TABLE client_settings`,
+				`ALTER TABLE client_settings_v3 RENAME TO client_settings`,
+			},
+		},
+		{
+			name: "book_read_progress",
+			sql: []string{
+				`DROP TRIGGER IF EXISTS fk115_shelf_book_read_progress_insert`,
+				`DROP TRIGGER IF EXISTS fk115_shelf_book_read_progress_update`,
+				`DROP TRIGGER IF EXISTS fk115_shelf_book_read_progress_delete`,
+				`CREATE TABLE book_read_progress_v3 (
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  book_id TEXT NOT NULL,
+  series_id TEXT NOT NULL,
+  completed INTEGER NOT NULL DEFAULT 1,
+  page INTEGER,
+  read_date TEXT,
+  completed_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, book_id),
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+)`,
+				`INSERT INTO book_read_progress_v3(user_id,book_id,series_id,completed,page,read_date,completed_at,updated_at)
+SELECT 'admin',book_id,series_id,completed,page,read_date,completed_at,updated_at FROM book_read_progress`,
+				`DROP TABLE book_read_progress`,
+				`ALTER TABLE book_read_progress_v3 RENAME TO book_read_progress`,
+				`CREATE INDEX IF NOT EXISTS idx_book_read_progress_series ON book_read_progress(user_id, series_id, completed)`,
+				`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated ON book_read_progress(user_id, completed, updated_at DESC)`,
+				`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated_all ON book_read_progress(user_id, updated_at DESC, book_id)`,
+			},
+		},
+		{
+			name: "book_page_progress",
+			sql: []string{
+				`CREATE TABLE book_page_progress_v3 (
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  book_id TEXT NOT NULL,
+  series_id TEXT NOT NULL,
+  last_loaded_page INTEGER NOT NULL,
+  max_loaded_page INTEGER NOT NULL,
+  page_count INTEGER NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, book_id),
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+)`,
+				`INSERT INTO book_page_progress_v3(user_id,book_id,series_id,last_loaded_page,max_loaded_page,page_count,updated_at)
+SELECT 'admin',book_id,series_id,last_loaded_page,max_loaded_page,page_count,updated_at FROM book_page_progress`,
+				`DROP TABLE book_page_progress`,
+				`ALTER TABLE book_page_progress_v3 RENAME TO book_page_progress`,
+				`CREATE INDEX IF NOT EXISTS idx_book_page_progress_series_updated ON book_page_progress(user_id, series_id, updated_at DESC)`,
+			},
+		},
+		{
+			name: "book_read_progress_tombstones",
+			sql: []string{
+				`DROP TRIGGER IF EXISTS fk115_shelf_book_read_progress_tombstones_insert`,
+				`DROP TRIGGER IF EXISTS fk115_shelf_book_read_progress_tombstones_update`,
+				`DROP TRIGGER IF EXISTS fk115_shelf_book_read_progress_tombstones_delete`,
+				`CREATE TABLE book_read_progress_tombstones_v3 (
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  book_id TEXT NOT NULL,
+  series_id TEXT NOT NULL,
+  deleted_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, book_id),
+  FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
+)`,
+				`INSERT INTO book_read_progress_tombstones_v3(user_id,book_id,series_id,deleted_at)
+SELECT 'admin',book_id,series_id,deleted_at FROM book_read_progress_tombstones`,
+				`DROP TABLE book_read_progress_tombstones`,
+				`ALTER TABLE book_read_progress_tombstones_v3 RENAME TO book_read_progress_tombstones`,
+				`CREATE INDEX IF NOT EXISTS idx_progress_tombstones_series ON book_read_progress_tombstones(user_id, series_id)`,
+				`CREATE INDEX IF NOT EXISTS idx_progress_tombstones_deleted ON book_read_progress_tombstones(deleted_at)`,
+			},
+		},
+		{
+			name: "collections",
+			sql: []string{
+				`CREATE TABLE collections_v3 (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  name TEXT NOT NULL COLLATE NOCASE,
+  ordered INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, name COLLATE NOCASE)
+)`,
+				`INSERT INTO collections_v3(id,user_id,name,ordered,created_at,updated_at)
+SELECT id,'admin',name,ordered,created_at,updated_at FROM collections`,
+				`DROP TABLE collections`,
+				`ALTER TABLE collections_v3 RENAME TO collections`,
+				`CREATE INDEX IF NOT EXISTS idx_collections_user ON collections(user_id, name COLLATE NOCASE)`,
+			},
+		},
+		{
+			name: "readlists",
+			sql: []string{
+				`CREATE TABLE readlists_v3 (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  name TEXT NOT NULL COLLATE NOCASE,
+  summary TEXT NOT NULL DEFAULT '',
+  ordered INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, name COLLATE NOCASE)
+)`,
+				`INSERT INTO readlists_v3(id,user_id,name,summary,ordered,created_at,updated_at)
+SELECT id,'admin',name,summary,ordered,created_at,updated_at FROM readlists`,
+				`DROP TABLE readlists`,
+				`ALTER TABLE readlists_v3 RENAME TO readlists`,
+				`CREATE INDEX IF NOT EXISTS idx_readlists_user ON readlists(user_id, name COLLATE NOCASE)`,
+			},
+		},
+		{
+			name: "bangumi_tracker_records",
+			sql: []string{
+				`CREATE TABLE bangumi_tracker_records_v3 (
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  bgm_subject_id INTEGER NOT NULL,
+  series_id TEXT NOT NULL DEFAULT '',
+  series_title TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'pending',
+  remote_type INTEGER NOT NULL DEFAULT 0,
+  remote_vol_status INTEGER NOT NULL DEFAULT 0,
+  remote_private INTEGER NOT NULL DEFAULT 0,
+  last_local_vol INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  last_synced_at TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, bgm_subject_id)
+)`,
+				`INSERT INTO bangumi_tracker_records_v3(
+ user_id,bgm_subject_id,series_id,series_title,status,remote_type,remote_vol_status,
+ remote_private,last_local_vol,last_error,last_synced_at,updated_at
+)
+SELECT 'admin',bgm_subject_id,series_id,series_title,status,remote_type,remote_vol_status,
+ remote_private,last_local_vol,last_error,last_synced_at,updated_at FROM bangumi_tracker_records`,
+				`DROP TABLE bangumi_tracker_records`,
+				`ALTER TABLE bangumi_tracker_records_v3 RENAME TO bangumi_tracker_records`,
+				`CREATE INDEX IF NOT EXISTS idx_bgm_tracker_updated ON bangumi_tracker_records(user_id, updated_at DESC)`,
+				`CREATE INDEX IF NOT EXISTS idx_bgm_tracker_series ON bangumi_tracker_records(user_id, series_id)`,
+			},
+		},
+	}
+
+	// Ensure optional legacy columns exist before table rebuild SELECTs.
+	_ = addColumnIfMissing(db, "book_read_progress", "completed_at", "TEXT")
+	_ = addColumnIfMissing(db, "bangumi_tracker_records", "last_local_vol", "INTEGER NOT NULL DEFAULT 0")
+
+	var pending []tableRebuild
+	for _, rb := range rebuilds {
+		hasCol, err := columnExists(db, rb.name, "user_id")
+		if err != nil {
+			return err
+		}
+		if !hasCol {
+			pending = append(pending, rb)
+		}
+	}
+	if len(pending) > 0 {
+		ctx := context.Background()
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+
+		if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+			return err
+		}
+		defer conn.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+
+		tx, err := conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		for _, rb := range pending {
+			for _, stmt := range rb.sql {
+				if _, err := tx.ExecContext(ctx, stmt); err != nil {
+					return fmt.Errorf("migrate %s to multi-user: %w", rb.name, err)
+				}
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
+
+	// Ensure all multi-user indexes exist on both fresh installs and upgraded databases.
+	for _, idxSQL := range []string{
+		`CREATE INDEX IF NOT EXISTS idx_auth_sessions_user ON auth_sessions(user_id, last_seen_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_auth_api_keys_user ON auth_api_keys(user_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_book_read_progress_series ON book_read_progress(user_id, series_id, completed)`,
+		`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated ON book_read_progress(user_id, completed, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated_all ON book_read_progress(user_id, updated_at DESC, book_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_book_page_progress_series_updated ON book_page_progress(user_id, series_id, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_progress_tombstones_series ON book_read_progress_tombstones(user_id, series_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_collections_user ON collections(user_id, name COLLATE NOCASE)`,
+		`CREATE INDEX IF NOT EXISTS idx_readlists_user ON readlists(user_id, name COLLATE NOCASE)`,
+		`CREATE INDEX IF NOT EXISTS idx_bgm_tracker_updated ON bangumi_tracker_records(user_id, updated_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_bgm_tracker_series ON bangumi_tracker_records(user_id, series_id)`,
+	} {
+		if _, err := db.Exec(idxSQL); err != nil {
+			return err
+		}
+	}
+	return nil
 }

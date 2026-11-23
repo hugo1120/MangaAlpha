@@ -128,6 +128,11 @@ func (c trackerConfig) userPathSegment() string {
 	return strings.TrimSpace(c.UserID)
 }
 
+type trackerQueueItem struct {
+	UserID   string
+	SeriesID string
+}
+
 type trackerManager struct {
 	svc     *Service
 	limiter *rate.Limiter
@@ -137,7 +142,7 @@ type trackerManager struct {
 	oauthBaseURL string
 	debounce     time.Duration
 	timers       map[string]*time.Timer
-	queue        chan string
+	queue        chan trackerQueueItem
 	done         chan struct{}
 	refreshDone  chan struct{}
 	closed       bool
@@ -149,7 +154,7 @@ func newTrackerManager(svc *Service) *trackerManager {
 		limiter:     rate.NewLimiter(rate.Limit(1.0), 2),
 		debounce:    defaultTrackerDebounce,
 		timers:      make(map[string]*time.Timer),
-		queue:       make(chan string, 128),
+		queue:       make(chan trackerQueueItem, 256),
 		done:        make(chan struct{}),
 		refreshDone: make(chan struct{}),
 	}
@@ -191,30 +196,39 @@ func (tm *trackerManager) SetDebounce(d time.Duration) {
 }
 
 func (tm *trackerManager) NotifyProgress(seriesID string) {
+	tm.NotifyProgressForUser(database.PrimaryAdminUserID, seriesID)
+}
+
+func (tm *trackerManager) NotifyProgressForUser(userID, seriesID string) {
 	seriesID = strings.TrimSpace(seriesID)
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		userID = database.PrimaryAdminUserID
+	}
 	if tm == nil || seriesID == "" {
 		return
 	}
+	key := userID + "\x00" + seriesID
 	tm.mu.Lock()
 	defer tm.mu.Unlock()
 	if tm.closed {
 		return
 	}
-	if prev, exists := tm.timers[seriesID]; exists {
+	if prev, exists := tm.timers[key]; exists {
 		prev.Reset(tm.debounce)
 		return
 	}
 	delay := tm.debounce
-	tm.timers[seriesID] = time.AfterFunc(delay, func() {
+	tm.timers[key] = time.AfterFunc(delay, func() {
 		tm.mu.Lock()
-		delete(tm.timers, seriesID)
+		delete(tm.timers, key)
 		closed := tm.closed
 		tm.mu.Unlock()
 		if closed {
 			return
 		}
 		select {
-		case tm.queue <- seriesID:
+		case tm.queue <- trackerQueueItem{UserID: userID, SeriesID: seriesID}:
 		case <-tm.svc.ctx.Done():
 		default:
 		}
@@ -227,9 +241,9 @@ func (tm *trackerManager) worker() {
 		select {
 		case <-tm.svc.ctx.Done():
 			return
-		case seriesID := <-tm.queue:
-			syncCtx, cancel := context.WithTimeout(tm.svc.ctx, 25*time.Second)
-			_, _ = tm.SyncSeries(syncCtx, seriesID, false)
+		case item := <-tm.queue:
+			syncCtx, cancel := context.WithTimeout(database.WithUserID(tm.svc.ctx, item.UserID), 25*time.Second)
+			_, _ = tm.SyncSeries(syncCtx, item.SeriesID, false)
 			cancel()
 		}
 	}
@@ -251,45 +265,59 @@ func (tm *trackerManager) loadConfig(ctx context.Context) trackerConfig {
 	if s == nil {
 		return trackerConfig{NSFWMode: TrackerNSFWModeSkip}
 	}
-	token, _ := s.GetSetting(ctx, SettingTrackerToken)
-	authMode, _ := s.GetSetting(ctx, SettingTrackerAuthMode)
-	refreshToken, _ := s.GetSetting(ctx, SettingTrackerRefreshToken)
-	expiresAt, _ := s.GetSetting(ctx, SettingTrackerExpiresAt)
-	lastRefreshAt, _ := s.GetSetting(ctx, SettingTrackerLastRefreshAt)
-	lastRefreshErr, _ := s.GetSetting(ctx, SettingTrackerLastRefreshError)
-	redirectURI, _ := s.GetSetting(ctx, SettingTrackerOAuthRedirectURI)
+	userID := database.UserIDFromContext(ctx)
+	row, _ := s.UserBangumiTrackerConfig(ctx, userID)
 	customClientID, _ := s.GetSetting(ctx, SettingTrackerOAuthClientID)
 	customClientSecret, _ := s.GetSetting(ctx, SettingTrackerOAuthClientSecret)
-	username, _ := s.GetSetting(ctx, SettingTrackerUsername)
-	nickname, _ := s.GetSetting(ctx, SettingTrackerNickname)
-	userID, _ := s.GetSetting(ctx, SettingTrackerUserID)
-	nsfwRaw, _ := s.GetSetting(ctx, SettingTrackerNSFWMode)
-	nsfwMode, err := normalizeTrackerNSFWMode(nsfwRaw)
+
+	nsfwMode, err := normalizeTrackerNSFWMode(row.NSFWMode)
 	if err != nil {
 		nsfwMode = TrackerNSFWModeSkip
 	}
-	token = strings.TrimSpace(token)
-	authMode = strings.ToLower(strings.TrimSpace(authMode))
+	token := strings.TrimSpace(row.AccessToken)
+	authMode := strings.ToLower(strings.TrimSpace(row.AuthMode))
 	if token != "" && authMode == "" {
 		authMode = TrackerAuthModePAT
 	}
 	return trackerConfig{
-		Enabled:                 s.BoolSetting(ctx, SettingTrackerEnabled, false),
+		Enabled:                 row.Enabled,
 		Token:                   token,
 		AuthMode:                authMode,
-		RefreshToken:            strings.TrimSpace(refreshToken),
-		ExpiresAt:               strings.TrimSpace(expiresAt),
-		LastRefreshAt:           strings.TrimSpace(lastRefreshAt),
-		LastRefreshError:        strings.TrimSpace(lastRefreshErr),
-		OAuthRedirectURI:        strings.TrimSpace(redirectURI),
+		RefreshToken:            strings.TrimSpace(row.RefreshToken),
+		ExpiresAt:               strings.TrimSpace(row.ExpiresAt),
+		LastRefreshAt:           strings.TrimSpace(row.LastRefreshAt),
+		LastRefreshError:        strings.TrimSpace(row.LastRefreshError),
+		OAuthRedirectURI:        strings.TrimSpace(row.OAuthRedirectURI),
 		CustomOAuthClientID:     strings.TrimSpace(customClientID),
 		CustomOAuthClientSecret: strings.TrimSpace(customClientSecret),
-		Username:                strings.TrimSpace(username),
-		Nickname:                strings.TrimSpace(nickname),
-		UserID:                  strings.TrimSpace(userID),
+		Username:                strings.TrimSpace(row.BgmUsername),
+		Nickname:                strings.TrimSpace(row.BgmNickname),
+		UserID:                  strings.TrimSpace(row.BgmUserID),
 		NSFWMode:                nsfwMode,
-		PrivateDefault:          s.BoolSetting(ctx, SettingTrackerPrivateDefault, false),
+		PrivateDefault:          row.PrivateDefault,
 	}
+}
+
+func (tm *trackerManager) saveUserConfig(ctx context.Context, cfg trackerConfig) error {
+	if tm.svc.store == nil {
+		return nil
+	}
+	return tm.svc.store.SaveUserBangumiTrackerConfig(ctx, database.UserBangumiTracker{
+		UserID:           database.UserIDFromContext(ctx),
+		Enabled:          cfg.Enabled,
+		AuthMode:         cfg.AuthMode,
+		AccessToken:      cfg.Token,
+		RefreshToken:     cfg.RefreshToken,
+		ExpiresAt:        cfg.ExpiresAt,
+		LastRefreshAt:    cfg.LastRefreshAt,
+		LastRefreshError: cfg.LastRefreshError,
+		OAuthRedirectURI: cfg.OAuthRedirectURI,
+		BgmUserID:        cfg.UserID,
+		BgmUsername:      cfg.Username,
+		BgmNickname:      cfg.Nickname,
+		NSFWMode:         cfg.NSFWMode,
+		PrivateDefault:   cfg.PrivateDefault,
+	})
 }
 
 func (tm *trackerManager) Status(ctx context.Context, recordLimit int) (TrackerStatus, error) {
@@ -367,74 +395,74 @@ func (tm *trackerManager) SeriesSummary(ctx context.Context, subjectID int64) *S
 
 func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpdate) (TrackerStatus, error) {
 	cfg := tm.loadConfig(ctx)
+	scope, hasScope := database.UserScopeFromContext(ctx)
+	canEditGlobalApp := !hasScope || scope.IsAdmin
 
 	if upd.NSFWMode != nil {
 		mode, err := normalizeTrackerNSFWMode(*upd.NSFWMode)
 		if err != nil {
 			return TrackerStatus{}, err
 		}
-		if err := tm.svc.store.SetSetting(ctx, SettingTrackerNSFWMode, mode); err != nil {
-			return TrackerStatus{}, err
-		}
 		cfg.NSFWMode = mode
 	}
 	if upd.PrivateDefault != nil {
-		if err := tm.svc.store.SetSetting(ctx, SettingTrackerPrivateDefault, strconv.FormatBool(*upd.PrivateDefault)); err != nil {
-			return TrackerStatus{}, err
-		}
 		cfg.PrivateDefault = *upd.PrivateDefault
 	}
 
-	if upd.ClearCustomOAuthApp {
-		for _, k := range []string{SettingTrackerOAuthClientID, SettingTrackerOAuthClientSecret} {
-			if err := tm.svc.store.SetSetting(ctx, k, ""); err != nil {
-				return TrackerStatus{}, err
+	if canEditGlobalApp {
+		if upd.ClearCustomOAuthApp {
+			for _, k := range []string{SettingTrackerOAuthClientID, SettingTrackerOAuthClientSecret} {
+				if err := tm.svc.store.SetSetting(ctx, k, ""); err != nil {
+					return TrackerStatus{}, err
+				}
 			}
-		}
-		cfg.CustomOAuthClientID = ""
-		cfg.CustomOAuthClientSecret = ""
-	} else if upd.CustomOAuthClientID != nil || upd.CustomOAuthClientSecret != nil {
-		nextID := cfg.CustomOAuthClientID
-		nextSecret := cfg.CustomOAuthClientSecret
-		if upd.CustomOAuthClientID != nil {
-			nextID = strings.TrimSpace(*upd.CustomOAuthClientID)
-		}
-		if upd.CustomOAuthClientSecret != nil {
-			if s := strings.TrimSpace(*upd.CustomOAuthClientSecret); s != "" {
-				nextSecret = s
-			}
-		}
-		if nextID == "" && nextSecret == "" {
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientID, "")
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientSecret, "")
 			cfg.CustomOAuthClientID = ""
 			cfg.CustomOAuthClientSecret = ""
-		} else {
-			if nextID == "" || nextSecret == "" {
-				return TrackerStatus{}, errors.New("自定义 Bangumi OAuth 应用需同时填写 App ID 和 App Secret")
+		} else if upd.CustomOAuthClientID != nil || upd.CustomOAuthClientSecret != nil {
+			nextID := cfg.CustomOAuthClientID
+			nextSecret := cfg.CustomOAuthClientSecret
+			if upd.CustomOAuthClientID != nil {
+				nextID = strings.TrimSpace(*upd.CustomOAuthClientID)
 			}
-			if err := tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientID, nextID); err != nil {
-				return TrackerStatus{}, err
+			if upd.CustomOAuthClientSecret != nil {
+				if s := strings.TrimSpace(*upd.CustomOAuthClientSecret); s != "" {
+					nextSecret = s
+				}
 			}
-			if err := tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientSecret, nextSecret); err != nil {
-				return TrackerStatus{}, err
+			if nextID == "" && nextSecret == "" {
+				_ = tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientID, "")
+				_ = tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientSecret, "")
+				cfg.CustomOAuthClientID = ""
+				cfg.CustomOAuthClientSecret = ""
+			} else {
+				if nextID == "" || nextSecret == "" {
+					return TrackerStatus{}, errors.New("自定义 Bangumi OAuth 应用需同时填写 App ID 和 App Secret")
+				}
+				if err := tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientID, nextID); err != nil {
+					return TrackerStatus{}, err
+				}
+				if err := tm.svc.store.SetSetting(ctx, SettingTrackerOAuthClientSecret, nextSecret); err != nil {
+					return TrackerStatus{}, err
+				}
+				cfg.CustomOAuthClientID = nextID
+				cfg.CustomOAuthClientSecret = nextSecret
 			}
-			cfg.CustomOAuthClientID = nextID
-			cfg.CustomOAuthClientSecret = nextSecret
 		}
 	}
 
 	if upd.ClearToken {
-		for _, k := range []string{
-			SettingTrackerToken, SettingTrackerAuthMode, SettingTrackerRefreshToken,
-			SettingTrackerExpiresAt, SettingTrackerLastRefreshAt, SettingTrackerLastRefreshError,
-			SettingTrackerOAuthRedirectURI, SettingTrackerUsername, SettingTrackerNickname, SettingTrackerUserID,
-		} {
-			if err := tm.svc.store.SetSetting(ctx, k, ""); err != nil {
-				return TrackerStatus{}, err
-			}
-		}
-		if err := tm.svc.store.SetSetting(ctx, SettingTrackerEnabled, "false"); err != nil {
+		cfg.Token = ""
+		cfg.AuthMode = ""
+		cfg.RefreshToken = ""
+		cfg.ExpiresAt = ""
+		cfg.LastRefreshAt = ""
+		cfg.LastRefreshError = ""
+		cfg.OAuthRedirectURI = ""
+		cfg.Username = ""
+		cfg.Nickname = ""
+		cfg.UserID = ""
+		cfg.Enabled = false
+		if err := tm.saveUserConfig(ctx, cfg); err != nil {
 			return TrackerStatus{}, err
 		}
 		return tm.Status(ctx, 30)
@@ -451,22 +479,13 @@ func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpd
 			if ts, ok := tm.QueryTokenStatus(ctx, tok); ok {
 				expiresAt = ts.UTC().Format(time.RFC3339)
 			}
-			if err := tm.svc.store.SetSetting(ctx, SettingTrackerToken, tok); err != nil {
-				return TrackerStatus{}, err
-			}
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerAuthMode, TrackerAuthModePAT)
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerRefreshToken, "")
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerOAuthRedirectURI, "")
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerExpiresAt, expiresAt)
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshAt, "")
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerLastRefreshError, "")
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerUsername, user.Username)
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerNickname, user.Nickname)
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerUserID, strconv.FormatInt(user.ID, 10))
 			cfg.Token = tok
 			cfg.AuthMode = TrackerAuthModePAT
 			cfg.RefreshToken = ""
+			cfg.OAuthRedirectURI = ""
 			cfg.ExpiresAt = expiresAt
+			cfg.LastRefreshAt = ""
+			cfg.LastRefreshError = ""
 			cfg.Username = user.Username
 			cfg.Nickname = user.Nickname
 			cfg.UserID = strconv.FormatInt(user.ID, 10)
@@ -477,25 +496,27 @@ func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpd
 		if *upd.Enabled && cfg.Token == "" {
 			return TrackerStatus{}, ErrTrackerNotBound
 		}
-		if err := tm.svc.store.SetSetting(ctx, SettingTrackerEnabled, strconv.FormatBool(*upd.Enabled)); err != nil {
-			return TrackerStatus{}, err
-		}
+		cfg.Enabled = *upd.Enabled
 	}
 
+	if err := tm.saveUserConfig(ctx, cfg); err != nil {
+		return TrackerStatus{}, err
+	}
 	return tm.Status(ctx, 30)
 }
 
 func (tm *trackerManager) TestToken(ctx context.Context, candidateToken *string) TrackerTestResult {
 	testingSaved := candidateToken == nil || strings.TrimSpace(*candidateToken) == ""
 	tok := ""
+	var savedCfg trackerConfig
 	if !testingSaved {
 		tok = strings.TrimSpace(*candidateToken)
 	} else {
-		cfg := tm.loadConfig(ctx)
-		if cfg.AuthMode == TrackerAuthModeOAuth && cfg.RefreshToken != "" {
-			cfg, _ = tm.ensureFreshOAuthToken(ctx, cfg)
+		savedCfg = tm.loadConfig(ctx)
+		if savedCfg.AuthMode == TrackerAuthModeOAuth && savedCfg.RefreshToken != "" {
+			savedCfg, _ = tm.ensureFreshOAuthToken(ctx, savedCfg)
 		}
-		tok = cfg.Token
+		tok = savedCfg.Token
 	}
 	if tok == "" {
 		return TrackerTestResult{OK: false, Error: ErrTrackerNotBound.Error()}
@@ -510,14 +531,14 @@ func (tm *trackerManager) TestToken(ctx context.Context, candidateToken *string)
 	if ts, ok := tm.QueryTokenStatus(ctx, tok); ok {
 		expiresAt = ts.UTC().Format(time.RFC3339)
 	}
-	// If testing the already-saved token, refresh cached username/nickname/expiry silently.
 	if testingSaved {
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerUsername, user.Username)
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerNickname, user.Nickname)
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerUserID, strconv.FormatInt(user.ID, 10))
+		savedCfg.Username = user.Username
+		savedCfg.Nickname = user.Nickname
+		savedCfg.UserID = strconv.FormatInt(user.ID, 10)
 		if expiresAt != "" {
-			_ = tm.svc.store.SetSetting(ctx, SettingTrackerExpiresAt, expiresAt)
+			savedCfg.ExpiresAt = expiresAt
 		}
+		_ = tm.saveUserConfig(ctx, savedCfg)
 	}
 	return TrackerTestResult{
 		OK:        true,
@@ -689,11 +710,10 @@ func (tm *trackerManager) SyncSeries(ctx context.Context, seriesID string, manua
 		if uErr != nil {
 			return tm.saveFailure(ctx, snap, desiredVol, existingRec, nowStr, uErr)
 		}
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerUsername, user.Username)
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerNickname, user.Nickname)
-		_ = tm.svc.store.SetSetting(ctx, SettingTrackerUserID, strconv.FormatInt(user.ID, 10))
 		cfg.Username = user.Username
+		cfg.Nickname = user.Nickname
 		cfg.UserID = strconv.FormatInt(user.ID, 10)
+		_ = tm.saveUserConfig(ctx, cfg)
 		userKey = cfg.userPathSegment()
 	}
 

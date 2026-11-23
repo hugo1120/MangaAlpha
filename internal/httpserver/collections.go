@@ -105,7 +105,8 @@ func (s *Server) komgaCreateCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.sse.Publish("CollectionAdded", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "CollectionAdded", map[string]any{
 		"collectionId": item.ID,
 		"seriesIds":    item.SeriesIDs,
 	})
@@ -137,7 +138,8 @@ func (s *Server) komgaUpdateCollection(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.sse.Publish("CollectionChanged", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "CollectionChanged", map[string]any{
 		"collectionId": item.ID,
 		"seriesIds":    item.SeriesIDs,
 	})
@@ -154,7 +156,8 @@ func (s *Server) komgaDeleteCollection(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("CollectionDeleted", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "CollectionDeleted", map[string]any{
 		"collectionId": id,
 		"seriesIds":    []string{},
 	})
@@ -301,7 +304,8 @@ func (s *Server) komgaCreateReadList(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.sse.Publish("ReadListAdded", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadListAdded", map[string]any{
 		"readListId": item.ID,
 		"bookIds":    item.BookIDs,
 	})
@@ -334,7 +338,8 @@ func (s *Server) komgaUpdateReadList(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.sse.Publish("ReadListChanged", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadListChanged", map[string]any{
 		"readListId": item.ID,
 		"bookIds":    item.BookIDs,
 	})
@@ -351,7 +356,8 @@ func (s *Server) komgaDeleteReadList(w http.ResponseWriter, r *http.Request) {
 		s.writeDBError(w, r, err)
 		return
 	}
-	s.sse.Publish("ReadListDeleted", map[string]any{
+	userID := database.UserIDFromContext(r.Context())
+	s.sse.PublishForUser(userID, "ReadListDeleted", map[string]any{
 		"readListId": id,
 		"bookIds":    []string{},
 	})

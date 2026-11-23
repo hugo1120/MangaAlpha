@@ -112,11 +112,12 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 			searchDriven = true
 		}
 	}
+	userID := UserIDFromContext(ctx)
 	filterQ := q
 	if searchDriven {
 		filterQ.Search = ""
 	}
-	where, args, empty := buildSeriesFilters(filterQ, enabledLibs)
+	where, args, empty := buildSeriesFilters(filterQ, enabledLibs, userID)
 	if empty {
 		return []Series{}, 0, nil
 	}
@@ -127,7 +128,7 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 		len(q.ReadStatus) == 0
 	noExtraFilters := noExtraNonSearchFilters && strings.TrimSpace(q.Search) == ""
 	if !q.GroupBangumi && !searchDriven {
-		if drvSQL, drvArgs := selectiveSeriesDriver(q); drvSQL != "" {
+		if drvSQL, drvArgs := selectiveSeriesDriver(q, userID); drvSQL != "" {
 			source = " FROM (" + drvSQL + ") _drv CROSS JOIN series s ON s.id=_drv.series_id"
 			sourceArgs = drvArgs
 		}
@@ -328,14 +329,15 @@ SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified
 	return items, total, err
 }
 
-func selectiveSeriesDriver(q SeriesQuery) (string, []any) {
+func selectiveSeriesDriver(q SeriesQuery, userID string) (string, []any) {
 	if len(q.CollectionIDs) > 0 {
 		ids := cleanStringSliceCaseSensitive(q.CollectionIDs)
-		args := make([]any, len(ids))
-		for i, id := range ids {
-			args[i] = id
+		args := make([]any, 0, 1+len(ids))
+		args = append(args, userID)
+		for _, id := range ids {
+			args = append(args, id)
 		}
-		return `SELECT DISTINCT cs.series_id FROM collection_series cs WHERE cs.collection_id IN ` + Placeholders(len(ids)), args
+		return `SELECT DISTINCT cs.series_id FROM collection_series cs JOIN collections c ON c.id=cs.collection_id WHERE c.user_id=? AND cs.collection_id IN ` + Placeholders(len(ids)), args
 	}
 	if len(q.Publishers) > 0 {
 		pubs := cleanStringSlice(q.Publishers)
@@ -501,6 +503,11 @@ FROM series s`
 	if err != nil {
 		return Series{}, err
 	}
+	if !includeHidden {
+		if scope, ok := UserScopeFromContext(ctx); ok && !scope.AllowsLibrary(item.LibraryID) {
+			return Series{}, sql.ErrNoRows
+		}
+	}
 	item.FileModifiedAt = parseNullableTime(modified)
 	item.CreatedAt = parseTime(created)
 	item.UpdatedAt = parseTime(updated)
@@ -613,13 +620,16 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 	if bookSearchDriven {
 		filterQ.Search = ""
 	}
+	userID := UserIDFromContext(ctx)
 	excludeNSFW := !s.ShowNSFW(ctx)
-	where, args, empty := buildBookFilters(filterQ, enabledLibs, excludeNSFW)
+	where, args, empty := buildBookFilters(filterQ, enabledLibs, excludeNSFW, userID)
 	if empty {
 		return []Book{}, 0, nil
 	}
 	if progMode != "" {
 		source = " FROM book_read_progress p CROSS JOIN books b ON b.id=p.book_id"
+		where += " AND p.user_id=?"
+		args = append(args, userID)
 		switch progMode {
 		case "in_progress":
 			where += " AND p.completed=0"
@@ -649,8 +659,9 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 		if progMode != "" {
 			order = "p.updated_at " + sortDirection(sortValue) + ",b.number_sort ASC,b.id ASC"
 		} else {
-			order = `COALESCE((SELECT p.updated_at FROM book_read_progress p WHERE p.book_id=b.id), '') ` +
+			order = `COALESCE((SELECT p.updated_at FROM book_read_progress p WHERE p.user_id=? AND p.book_id=b.id), '') ` +
 				sortDirection(sortValue) + `,b.number_sort ASC,b.id ASC`
+			orderArgs = append(orderArgs, userID)
 		}
 	case strings.HasPrefix(sortValue, "lastmodifieddate"):
 		order = "COALESCE(b.file_modified_at,b.updated_at) " +
@@ -757,9 +768,10 @@ func (s *Store) queryProgressScopedBooks(
 	enabledLibs []string,
 	excludeNSFW bool,
 ) ([]Book, int64, error) {
+	userID := UserIDFromContext(ctx)
 	cutoff := time.Now().UTC().Add(-progressTombstoneRetention).Format(time.RFC3339Nano)
-	libArgs := make([]any, 0, 1+len(enabledLibs))
-	libArgs = append(libArgs, cutoff)
+	libArgs := make([]any, 0, 3+len(enabledLibs))
+	libArgs = append(libArgs, userID, userID, cutoff)
 	for _, id := range enabledLibs {
 		libArgs = append(libArgs, id)
 	}
@@ -768,9 +780,9 @@ func (s *Store) queryProgressScopedBooks(
 	seriesQuery := `
 SELECT DISTINCT src.series_id
 FROM (
-  SELECT series_id FROM book_read_progress
+  SELECT series_id FROM book_read_progress WHERE user_id=?
   UNION
-  SELECT series_id FROM book_read_progress_tombstones WHERE deleted_at>=?
+  SELECT series_id FROM book_read_progress_tombstones WHERE user_id=? AND deleted_at>=?
 ) src
 CROSS JOIN series s ON s.id=src.series_id
 WHERE s.library_id IN ` + Placeholders(len(enabledLibs))
@@ -873,6 +885,11 @@ WHERE b.id=?`
 	if err != nil {
 		return Book{}, err
 	}
+	if !includeHidden {
+		if scope, ok := UserScopeFromContext(ctx); ok && !scope.AllowsLibrary(item.LibraryID) {
+			return Book{}, sql.ErrNoRows
+		}
+	}
 	item.FileCreatedAt = parseNullableTime(fileCreated)
 	item.FileModifiedAt = parseNullableTime(fileModified)
 	item.CreatedAt = parseTime(created)
@@ -887,6 +904,7 @@ func (s *Store) SeriesByIDs(ctx context.Context, ids []string) (map[string]Serie
 	}
 	unique := cleanStringSliceCaseSensitive(ids)
 	excludeNSFW := !s.ShowNSFW(ctx)
+	scope, hasScope := UserScopeFromContext(ctx)
 	for _, chunk := range chunkStrings(unique, sqlInChunkSize) {
 		args := make([]any, 0, len(chunk))
 		for _, id := range chunk {
@@ -910,6 +928,9 @@ WHERE s.id IN ` + Placeholders(len(args))
 			return nil, err
 		}
 		for _, item := range items {
+			if hasScope && !scope.AllowsLibrary(item.LibraryID) {
+				continue
+			}
 			out[item.ID] = item
 		}
 	}
@@ -1075,7 +1096,7 @@ func intersectLibraryIDs(requested, enabled []string) ([]string, bool) {
 	return out, len(out) == 0
 }
 
-func buildSeriesFilters(q SeriesQuery, enabledLibs []string) (string, []any, bool) {
+func buildSeriesFilters(q SeriesQuery, enabledLibs []string, userID string) (string, []any, bool) {
 	var clauses []string
 	var args []any
 	if !q.IncludeHidden {
@@ -1108,7 +1129,8 @@ func buildSeriesFilters(q SeriesQuery, enabledLibs []string) (string, []any, boo
 	if len(q.CollectionIDs) > 0 {
 		cids := cleanStringSliceCaseSensitive(q.CollectionIDs)
 		clauses = append(clauses,
-			"s.id IN (SELECT cs.series_id FROM collection_series cs WHERE cs.collection_id IN "+Placeholders(len(cids))+")")
+			"s.id IN (SELECT cs.series_id FROM collection_series cs JOIN collections c ON c.id=cs.collection_id WHERE c.user_id=? AND cs.collection_id IN "+Placeholders(len(cids))+")")
+		args = append(args, userID)
 		for _, id := range cids {
 			args = append(args, id)
 		}
@@ -1188,8 +1210,9 @@ func buildSeriesFilters(q SeriesQuery, enabledLibs []string) (string, []any, boo
 			args = append(args, scrapeStatus)
 		}
 	}
-	if conditions := readStatusConditions(q.ReadStatus, "series"); len(conditions) > 0 {
+	if conditions, condArgs := readStatusConditions(q.ReadStatus, "series", userID); len(conditions) > 0 {
 		clauses = append(clauses, "("+strings.Join(conditions, " OR ")+")")
+		args = append(args, condArgs...)
 	}
 	if len(clauses) == 0 {
 		return "", args, false
@@ -1197,9 +1220,10 @@ func buildSeriesFilters(q SeriesQuery, enabledLibs []string) (string, []any, boo
 	return " WHERE " + strings.Join(clauses, " AND "), args, false
 }
 
-func readStatusConditions(statuses []string, target string) []string {
+func readStatusConditions(statuses []string, target, userID string) ([]string, []any) {
 	seen := map[string]bool{}
 	var conditions []string
+	var args []any
 	for _, raw := range statuses {
 		status := strings.ToUpper(strings.TrimSpace(raw))
 		if seen[status] {
@@ -1211,26 +1235,32 @@ func readStatusConditions(statuses []string, target string) []string {
 			switch status {
 			case "READ":
 				conditions = append(conditions, "("+seriesReadCondition()+")")
+				args = append(args, userID)
 			case "IN_PROGRESS":
 				conditions = append(conditions, "("+seriesInProgressCondition()+")")
+				args = append(args, userID, userID)
 			case "UNREAD":
 				conditions = append(conditions, "("+seriesUnreadCondition()+")")
+				args = append(args, userID)
 			}
 		case "book":
 			switch status {
 			case "READ":
 				conditions = append(conditions,
-					`EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id AND p.completed=1)`)
+					`EXISTS (SELECT 1 FROM book_read_progress p WHERE p.user_id=? AND p.book_id=b.id AND p.completed=1)`)
+				args = append(args, userID)
 			case "IN_PROGRESS":
 				conditions = append(conditions,
-					`EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id AND p.completed=0)`)
+					`EXISTS (SELECT 1 FROM book_read_progress p WHERE p.user_id=? AND p.book_id=b.id AND p.completed=0)`)
+				args = append(args, userID)
 			case "UNREAD":
 				conditions = append(conditions,
-					`NOT EXISTS (SELECT 1 FROM book_read_progress p WHERE p.book_id=b.id)`)
+					`NOT EXISTS (SELECT 1 FROM book_read_progress p WHERE p.user_id=? AND p.book_id=b.id)`)
+				args = append(args, userID)
 			}
 		}
 	}
-	return conditions
+	return conditions, args
 }
 
 func seriesReadCondition() string {
@@ -1240,7 +1270,7 @@ AND NOT EXISTS (
  WHERE not_read_book.series_id=s.id
  AND NOT EXISTS (
   SELECT 1 FROM book_read_progress read_progress
-  WHERE read_progress.book_id=not_read_book.id AND read_progress.completed=1
+  WHERE read_progress.user_id=? AND read_progress.book_id=not_read_book.id AND read_progress.completed=1
  )
 )`
 }
@@ -1248,14 +1278,14 @@ AND NOT EXISTS (
 func seriesInProgressCondition() string {
 	return `EXISTS (
  SELECT 1 FROM book_read_progress progressed
- WHERE progressed.series_id=s.id
+ WHERE progressed.user_id=? AND progressed.series_id=s.id
 )
 AND EXISTS (
  SELECT 1 FROM books incomplete_book
  WHERE incomplete_book.series_id=s.id
  AND NOT EXISTS (
   SELECT 1 FROM book_read_progress completed_progress
-  WHERE completed_progress.book_id=incomplete_book.id AND completed_progress.completed=1
+  WHERE completed_progress.user_id=? AND completed_progress.book_id=incomplete_book.id AND completed_progress.completed=1
  )
 )`
 }
@@ -1263,11 +1293,11 @@ AND EXISTS (
 func seriesUnreadCondition() string {
 	return `NOT EXISTS (
  SELECT 1 FROM book_read_progress progressed
- WHERE progressed.series_id=s.id
+ WHERE progressed.user_id=? AND progressed.series_id=s.id
 )`
 }
 
-func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool) (string, []any, bool) {
+func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool, userID string) (string, []any, bool) {
 	libs, empty := intersectLibraryIDs(q.LibraryIDs, enabledLibs)
 	if empty {
 		return "", nil, true
@@ -1286,7 +1316,8 @@ func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool) (stri
 	if len(q.ReadListIDs) > 0 {
 		rids := cleanStringSliceCaseSensitive(q.ReadListIDs)
 		clauses = append(clauses,
-			"b.id IN (SELECT rb.book_id FROM readlist_books rb WHERE rb.readlist_id IN "+Placeholders(len(rids))+")")
+			"b.id IN (SELECT rb.book_id FROM readlist_books rb JOIN readlists r ON r.id=rb.readlist_id WHERE r.user_id=? AND rb.readlist_id IN "+Placeholders(len(rids))+")")
+		args = append(args, userID)
 		for _, id := range rids {
 			args = append(args, id)
 		}
@@ -1320,8 +1351,9 @@ func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool) (stri
 			args = append(args, a)
 		}
 	}
-	if conditions := readStatusConditions(q.ReadStatus, "book"); len(conditions) > 0 {
+	if conditions, condArgs := readStatusConditions(q.ReadStatus, "book", userID); len(conditions) > 0 {
 		clauses = append(clauses, "("+strings.Join(conditions, " OR ")+")")
+		args = append(args, condArgs...)
 	}
 	if len(clauses) == 0 {
 		return "", args, false

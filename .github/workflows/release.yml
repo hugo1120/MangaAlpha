@@ -112,6 +112,7 @@ jobs:
             ./cmd/server
           cp README.md LICENSE SECURITY.md AGENTS.md "dist/${package}/"
           cp web/reader/LICENSE "dist/${package}/LICENSE-Suwayomi-MPL-2.0.txt"
+          cp internal/httpserver/static/ui/LICENSE-LXGW-WenKai-OFL.txt "dist/${package}/LICENSE-LXGW-WenKai-OFL.txt"
           mkdir -p "dist/${package}/docs/release-notes" "dist/${package}/web/reader"
           cp docs/AGENT_API.md docs/ARCHITECTURE.md docs/RELEASING.md docs/ANDROID.md "dist/${package}/docs/"
           cp "docs/release-notes/${tag}.md" "dist/${package}/docs/release-notes/"
@@ -165,7 +166,12 @@ jobs:
             echo "::error::Missing release notes file: ${notes_file}"
             exit 1
           fi
+          title="$(sed -n '1s/^#[[:space:]]\+//p' "${notes_file}")"
+          if [[ -z "${title}" ]]; then
+            title="MangaAlpha ${GITHUB_REF_NAME}"
+          fi
           echo "RELEASE_NOTES_FILE=${notes_file}" >> "${GITHUB_ENV}"
+          echo "RELEASE_TITLE=${title}" >> "${GITHUB_ENV}"
       - name: Generate SHA256 checksums
         run: |
           cd dist
@@ -177,6 +183,6 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" \
             dist/* \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "MangaAlpha ${GITHUB_REF_NAME}" \
+            --title "${RELEASE_TITLE}" \
             --notes-file "${RELEASE_NOTES_FILE}" \
             --verify-tag

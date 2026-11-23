@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
+	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
 const (
@@ -23,6 +24,8 @@ const (
 )
 
 type bangumiOAuthPending struct {
+	UserID      string
+	IsAdmin     bool
 	CallbackURL string
 	Origin      string
 	ExpiresAt   time.Time
@@ -39,13 +42,16 @@ func newBangumiOAuthStateStore() *bangumiOAuthStateStore {
 	}
 }
 
-func (st *bangumiOAuthStateStore) Create(origin, callbackURL string) (string, error) {
+func (st *bangumiOAuthStateStore) Create(userID string, isAdmin bool, origin, callbackURL string) (string, error) {
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
 	}
 	state := hex.EncodeToString(raw[:])
 	now := time.Now()
+	if strings.TrimSpace(userID) == "" {
+		userID = database.PrimaryAdminUserID
+	}
 
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -69,6 +75,8 @@ func (st *bangumiOAuthStateStore) Create(origin, callbackURL string) (string, er
 		delete(st.items, oldestKey)
 	}
 	st.items[state] = bangumiOAuthPending{
+		UserID:      userID,
+		IsAdmin:     isAdmin,
 		CallbackURL: callbackURL,
 		Origin:      origin,
 		ExpiresAt:   now.Add(bangumiOAuthStateTTL),
@@ -109,8 +117,9 @@ func (s *Server) startBangumiTrackerOAuth(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "INVALID_ORIGIN", "Unable to determine server origin from Host header.")
 		return
 	}
+	principal, _ := s.currentPrincipal(r)
 	callbackURL := origin + bangumiOAuthCallbackPath
-	state, err := s.bgmOAuthStates.Create(origin, callbackURL)
+	state, err := s.bgmOAuthStates.Create(principal.UserID, principal.IsAdmin, origin, callbackURL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "OAUTH_STATE_FAILED", "Failed to initialize OAuth authorization state.")
 		return
@@ -130,14 +139,14 @@ func (s *Server) startBangumiTrackerOAuth(w http.ResponseWriter, r *http.Request
 
 func (s *Server) bangumiTrackerOAuthCallback(w http.ResponseWriter, r *http.Request) {
 	if s.bangumi == nil {
-		writeBangumiOAuthCallbackPage(w, http.StatusServiceUnavailable, "", false, "Bangumi 服务未初始化。")
+		writeBangumiOAuthCallbackPage(w, http.StatusServiceUnavailable, "", true, false, "Bangumi 服务未初始化。")
 		return
 	}
 	q := r.URL.Query()
 	state := strings.TrimSpace(q.Get("state"))
 	pending, ok := s.bgmOAuthStates.Consume(state)
 	if !ok {
-		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, "", false, "授权状态已过期或无效，请回到管理后台重新点击「Bangumi OAuth 一键授权」。")
+		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, "", true, false, "授权状态已过期或无效，请回到页面重新点击「Bangumi OAuth 一键授权」。")
 		return
 	}
 	if errCode := strings.TrimSpace(q.Get("error")); errCode != "" {
@@ -145,17 +154,18 @@ func (s *Server) bangumiTrackerOAuthCallback(w http.ResponseWriter, r *http.Requ
 		if desc == "" {
 			desc = errCode
 		}
-		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, pending.Origin, false, "Bangumi 授权未完成："+desc)
+		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, pending.Origin, pending.IsAdmin, false, "Bangumi 授权未完成："+desc)
 		return
 	}
 	code := strings.TrimSpace(q.Get("code"))
 	if code == "" {
-		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, pending.Origin, false, "回调缺少授权码（code），请重新发起授权。")
+		writeBangumiOAuthCallbackPage(w, http.StatusBadRequest, pending.Origin, pending.IsAdmin, false, "回调缺少授权码（code），请重新发起授权。")
 		return
 	}
-	st, err := s.bangumi.ExchangeTrackerOAuthCode(r.Context(), code, pending.CallbackURL)
+	userCtx := database.WithUserID(r.Context(), pending.UserID)
+	st, err := s.bangumi.ExchangeTrackerOAuthCode(userCtx, code, pending.CallbackURL)
 	if err != nil {
-		writeBangumiOAuthCallbackPage(w, http.StatusBadGateway, pending.Origin, false, err.Error())
+		writeBangumiOAuthCallbackPage(w, http.StatusBadGateway, pending.Origin, pending.IsAdmin, false, err.Error())
 		return
 	}
 	name := st.Nickname
@@ -166,7 +176,7 @@ func (s *Server) bangumiTrackerOAuthCallback(w http.ResponseWriter, r *http.Requ
 	if name != "" {
 		msg = fmt.Sprintf("已成功绑定 Bangumi 账号「%s」并开启自动续期", name)
 	}
-	writeBangumiOAuthCallbackPage(w, http.StatusOK, pending.Origin, true, msg)
+	writeBangumiOAuthCallbackPage(w, http.StatusOK, pending.Origin, pending.IsAdmin, true, msg)
 }
 
 func (s *Server) exchangeBangumiTrackerOAuthCode(w http.ResponseWriter, r *http.Request) {
@@ -202,8 +212,13 @@ func (s *Server) exchangeBangumiTrackerOAuthCode(w http.ResponseWriter, r *http.
 			}
 		}
 	}
+	principal, _ := s.currentPrincipal(r)
 	callbackURL := ""
 	if pending, ok := s.bgmOAuthStates.Consume(state); ok {
+		if pending.UserID != "" && principal.UserID != "" && pending.UserID != principal.UserID {
+			writeError(w, http.StatusForbidden, "OAUTH_STATE_MISMATCH", "该授权状态属于其他账号，请使用当前账号重新发起授权。")
+			return
+		}
 		callbackURL = pending.CallbackURL
 	} else if origin := s.requestOrigin(r); origin != "" {
 		callbackURL = origin + bangumiOAuthCallbackPath
@@ -216,6 +231,10 @@ func (s *Server) exchangeBangumiTrackerOAuthCode(w http.ResponseWriter, r *http.
 		}
 		writeError(w, status, "OAUTH_EXCHANGE_FAILED", err.Error())
 		return
+	}
+	if !principal.IsAdmin {
+		st.CustomOAuthClientID = ""
+		st.HasCustomOAuthSecret = false
 	}
 	writeJSON(w, http.StatusOK, st)
 }
@@ -234,10 +253,14 @@ func (s *Server) refreshBangumiTrackerOAuth(w http.ResponseWriter, r *http.Reque
 		writeError(w, status, "OAUTH_REFRESH_FAILED", err.Error())
 		return
 	}
+	if principal, ok := s.currentPrincipal(r); ok && !principal.IsAdmin {
+		st.CustomOAuthClientID = ""
+		st.HasCustomOAuthSecret = false
+	}
 	writeJSON(w, http.StatusOK, st)
 }
 
-func writeBangumiOAuthCallbackPage(w http.ResponseWriter, status int, targetOrigin string, ok bool, message string) {
+func writeBangumiOAuthCallbackPage(w http.ResponseWriter, status int, targetOrigin string, isAdmin bool, ok bool, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
@@ -258,6 +281,11 @@ func writeBangumiOAuthCallbackPage(w http.ResponseWriter, status int, targetOrig
 	})
 	originJSON, _ := json.Marshal(targetOrigin)
 	backHref := "/admin?tab=bangumi"
+	backLabel := "返回管理后台"
+	if !isAdmin {
+		backHref = "/account"
+		backLabel = "返回账号设置"
+	}
 
 	_, _ = fmt.Fprintf(w, `<!doctype html>
 <html lang="zh-CN">
@@ -284,7 +312,7 @@ func writeBangumiOAuthCallbackPage(w http.ResponseWriter, status int, targetOrig
     <div class="ico">%s</div>
     <h1>%s</h1>
     <p>%s</p>
-    <a class="btn" href="%s" id="back-btn">返回管理后台</a>
+    <a class="btn" href="%s" id="back-btn">%s</a>
   </div>
   <script>
     (function(){
@@ -308,6 +336,7 @@ func writeBangumiOAuthCallbackPage(w http.ResponseWriter, status int, targetOrig
 		html.EscapeString(title),
 		html.EscapeString(message),
 		backHref,
+		html.EscapeString(backLabel),
 		string(payloadJSON),
 		string(originJSON),
 	)

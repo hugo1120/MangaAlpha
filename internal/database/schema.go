@@ -12,9 +12,52 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 
 CREATE TABLE IF NOT EXISTS client_settings (
-  key TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  key TEXT NOT NULL,
   value TEXT NOT NULL,
   allow_unauthenticated INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  password_hash TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'user',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  all_libraries INTEGER NOT NULL DEFAULT 1,
+  allow_nsfw INTEGER NOT NULL DEFAULT 0,
+  show_nsfw INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_role ON users(role);
+
+CREATE TABLE IF NOT EXISTS user_library_access (
+  user_id TEXT NOT NULL,
+  library_id TEXT NOT NULL,
+  PRIMARY KEY(user_id, library_id),
+  FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY(library_id) REFERENCES libraries(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_ula_library ON user_library_access(library_id);
+
+CREATE TABLE IF NOT EXISTS user_bangumi_trackers (
+  user_id TEXT PRIMARY KEY,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  auth_mode TEXT NOT NULL DEFAULT '',
+  access_token TEXT NOT NULL DEFAULT '',
+  refresh_token TEXT NOT NULL DEFAULT '',
+  expires_at TEXT NOT NULL DEFAULT '',
+  last_refresh_at TEXT NOT NULL DEFAULT '',
+  last_refresh_error TEXT NOT NULL DEFAULT '',
+  oauth_redirect_uri TEXT NOT NULL DEFAULT '',
+  bgm_user_id TEXT NOT NULL DEFAULT '',
+  bgm_username TEXT NOT NULL DEFAULT '',
+  bgm_nickname TEXT NOT NULL DEFAULT '',
+  nsfw_mode TEXT NOT NULL DEFAULT 'skip',
+  private_default INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
 
@@ -28,6 +71,7 @@ CREATE TABLE IF NOT EXISTS auth_admin (
 
 CREATE TABLE IF NOT EXISTS auth_sessions (
   token_hash TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
   username TEXT NOT NULL,
   remember INTEGER NOT NULL DEFAULT 0,
   user_agent TEXT NOT NULL DEFAULT '',
@@ -39,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires ON auth_sessions(expires_at
 
 CREATE TABLE IF NOT EXISTS auth_api_keys (
   id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
   name TEXT NOT NULL,
   key_prefix TEXT NOT NULL,
   key_hash TEXT NOT NULL UNIQUE,
@@ -298,30 +343,31 @@ CREATE TABLE IF NOT EXISTS zip_indexes (
 );
 
 CREATE TABLE IF NOT EXISTS book_read_progress (
-  book_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  book_id TEXT NOT NULL,
   series_id TEXT NOT NULL,
   completed INTEGER NOT NULL DEFAULT 1,
   page INTEGER,
   read_date TEXT,
   completed_at TEXT,
   updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, book_id),
   FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_book_read_progress_series ON book_read_progress(series_id, completed);
-CREATE INDEX IF NOT EXISTS idx_book_read_progress_updated ON book_read_progress(completed, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS book_page_progress (
-  book_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  book_id TEXT NOT NULL,
   series_id TEXT NOT NULL,
   last_loaded_page INTEGER NOT NULL,
   max_loaded_page INTEGER NOT NULL,
   page_count INTEGER NOT NULL,
   updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, book_id),
   FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE,
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_book_page_progress_series_updated ON book_page_progress(series_id, updated_at DESC);
 
 CREATE TABLE IF NOT EXISTS series_thumbnails (
   series_id TEXT PRIMARY KEY,
@@ -424,20 +470,23 @@ CREATE TABLE IF NOT EXISTS cache_entries (
 CREATE INDEX IF NOT EXISTS idx_cache_entries_type_access ON cache_entries(cache_type, last_access_at);
 
 CREATE TABLE IF NOT EXISTS book_read_progress_tombstones (
-  book_id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  book_id TEXT NOT NULL,
   series_id TEXT NOT NULL,
   deleted_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, book_id),
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_progress_tombstones_series ON book_read_progress_tombstones(series_id);
 CREATE INDEX IF NOT EXISTS idx_progress_tombstones_deleted ON book_read_progress_tombstones(deleted_at);
 
 CREATE TABLE IF NOT EXISTS collections (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  name TEXT NOT NULL COLLATE NOCASE,
   ordered INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, name COLLATE NOCASE)
 );
 
 CREATE TABLE IF NOT EXISTS collection_series (
@@ -453,11 +502,13 @@ CREATE INDEX IF NOT EXISTS idx_collection_series_series ON collection_series(ser
 
 CREATE TABLE IF NOT EXISTS readlists (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  name TEXT NOT NULL COLLATE NOCASE,
   summary TEXT NOT NULL DEFAULT '',
   ordered INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  UNIQUE(user_id, name COLLATE NOCASE)
 );
 
 CREATE TABLE IF NOT EXISTS readlist_books (
@@ -541,7 +592,8 @@ CREATE INDEX IF NOT EXISTS idx_pipeline_runs_created ON pipeline_runs(created_at
 CREATE INDEX IF NOT EXISTS idx_pipeline_runs_lib ON pipeline_runs(library_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS bangumi_tracker_records (
-  bgm_subject_id INTEGER PRIMARY KEY,
+  user_id TEXT NOT NULL DEFAULT 'admin',
+  bgm_subject_id INTEGER NOT NULL,
   series_id TEXT NOT NULL DEFAULT '',
   series_title TEXT NOT NULL DEFAULT '',
   status TEXT NOT NULL DEFAULT 'pending',
@@ -551,10 +603,9 @@ CREATE TABLE IF NOT EXISTS bangumi_tracker_records (
   last_local_vol INTEGER NOT NULL DEFAULT 0,
   last_error TEXT NOT NULL DEFAULT '',
   last_synced_at TEXT,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(user_id, bgm_subject_id)
 );
-CREATE INDEX IF NOT EXISTS idx_bgm_tracker_updated ON bangumi_tracker_records(updated_at DESC);
-CREATE INDEX IF NOT EXISTS idx_bgm_tracker_series ON bangumi_tracker_records(series_id);
 
 CREATE TABLE IF NOT EXISTS archive_passwords (
   id TEXT PRIMARY KEY,

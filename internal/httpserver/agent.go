@@ -17,47 +17,53 @@ import (
 )
 
 func (s *Server) agentRoutes(r chi.Router) {
+	// Public read-only discovery & device-auth handshake routes
 	r.Get("/guide", s.agentGuide)
 	r.Get("/playbooks/bangumi-match", s.agentGuide)
 	r.Post("/auth/requests", s.createAgentAuthRequest)
 	r.Get("/auth/requests/{requestID}", s.pollAgentAuthRequest)
 
-	r.Get("/manifest", s.agentManifest)
-	r.Get("/overview", s.agentOverview)
+	// Administrator-only Agent management API
+	r.Group(func(ar chi.Router) {
+		ar.Use(s.requireAdmin)
 
-	r.Get("/libraries", s.agentListLibraries)
-	r.Post("/libraries", s.createLibrary)
-	r.Patch("/libraries/{libraryID}", s.agentPatchLibrary)
-	r.Delete("/libraries/{libraryID}", s.deleteLibrary)
-	r.Post("/libraries/{libraryID}/scan", s.agentScanLibrary)
-	r.Post("/scans", s.startScan)
+		ar.Get("/manifest", s.agentManifest)
+		ar.Get("/overview", s.agentOverview)
 
-	r.Get("/series", s.agentListSeries)
-	r.Get("/series/{seriesID}", s.agentGetSeries)
-	r.Get("/series/{seriesID}/bangumi/candidates", s.agentSearchSeriesBangumi)
-	r.Post("/series/batch", s.agentBatchSeries)
+		ar.Get("/libraries", s.agentListLibraries)
+		ar.Post("/libraries", s.createLibrary)
+		ar.Patch("/libraries/{libraryID}", s.agentPatchLibrary)
+		ar.Delete("/libraries/{libraryID}", s.deleteLibrary)
+		ar.Post("/libraries/{libraryID}/scan", s.agentScanLibrary)
+		ar.Post("/scans", s.startScan)
 
-	r.Post("/bangumi/scrape", s.startBangumiRun)
-	r.Get("/bangumi/archive/source", s.getBangumiArchiveSource)
-	r.Put("/bangumi/archive/source", s.putBangumiArchiveSource)
-	r.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
-	r.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
-	r.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
+		ar.Get("/series", s.agentListSeries)
+		ar.Get("/series/{seriesID}", s.agentGetSeries)
+		ar.Get("/series/{seriesID}/bangumi/candidates", s.agentSearchSeriesBangumi)
+		ar.Post("/series/batch", s.agentBatchSeries)
 
-	r.Get("/update", s.getUpdateStatus)
-	r.Post("/update/check", s.postUpdateCheck)
-	r.Put("/update/config", s.putUpdateConfig)
+		ar.Post("/bangumi/scrape", s.startBangumiRun)
+		ar.Get("/bangumi/archive/source", s.getBangumiArchiveSource)
+		ar.Put("/bangumi/archive/source", s.putBangumiArchiveSource)
+		ar.Post("/bangumi/archive/update", s.startBangumiArchiveUpdate)
+		ar.Get("/bangumi/archive/schedule", s.getBangumiArchiveSchedule)
+		ar.Put("/bangumi/archive/schedule", s.putBangumiArchiveSchedule)
 
-	r.Get("/diagnostics", s.getDiagnostics)
-	r.Put("/diagnostics/config", s.putDiagnosticsConfig)
-	r.Get("/diagnostics/export", s.exportDiagnostics)
-	r.Delete("/diagnostics", s.clearDiagnostics)
+		ar.Get("/update", s.getUpdateStatus)
+		ar.Post("/update/check", s.postUpdateCheck)
+		ar.Put("/update/config", s.putUpdateConfig)
 
-	r.Get("/jobs", s.agentListJobs)
-	r.Post("/jobs/{jobType}/{runID}/cancel", s.agentCancelJob)
+		ar.Get("/diagnostics", s.getDiagnostics)
+		ar.Put("/diagnostics/config", s.putDiagnosticsConfig)
+		ar.Get("/diagnostics/export", s.exportDiagnostics)
+		ar.Delete("/diagnostics", s.clearDiagnostics)
 
-	r.Get("/settings", s.getSettings)
-	r.Patch("/settings", s.agentPatchSettings)
+		ar.Get("/jobs", s.agentListJobs)
+		ar.Post("/jobs/{jobType}/{runID}/cancel", s.agentCancelJob)
+
+		ar.Get("/settings", s.getSettings)
+		ar.Patch("/settings", s.agentPatchSettings)
+	})
 }
 
 func (s *Server) agentManifest(w http.ResponseWriter, _ *http.Request) {

@@ -887,16 +887,19 @@ func (s *Store) AuthorsPage(ctx context.Context, q AuthorQuery) ([]Author, int64
 	if !s.ShowNSFW(ctx) {
 		clauses = append(clauses, `s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`)
 	}
+	userID := UserIDFromContext(ctx)
 	if len(q.CollectionIDs) > 0 {
 		cids := cleanStringSliceCaseSensitive(q.CollectionIDs)
-		clauses = append(clauses, `s.id IN (SELECT cs.series_id FROM collection_series cs WHERE cs.collection_id IN `+Placeholders(len(cids))+`)`)
+		clauses = append(clauses, `s.id IN (SELECT cs.series_id FROM collection_series cs JOIN collections c ON c.id=cs.collection_id WHERE c.user_id=? AND cs.collection_id IN `+Placeholders(len(cids))+`)`)
+		args = append(args, userID)
 		for _, id := range cids {
 			args = append(args, id)
 		}
 	}
 	if len(q.ReadListIDs) > 0 {
 		rids := cleanStringSliceCaseSensitive(q.ReadListIDs)
-		clauses = append(clauses, `s.id IN (SELECT b.series_id FROM readlist_books rb JOIN books b ON b.id=rb.book_id WHERE rb.readlist_id IN `+Placeholders(len(rids))+`)`)
+		clauses = append(clauses, `s.id IN (SELECT b.series_id FROM readlist_books rb JOIN readlists r ON r.id=rb.readlist_id JOIN books b ON b.id=rb.book_id WHERE r.user_id=? AND rb.readlist_id IN `+Placeholders(len(rids))+`)`)
+		args = append(args, userID)
 		for _, id := range rids {
 			args = append(args, id)
 		}

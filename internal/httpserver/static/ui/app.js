@@ -5,7 +5,20 @@
   const darkMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
   const state = {
-    auth: { claimed: true, authenticated: false, username: '' },
+    auth: {
+      claimed: true,
+      authenticated: false,
+      userId: '',
+      username: '',
+      role: '',
+      isAdmin: false,
+      allowNsfw: false,
+      showNsfw: false,
+      allLibraries: false,
+      version: '',
+      codename: '',
+      codenameQuote: '',
+    },
     themeMode: localStorage.getItem(THEME_MODE_KEY) || 'auto',
     theme: 'dark',
     libraries: [],
@@ -17,6 +30,27 @@
     bgmProxyProbeHTML: '',
     updateStatus: null,
   };
+
+  function isAdminUser() {
+    return Boolean(state.auth && state.auth.isAdmin);
+  }
+
+  async function copyTextSafeGlobal(txt) {
+    if (navigator.clipboard && window.isSecureContext) {
+      try { await navigator.clipboard.writeText(txt); return true; } catch (_) {}
+    }
+    const ta = document.createElement('textarea');
+    ta.value = txt;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    document.body.removeChild(ta);
+    return ok;
+  }
 
   function resolveEffectiveTheme(mode) {
     if (mode === 'light' || mode === 'dark') return mode;
@@ -464,6 +498,8 @@
 
   function renderShell(activeNav, innerHTML, searchVal = '') {
     const app = document.getElementById('app');
+    const admin = isAdminUser();
+    const accountLink = admin ? '/admin?tab=security' : '/account';
     app.innerHTML = `
       <header class="topbar">
         <div class="topbar-inner">
@@ -477,7 +513,9 @@
             <a href="/collections" data-nav class="${activeNav === 'collections' ? 'active' : ''}">收藏夹</a>
             <a href="/readlists" data-nav class="${activeNav === 'readlists' ? 'active' : ''}">阅读列表</a>
             <a href="/history" data-nav class="${activeNav === 'history' ? 'active' : ''}">历史</a>
-            <a href="/admin" data-nav class="${activeNav === 'admin' ? 'active' : ''}">管理后台</a>
+            ${admin
+              ? `<a href="/admin" data-nav class="${activeNav === 'admin' ? 'active' : ''}">管理后台</a>`
+              : `<a href="/account" data-nav class="${activeNav === 'account' ? 'active' : ''}">账号设置</a>`}
           </nav>
           <form class="topbar-search" id="global-search-form">
             <span class="search-icon">⌕</span>
@@ -485,8 +523,8 @@
           </form>
           <div class="topbar-actions">
             <button type="button" class="btn btn-sm" id="theme-toggle-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
-            ${state.auth.username ? `<span class="user-pill" title="当前登录账号">${esc(state.auth.username)}</span>` : ''}
-            ${activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/settings">手机端设置</a><a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
+            ${state.auth.username ? `<a href="${accountLink}" data-nav class="user-pill" title="当前登录账号（点击前往设置）">${esc(state.auth.username)}</a>` : ''}
+            ${admin && activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/settings">手机端设置</a><a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
             <button type="button" class="btn btn-sm" id="logout-btn">退出</button>
           </div>
         </div>
@@ -498,7 +536,10 @@
     };
     document.getElementById('logout-btn').onclick = async () => {
       try { await api('/admin/api/auth/logout', { method: 'POST', allow401: true }); } catch (_) {}
-      state.auth.authenticated = false;
+      state.auth = { claimed: true, authenticated: false, userId: '', username: '', role: '', isAdmin: false, allowNsfw: false, showNsfw: false, allLibraries: false, version: '', codename: '', codenameQuote: '' };
+      state.libraries = [];
+      state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
+      state.updateStatus = null;
       navigate('/login', true);
     };
     document.getElementById('global-search-form').onsubmit = (e) => {
@@ -555,7 +596,7 @@
             <button type="button" class="btn btn-sm" id="setup-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
           </div>
           <h1>初始化管理员账号</h1>
-          <p class="lead">欢迎使用 v2。首次启用或升级后请设置管理员用户名与登录密码，设置完成后书架与 Komga 接口均受鉴权保护。</p>
+          <p class="lead">欢迎使用 MangaAlpha。首次启用后请设置管理员用户名与登录密码，设置完成后书架、Komga 与 OPDS 接口均受鉴权保护。</p>
           <div class="field">
             <label for="setup-user">管理员用户名</label>
             <input id="setup-user" type="text" autocomplete="username" placeholder="请自定义用户名（2-64 个字符）" required>
@@ -589,7 +630,19 @@
           body: { username, password },
           allow401: true,
         });
-        state.auth = { claimed: true, authenticated: true, username: res.username };
+        state.auth = {
+          claimed: true,
+          authenticated: true,
+          userId: res.userId || 'admin',
+          username: res.username,
+          role: res.role || 'admin',
+          isAdmin: true,
+          allowNsfw: true,
+          showNsfw: false,
+          allLibraries: true,
+        };
+        state.libraries = [];
+        state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
         toast('管理员账号设置成功');
         navigate('/', true);
       } catch (err) {
@@ -612,10 +665,10 @@
             <button type="button" class="btn btn-sm" id="login-theme-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
           </div>
           <h1>登录书架</h1>
-          <p class="lead">请输入管理员用户名与密码访问漫画书库、内置阅读器与管理后台。</p>
+          <p class="lead">请输入用户名与密码访问漫画书库与内置阅读器。</p>
           <div class="field">
             <label for="login-user">用户名</label>
-            <input id="login-user" type="text" autocomplete="username" placeholder="管理员用户名" required>
+            <input id="login-user" type="text" autocomplete="username" placeholder="请输入用户名" required>
           </div>
           <div class="field">
             <label for="login-pass">密码</label>
@@ -638,7 +691,19 @@
           body: { username, password },
           allow401: true,
         });
-        state.auth = { claimed: true, authenticated: true, username: res.username };
+        state.auth = {
+          claimed: true,
+          authenticated: true,
+          userId: res.userId || '',
+          username: res.username,
+          role: res.role || 'user',
+          isAdmin: Boolean(res.isAdmin),
+          allowNsfw: Boolean(res.allowNsfw),
+          showNsfw: Boolean(res.showNsfw),
+          allLibraries: Boolean(res.allLibraries),
+        };
+        state.libraries = [];
+        state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
         navigate(safeRedirectTarget(redirect), true);
       } catch (err) {
         toast(err.message || '用户名或密码错误', 'error');
@@ -674,13 +739,20 @@
       state.libraries = libs || [];
       let html = '';
       if (state.libraries.length === 0) {
-        html += `
+        html += isAdminUser() ? `
           <div class="card" style="text-align:center;padding:38px 20px">
             <h2>欢迎来到 MangaAlpha 书架</h2>
             <p style="color:var(--text-secondary);max-width:540px;margin:8px auto 18px">
               当前暂无可展示的书库（尚未创建书库，或所有书库均已设为隐藏）。支持挂载 <strong>115 网盘目录</strong>、<strong>本地 / SMB 挂载目录</strong> 与 <strong>WebDAV 远程目录（CloudDrive2 / OpenList / NAS）</strong>，并支持 Bangumi 中文元数据刮削与内置简体中文双页阅读器。
             </p>
             <a href="/admin?tab=libraries" data-nav class="btn btn-primary btn-lg">前往管理后台管理书库</a>
+          </div>` : `
+          <div class="card" style="text-align:center;padding:38px 20px">
+            <h2>欢迎来到 MangaAlpha 书架</h2>
+            <p style="color:var(--text-secondary);max-width:540px;margin:8px auto 18px">
+              当前账号暂无可访问的书库。请联系管理员在「用户管理」中为你分配书库访问权限。
+            </p>
+            <a href="/account" data-nav class="btn btn-primary">查看账号设置</a>
           </div>`;
       } else {
         html += `
@@ -1043,7 +1115,9 @@
     try {
       const [detail, maintJobs] = await Promise.all([
         api(`/admin/api/series/${encodeURIComponent(seriesID)}/detail`),
-        api(`/admin/api/maintenance-jobs?targetType=series&targetId=${encodeURIComponent(seriesID)}&limit=6`),
+        isAdminUser()
+          ? api(`/admin/api/maintenance-jobs?targetType=series&targetId=${encodeURIComponent(seriesID)}&limit=6`).catch(() => [])
+          : Promise.resolve([]),
       ]);
       if (seq !== routeSeq) return;
       paintSeriesDetail(seriesID, detail, maintJobs || []);
@@ -1073,6 +1147,7 @@
 
     const content = document.getElementById('page-content');
     if (!content) return;
+    const admin = isAdminUser();
 
     content.innerHTML = `
       <div style="margin-bottom:12px;font-size:13px;color:var(--text-muted);overflow-wrap:anywhere;word-break:break-word">
@@ -1086,11 +1161,12 @@
           <div class="detail-cover-frame">
             <img id="series-cover-img" src="/api/v1/series/${encodeURIComponent(seriesID)}/thumbnail?v=${state.coverVer}" alt="${esc(title)}">
           </div>
-          <div class="segmented" title="切换封面显示来源">
-            <button type="button" data-cover-src="auto" class="${coverSrc === 'auto' ? 'active' : ''}">自动</button>
-            <button type="button" data-cover-src="bangumi" class="${coverSrc === 'bangumi' ? 'active' : ''}">Bangumi</button>
-            <button type="button" data-cover-src="book" class="${coverSrc === 'book' ? 'active' : ''}">首卷图</button>
-          </div>
+          ${admin ? `
+            <div class="segmented" title="切换封面显示来源">
+              <button type="button" data-cover-src="auto" class="${coverSrc === 'auto' ? 'active' : ''}">自动</button>
+              <button type="button" data-cover-src="bangumi" class="${coverSrc === 'bangumi' ? 'active' : ''}">Bangumi</button>
+              <button type="button" data-cover-src="book" class="${coverSrc === 'book' ? 'active' : ''}">首卷图</button>
+            </div>` : ''}
         </div>
 
         <div class="detail-main">
@@ -1121,10 +1197,10 @@
           <div id="series-versions"></div>
           <div class="detail-cta">
             ${startTarget ? `<a href="/reader/series/${encodeURIComponent(seriesID)}/book/${encodeURIComponent(startTarget.book.id)}?page=${startTarget.page}" class="btn btn-primary btn-lg btn-cta-read" title="${esc(startTarget.fullLabel)}"><span class="btn-part-fixed">▶\u00a0${esc(startTarget.prefix)}</span>${startTarget.middle ? `<span class="btn-part-ellipsis">${esc(startTarget.middle)}</span>` : ''}${startTarget.suffix ? `<span class="btn-part-fixed">${esc(startTarget.suffix)}</span>` : ''}</a>` : ''}
-            <button type="button" class="btn" id="series-generate-cover" data-maint="series_thumbnail" data-force="false"
+            ${admin ? `<button type="button" class="btn" id="series-generate-cover" data-maint="series_thumbnail" data-force="false"
               ${!books.length || maintJobs.some((j) => j.operation === 'series_thumbnail' && ['queued','running'].includes(j.status)) ? 'disabled' : ''}>生成首卷封面</button>
             <button type="button" class="btn btn-bgm" id="btn-open-bgm">Bangumi 刮削 / 匹配</button>
-            <button type="button" class="btn" id="btn-edit-meta">编辑元数据</button>
+            <button type="button" class="btn" id="btn-edit-meta">编辑元数据</button>` : ''}
             <button type="button" class="btn btn-sm" id="btn-series-collections">+ 收藏夹</button>
             <button type="button" class="btn btn-sm" id="btn-mark-series-read">全部标为已读</button>
             <button type="button" class="btn btn-sm" id="btn-reset-series-read">重置未读</button>
@@ -1159,6 +1235,7 @@
         </div>
       </section>
 
+      ${admin ? `
       <details class="card" id="series-maint-panel" ${maintJobs.some((j) => j.status === 'queued' || j.status === 'running') ? 'open' : ''}>
         <summary style="cursor:pointer;font-weight:600;user-select:none">归档索引、推断阅读进度与真实下载统计（Mihon / 维护面板）</summary>
         <div style="margin-top:14px;display:grid;gap:10px;font-size:13px">
@@ -1175,7 +1252,7 @@
           </div>
           <div id="series-maint-jobs">${renderMaintJobRows(maintJobs)}</div>
         </div>
-      </details>
+      </details>` : ''}
 
       <section class="card">
         <div class="section-head" style="margin-bottom:12px">
@@ -1239,7 +1316,8 @@
       };
     });
 
-    document.getElementById('btn-open-bgm').onclick = () => openBangumiMatchModal(seriesID, detail);
+    const btnOpenBgm = document.getElementById('btn-open-bgm');
+    if (btnOpenBgm) btnOpenBgm.onclick = () => openBangumiMatchModal(seriesID, detail);
     const retryTrackerBtn = document.getElementById('btn-retry-bgm-tracker');
     if (retryTrackerBtn) {
       retryTrackerBtn.onclick = async () => {
@@ -1257,7 +1335,8 @@
     }
     loadSeriesVersions(seriesID, bgmID);
     loadSeriesCollectionsBar(seriesID);
-    document.getElementById('btn-edit-meta').onclick = () => openMetadataEditModal(seriesID, detail);
+    const btnEditMeta = document.getElementById('btn-edit-meta');
+    if (btnEditMeta) btnEditMeta.onclick = () => openMetadataEditModal(seriesID, detail);
     document.getElementById('btn-series-collections').onclick = () => openAddSeriesToCollectionModal(seriesID, title, () => loadSeriesCollectionsBar(seriesID));
 
     document.getElementById('btn-mark-series-read').onclick = async () => {
@@ -1696,7 +1775,9 @@
     try {
       const [detail, jobs] = await Promise.all([
         api(`/admin/api/books/${encodeURIComponent(bookID)}/detail`),
-        api(`/admin/api/maintenance-jobs?targetType=book&targetId=${encodeURIComponent(bookID)}&limit=6`),
+        isAdminUser()
+          ? api(`/admin/api/maintenance-jobs?targetType=book&targetId=${encodeURIComponent(bookID)}&limit=6`).catch(() => [])
+          : Promise.resolve([]),
       ]);
       paintBookDetail(bookID, detail, jobs || []);
     } catch (err) { toast(err.message, 'error'); }
@@ -1707,6 +1788,7 @@
     const rp = b.readProgress;
     const pgCount = (b.media && b.media.pagesCount) || 0;
     const startPg = rp && !rp.completed && rp.page > 0 ? rp.page : 1;
+    const admin = isAdminUser();
     document.title = `${b.name || '单册详情'} · MangaAlpha`;
 
     const content = document.getElementById('page-content');
@@ -1763,11 +1845,12 @@
           ${detail.inferred ? `<div class="stat-box"><div class="k">推断加载进度</div><div class="v" style="font-size:14px">最近 ${esc(detail.inferred.last)}<br>最大 ${esc(detail.inferred.max)}</div></div>` : ''}
         </div>
 
+        ${admin ? `
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
           <button type="button" class="btn btn-sm" id="bk-idx-build">生成归档索引</button>
           <button type="button" class="btn btn-sm" id="bk-idx-force">强制重建归档索引</button>
         </div>
-        <div id="book-maint-jobs">${renderMaintJobRows(jobs)}</div>
+        <div id="book-maint-jobs">${renderMaintJobRows(jobs)}</div>` : ''}
       </section>
     `;
 
@@ -1787,18 +1870,22 @@
         renderBookDetail(bookID);
       } catch (err) { toast(err.message, 'error'); }
     };
-    const startBookIdx = async (force) => {
-      try {
-        await api('/admin/api/maintenance-jobs', { method: 'POST', body: { operation: 'book_index', bookId: bookID, force } });
-        toast('归档索引任务已提交');
-        pollBookMaint(bookID);
-      } catch (err) { toast(err.message, 'error'); }
-    };
-    document.getElementById('bk-idx-build').onclick = () => startBookIdx(false);
-    document.getElementById('bk-idx-force').onclick = () => startBookIdx(true);
-    bindMaintCancelButtons(content, () => pollBookMaint(bookID));
-    if (jobs.some((j) => j.status === 'queued' || j.status === 'running')) {
-      schedulePoll(() => pollBookMaint(bookID), 1800);
+    if (admin) {
+      const startBookIdx = async (force) => {
+        try {
+          await api('/admin/api/maintenance-jobs', { method: 'POST', body: { operation: 'book_index', bookId: bookID, force } });
+          toast('归档索引任务已提交');
+          pollBookMaint(bookID);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+      const btnBuild = document.getElementById('bk-idx-build');
+      const btnForce = document.getElementById('bk-idx-force');
+      if (btnBuild) btnBuild.onclick = () => startBookIdx(false);
+      if (btnForce) btnForce.onclick = () => startBookIdx(true);
+      bindMaintCancelButtons(content, () => pollBookMaint(bookID));
+      if (jobs.some((j) => j.status === 'queued' || j.status === 'running')) {
+        schedulePoll(() => pollBookMaint(bookID), 1800);
+      }
     }
   }
 
@@ -1824,6 +1911,10 @@
   // --- Admin Console (/admin) ---
 
   async function renderAdmin() {
+    if (!isAdminUser()) {
+      navigate('/account', true);
+      return;
+    }
     const sp = new URLSearchParams(location.search);
     const tab = sp.get('tab') || state.adminTab || 'overview';
     state.adminTab = tab;
@@ -1836,6 +1927,7 @@
       ['bangumi', 'Bangumi 刮削中心'],
       ['jobs', '后台任务'],
       ['settings', '缓存与设置'],
+      ['users', '用户管理'],
       ['security', '账号与 API Key'],
     ];
 
@@ -1871,6 +1963,7 @@
       case 'bangumi': await renderAdminBangumi(body); break;
       case 'jobs': await renderAdminJobs(body); break;
       case 'settings': await renderAdminSettings(body); break;
+      case 'users': await renderAdminUsers(body); break;
       case 'security': await renderAdminSecurity(body); break;
       default: await renderAdminOverview(body); break;
     }
@@ -4234,6 +4327,292 @@
 
   // --- Admin Security & API Keys Tab ---
 
+  // --- Admin Multi-User Management Tab ---
+
+  async function renderAdminUsers(body) {
+    const [users, libs] = await Promise.all([
+      api('/admin/api/users'),
+      api('/admin/api/libraries'),
+    ]);
+    const userList = Array.isArray(users) ? users : [];
+    const topLibs = (Array.isArray(libs) ? libs : []).filter((l) => !l.unionParentId);
+    const libNameMap = new Map(topLibs.map((l) => [l.id, l.name]));
+
+    const renderLibScopeBadges = (u) => {
+      if (u.role === 'admin' || u.allLibraries) {
+        return `<span class="badge badge-accent">全部可见书库</span>`;
+      }
+      const ids = Array.isArray(u.allowedLibraryIds) ? u.allowedLibraryIds : [];
+      if (ids.length === 0) {
+        return `<span class="badge badge-danger">未分配任何书库</span>`;
+      }
+      return ids.map((lid) => `<span class="badge">${esc(libNameMap.get(lid) || lid)}</span>`).join(' ');
+    };
+
+    body.innerHTML = `
+      <div class="card">
+        <div class="section-head" style="margin-bottom:8px">
+          <h3 style="margin:0">多用户与权限管理（${userList.length} 个账号）</h3>
+          <button type="button" class="btn btn-primary btn-sm" id="btn-create-user">+ 新建普通用户</button>
+        </div>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0;line-height:1.65">
+          每位普通用户拥有完全独立的<strong>阅读进度、阅读历史、收藏夹、阅读列表、内置阅读器设置、API Key 与 Bangumi 进度追踪器</strong>；同时支持按账号精细控制可访问的书库范围与 NSFW 权限。普通用户不可访问管理后台、不可编辑作品元数据或自行修改用户名。
+        </p>
+        <div class="table-wrap"><table class="data-table">
+          <thead>
+            <tr>
+              <th>用户名</th>
+              <th>角色 / 状态</th>
+              <th>书库权限</th>
+              <th>NSFW 权限</th>
+              <th>会话 / Key</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${userList.map((u) => {
+              const isPrimaryAdmin = u.role === 'admin';
+              const nsfwBadge = isPrimaryAdmin
+                ? `<span class="badge badge-accent">允许${u.showNsfw ? '（当前开启）' : '（当前隐藏）'}</span>`
+                : (u.allowNsfw
+                  ? `<span class="badge badge-success">已授权${u.showNsfw ? '（当前开启）' : '（当前隐藏）'}</span>`
+                  : `<span class="badge">禁止</span>`);
+              return `
+                <tr>
+                  <td>
+                    <strong>${esc(u.username)}</strong>
+                    <div style="font-size:11.5px;color:var(--text-muted)">创建于 ${esc(fmtTime(u.createdAt))}</div>
+                  </td>
+                  <td>
+                    <span class="badge ${isPrimaryAdmin ? 'badge-accent' : ''}">${isPrimaryAdmin ? '主管理员' : '普通用户'}</span>
+                    ${u.enabled ? `<span class="badge badge-success">正常</span>` : `<span class="badge badge-danger">已停用</span>`}
+                  </td>
+                  <td class="cell-wrap">${renderLibScopeBadges(u)}</td>
+                  <td>${nsfwBadge}</td>
+                  <td style="font-size:12px;color:var(--text-secondary)">${Number(u.sessionCount || 0)} 会话 · ${Number(u.apiKeyCount || 0)} Key</td>
+                  <td>
+                    ${isPrimaryAdmin
+                      ? `<a href="/admin?tab=security" data-nav class="btn btn-sm">管理凭据</a>`
+                      : `<div class="table-actions">
+                          <button type="button" class="btn btn-sm" data-usr-edit="${esc(u.id)}">编辑权限</button>
+                          <button type="button" class="btn btn-sm" data-usr-reset="${esc(u.id)}">重置密码</button>
+                          <button type="button" class="btn btn-sm" data-usr-toggle="${esc(u.id)}" data-usr-enabled="${u.enabled ? '1' : '0'}">${u.enabled ? '停用' : '启用'}</button>
+                          <button type="button" class="btn btn-sm" data-usr-kick="${esc(u.id)}">下线</button>
+                          <button type="button" class="btn btn-sm btn-danger" data-usr-del="${esc(u.id)}">删除</button>
+                        </div>`}
+                  </td>
+                </tr>`;
+            }).join('')}
+          </tbody>
+        </table></div>
+      </div>
+    `;
+
+    const userByID = new Map(userList.map((u) => [u.id, u]));
+
+    document.getElementById('btn-create-user').onclick = () => {
+      openUserFormModal(null, topLibs, () => renderAdminUsers(body));
+    };
+
+    body.querySelectorAll('button[data-usr-edit]').forEach((btn) => {
+      btn.onclick = () => {
+        const u = userByID.get(btn.getAttribute('data-usr-edit'));
+        if (u) openUserFormModal(u, topLibs, () => renderAdminUsers(body));
+      };
+    });
+
+    body.querySelectorAll('button[data-usr-reset]').forEach((btn) => {
+      btn.onclick = () => {
+        const u = userByID.get(btn.getAttribute('data-usr-reset'));
+        if (!u) return;
+        openModal({
+          title: `重置用户「${u.username}」的登录密码`,
+          maxWidth: '460px',
+          bodyHTML: `
+            <form id="usr-reset-form">
+              <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">重置密码后该用户的所有活跃浏览器会话将立即下线，需要使用新密码重新登录。</p>
+              <div class="field">
+                <label>新密码（至少 8 位）</label>
+                <input type="password" id="usr-reset-pw" autocomplete="new-password" required minlength="8">
+              </div>
+              <div class="field">
+                <label>确认新密码</label>
+                <input type="password" id="usr-reset-pw2" autocomplete="new-password" required minlength="8">
+              </div>
+              <button type="submit" class="btn btn-primary">确认重置密码</button>
+            </form>`,
+          onMount: () => {
+            document.getElementById('usr-reset-form').onsubmit = async (e) => {
+              e.preventDefault();
+              const pw = document.getElementById('usr-reset-pw').value;
+              const pw2 = document.getElementById('usr-reset-pw2').value;
+              if (pw.length < 8) { toast('密码至少需要 8 位字符', 'error'); return; }
+              if (pw !== pw2) { toast('两次输入的密码不一致', 'error'); return; }
+              try {
+                await api(`/admin/api/users/${encodeURIComponent(u.id)}/reset-password`, {
+                  method: 'POST',
+                  body: { password: pw },
+                });
+                closeModal();
+                toast(`已重置「${u.username}」的密码`);
+                renderAdminUsers(body);
+              } catch (err) { toast(err.message, 'error'); }
+            };
+          },
+        });
+      };
+    });
+
+    body.querySelectorAll('button[data-usr-toggle]').forEach((btn) => {
+      btn.onclick = async () => {
+        const uid = btn.getAttribute('data-usr-toggle');
+        const u = userByID.get(uid);
+        if (!u) return;
+        const nextEnabled = !u.enabled;
+        if (!nextEnabled && !confirm(`确认停用用户「${u.username}」？\n停用后将立即强制下线其所有会话，且其 API Key 与 Komga / OPDS Basic 登录将被拒绝；其阅读进度与收藏夹数据会保留，重新启用即可恢复。`)) {
+          return;
+        }
+        try {
+          await api(`/admin/api/users/${encodeURIComponent(uid)}`, {
+            method: 'PUT',
+            body: { enabled: nextEnabled },
+          });
+          toast(nextEnabled ? `已启用用户「${u.username}」` : `已停用用户「${u.username}」`);
+          renderAdminUsers(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+
+    body.querySelectorAll('button[data-usr-kick]').forEach((btn) => {
+      btn.onclick = async () => {
+        const uid = btn.getAttribute('data-usr-kick');
+        const u = userByID.get(uid);
+        if (!u) return;
+        if (!confirm(`确认将用户「${u.username}」的所有登录会话强制下线？`)) return;
+        try {
+          const res = await api(`/admin/api/users/${encodeURIComponent(uid)}/kick`, { method: 'POST' });
+          toast(`已下线 ${Number(res?.kickedSessions || 0)} 个会话`);
+          renderAdminUsers(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+
+    body.querySelectorAll('button[data-usr-del]').forEach((btn) => {
+      btn.onclick = async () => {
+        const uid = btn.getAttribute('data-usr-del');
+        const u = userByID.get(uid);
+        if (!u) return;
+        if (!confirm(`确认永久删除用户「${u.username}」？\n此操作将彻底清除该用户的阅读进度、阅读历史、收藏夹、阅读列表、API Key 与个人 Bangumi 追踪配置，且不可恢复（不会影响共享书库或其他用户）。`)) {
+          return;
+        }
+        try {
+          await api(`/admin/api/users/${encodeURIComponent(uid)}`, { method: 'DELETE' });
+          toast(`已删除用户「${u.username}」`);
+          renderAdminUsers(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+  }
+
+  function openUserFormModal(existing, topLibs, onSaved) {
+    const isEdit = Boolean(existing);
+    const curAllLibs = isEdit ? Boolean(existing.allLibraries) : true;
+    const curAllowedSet = new Set(isEdit && Array.isArray(existing.allowedLibraryIds) ? existing.allowedLibraryIds : []);
+    const curAllowNSFW = isEdit ? Boolean(existing.allowNsfw) : false;
+
+    openModal({
+      title: isEdit ? `编辑用户「${existing.username}」` : '新建普通用户',
+      maxWidth: '560px',
+      bodyHTML: `
+        <form id="usr-form">
+          <div class="field">
+            <label>用户名（2–64 个字符，普通用户不可自行修改）</label>
+            <input type="text" id="usr-f-name" value="${esc(isEdit ? existing.username : '')}" required minlength="2" maxlength="64" placeholder="例如：alice">
+          </div>
+          ${!isEdit ? `
+            <div class="field">
+              <label>初始密码（至少 8 位）</label>
+              <input type="password" id="usr-f-pw" autocomplete="new-password" required minlength="8" placeholder="至少 8 位字符">
+            </div>
+            <div class="field">
+              <label>确认初始密码</label>
+              <input type="password" id="usr-f-pw2" autocomplete="new-password" required minlength="8" placeholder="再次输入密码">
+            </div>` : ''}
+          <div class="field">
+            <label>书库访问范围</label>
+            <div style="display:flex;gap:14px;flex-wrap:wrap;margin-bottom:8px">
+              <label class="check-row"><input type="radio" name="usr-lib-mode" value="all" ${curAllLibs ? 'checked' : ''}><span>全部可见书库（含未来新建书库）</span></label>
+              <label class="check-row"><input type="radio" name="usr-lib-mode" value="custom" ${!curAllLibs ? 'checked' : ''}><span>仅允许指定书库</span></label>
+            </div>
+            <div id="usr-lib-picker" class="org-picker-list" style="${curAllLibs ? 'display:none' : ''}">
+              ${topLibs.length === 0
+                ? `<div style="font-size:12px;color:var(--text-muted);padding:8px">当前暂无书库，创建书库后可回来勾选。</div>`
+                : topLibs.map((l) => `
+                  <label class="org-check-item">
+                    <input type="checkbox" name="usr-lib-id" value="${esc(l.id)}" ${curAllowedSet.has(l.id) ? 'checked' : ''}>
+                    <span class="org-check-name">${esc(l.name)}</span>
+                    <span class="badge">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
+                    ${l.enabled === false ? `<span class="badge">全局隐藏</span>` : ''}
+                  </label>`).join('')}
+            </div>
+          </div>
+          <div class="field">
+            <label class="check-row">
+              <input type="checkbox" id="usr-f-nsfw" ${curAllowNSFW ? 'checked' : ''}>
+              <span>允许该用户访问 NSFW 作品（开启后用户可在「账号设置」中自行开关 NSFW 显示，默认仍关闭）</span>
+            </label>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
+            <button type="button" class="btn" id="usr-f-cancel">取消</button>
+            <button type="submit" class="btn btn-primary" id="usr-f-submit">${isEdit ? '保存更改' : '创建用户'}</button>
+          </div>
+        </form>
+      `,
+      onMount: () => {
+        document.getElementById('usr-f-cancel').onclick = closeModal;
+        const picker = document.getElementById('usr-lib-picker');
+        document.querySelectorAll('input[name="usr-lib-mode"]').forEach((r) => {
+          r.onchange = () => {
+            if (picker) picker.style.display = r.value === 'custom' && r.checked ? '' : (document.querySelector('input[name="usr-lib-mode"]:checked')?.value === 'custom' ? '' : 'none');
+          };
+        });
+        document.getElementById('usr-form').onsubmit = async (e) => {
+          e.preventDefault();
+          const username = document.getElementById('usr-f-name').value.trim();
+          const allLibraries = document.querySelector('input[name="usr-lib-mode"]:checked')?.value !== 'custom';
+          const allowedLibraryIds = allLibraries ? [] : Array.from(document.querySelectorAll('input[name="usr-lib-id"]:checked')).map((el) => el.value);
+          const allowNsfw = Boolean(document.getElementById('usr-f-nsfw').checked);
+          const btn = document.getElementById('usr-f-submit');
+          btn.disabled = true;
+          try {
+            if (isEdit) {
+              await api(`/admin/api/users/${encodeURIComponent(existing.id)}`, {
+                method: 'PUT',
+                body: { username, allLibraries, allowedLibraryIds, allowNsfw },
+              });
+              toast(`已更新用户「${username}」`);
+            } else {
+              const password = document.getElementById('usr-f-pw').value;
+              const password2 = document.getElementById('usr-f-pw2').value;
+              if (password.length < 8) { toast('密码至少需要 8 位字符', 'error'); btn.disabled = false; return; }
+              if (password !== password2) { toast('两次输入的密码不一致', 'error'); btn.disabled = false; return; }
+              await api('/admin/api/users', {
+                method: 'POST',
+                body: { username, password, allLibraries, allowedLibraryIds, allowNsfw },
+              });
+              toast(`已创建普通用户「${username}」`);
+            }
+            closeModal();
+            if (onSaved) onSaved();
+          } catch (err) {
+            toast(err.message, 'error');
+            btn.disabled = false;
+          }
+        };
+      },
+    });
+  }
+
   async function renderAdminSecurity(body) {
     const [keys, sessions, apwData] = await Promise.all([
       api('/admin/api/auth/api-keys'),
@@ -5448,9 +5827,515 @@
     }
   }
 
+  // --- Personal Account Settings Page (/account) ---
+
+  async function renderAccountPage() {
+    const seq = routeSeq;
+    document.title = '账号设置 · MangaAlpha';
+    renderShell('account', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载账号设置…</p></div>`);
+
+    try {
+      const [me, keys, sessions, tracker] = await Promise.all([
+        api('/admin/api/me'),
+        api('/admin/api/auth/api-keys'),
+        api('/admin/api/auth/sessions'),
+        api('/admin/api/bangumi/tracker?limit=20').catch(() => null),
+      ]);
+      if (seq !== routeSeq) return;
+      const content = document.getElementById('page-content');
+      if (!content) return;
+
+      const user = (me && me.user) || {};
+      const visibleLibs = (me && Array.isArray(me.visibleLibraries)) ? me.visibleLibraries : [];
+      const clients = (me && me.clients) || {};
+      const komgaURL = clients.komgaUrl || location.origin;
+      const koreaderURL = clients.koreaderOpdsUrl || `${location.origin}/api/opds/v1.2`;
+      const komgaOpdsURL = clients.komgaOpdsUrl || `${location.origin}/opds/v1.2/catalog`;
+      const tr = tracker || {};
+      const trRecords = Array.isArray(tr.records) ? tr.records : [];
+      const isAdmin = Boolean(me && me.isAdmin);
+
+      content.innerHTML = `
+        <div class="section-head" style="margin-bottom:14px">
+          <h2 style="margin:0">账号设置</h2>
+          ${isAdmin ? `<a href="/admin" data-nav class="btn btn-sm">前往管理后台 →</a>` : ''}
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <h3>我的账号与权限</h3>
+            <div style="display:grid;gap:8px;font-size:13px;color:var(--text-secondary)">
+              <div>用户名：<strong style="color:var(--text)">${esc(user.username || state.auth.username)}</strong>
+                <span class="badge ${isAdmin ? 'badge-accent' : ''}" style="margin-left:6px">${isAdmin ? '管理员' : '普通用户'}</span>
+              </div>
+              <div>可访问书库：
+                ${visibleLibs.length === 0
+                  ? `<span class="badge">暂无可见书库</span>`
+                  : visibleLibs.map((l) => `<a href="/libraries/${encodeURIComponent(l.id)}" data-nav class="badge">${esc(l.name)}</a>`).join(' ')}
+              </div>
+              ${user.allowNsfw ? `
+                <div style="margin-top:6px;padding:10px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+                  <label class="check-row" style="font-size:13px;font-weight:600;color:var(--text)">
+                    <input type="checkbox" id="acc-show-nsfw" ${user.showNsfw ? 'checked' : ''}>
+                    <span>在书架、Komga 客户端与 OPDS 中显示 NSFW 作品</span>
+                  </label>
+                  <div style="font-size:12px;color:var(--text-muted);margin-top:4px">此开关仅影响当前账号视图，不会影响其他用户。</div>
+                </div>` : ''}
+            </div>
+          </div>
+
+          <form class="card" id="acc-pw-form">
+            <h3>修改登录密码</h3>
+            <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
+              当前用户名：<code>${esc(user.username || state.auth.username)}</code>${isAdmin ? '（如需修改管理员用户名，请前往 <a href="/admin?tab=security" data-nav style="color:var(--accent)">管理后台 → 账号与 API Key</a>）' : '（用户名由管理员统一维护，不可自助修改）'}
+            </p>
+            <div class="field">
+              <label>当前密码</label>
+              <input type="password" id="acc-cur-pw" autocomplete="current-password" required>
+            </div>
+            <div class="field">
+              <label>新密码（至少 8 位）</label>
+              <input type="password" id="acc-new-pw" autocomplete="new-password" required minlength="8">
+            </div>
+            <div class="field">
+              <label>确认新密码</label>
+              <input type="password" id="acc-new-pw2" autocomplete="new-password" required minlength="8">
+            </div>
+            <button type="submit" class="btn btn-primary">保存新密码（自动注销其他设备会话）</button>
+          </form>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <h3>外部阅读客户端接入地址</h3>
+            <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">使用当前账号的用户名与密码（或右侧生成的个人 API Key）即可登录以下客户端，阅读进度与收藏夹与网页端实时同步：</p>
+            <div style="display:grid;gap:10px">
+              <div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>Komga 客户端</strong>（Koharia / Mihon 等）</div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <div class="code-box" style="flex:1;margin:0">${esc(komgaURL)}</div>
+                  <button type="button" class="btn btn-sm" data-acc-copy="${esc(komgaURL)}">复制</button>
+                </div>
+              </div>
+              <div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>KOReader 墨水屏 OPDS</strong>（<code>opdsforcomic.koplugin</code>）</div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <div class="code-box" style="flex:1;margin:0">${esc(koreaderURL)}</div>
+                  <button type="button" class="btn btn-sm" data-acc-copy="${esc(koreaderURL)}">复制</button>
+                </div>
+              </div>
+              <div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>标准 Komga OPDS v1.2</strong></div>
+                <div style="display:flex;gap:6px;align-items:center">
+                  <div class="code-box" style="flex:1;margin:0">${esc(komgaOpdsURL)}</div>
+                  <button type="button" class="btn btn-sm" data-acc-copy="${esc(komgaOpdsURL)}">复制</button>
+                </div>
+              </div>
+            </div>
+            <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">Bangumi 浏览器油猴脚本</div>
+              <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                <a class="btn btn-sm" href="/bgm/userscript/latest.user.js" target="_blank" rel="noopener noreferrer">① 安装 / 更新油猴脚本</a>
+                <button type="button" class="btn btn-sm btn-primary" id="acc-us-pair-key">② 一键配对个人专属 Key 到油猴</button>
+              </div>
+              <div id="bgm-us-status" style="margin-top:6px;font-size:12px;color:var(--text-muted)"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>我的 API Key（仅作用于当前账号权限）</h3>
+            <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">可用于 Komga 客户端（<code>X-API-Key</code>）或油猴脚本免密认证，随时可单独吊销。</p>
+            <div class="inline-action-bar" style="margin-bottom:12px">
+              <input type="text" id="acc-ak-name" placeholder="备注名称，例如：手机 Koharia" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+              <button type="button" class="btn btn-primary" id="acc-ak-create">生成 API Key</button>
+            </div>
+            <div id="acc-ak-revealed" style="display:none;margin-bottom:12px"></div>
+            ${(keys || []).length === 0 ? `<div class="empty-box" style="padding:18px">暂未创建个人 API Key。</div>` : `
+              <div class="table-wrap"><table class="data-table">
+                <thead><tr><th>名称</th><th>前缀</th><th>最近使用</th><th>操作</th></tr></thead>
+                <tbody>
+                  ${keys.map((k) => `
+                    <tr>
+                      <td><strong>${esc(k.name)}</strong></td>
+                      <td><code>${esc(k.keyPrefix)}…</code></td>
+                      <td style="font-size:12px;color:var(--text-muted)">${fmtTime(k.lastUsedAt || k.createdAt)}</td>
+                      <td><button type="button" class="btn btn-sm btn-danger" data-acc-del-ak="${esc(k.id)}">吊销</button></td>
+                    </tr>`).join('')}
+                </tbody>
+              </table></div>`}
+          </div>
+        </div>
+
+        ${tracker ? `
+        <div class="card">
+          <div class="section-head" style="margin-bottom:8px">
+            <h3>我的 Bangumi 进度追踪器（单向自动同步）</h3>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+              ${tr.hasToken
+                ? `<span class="badge ${tr.enabled ? 'badge-success' : ''}">${tr.enabled ? '已启用自动同步' : '已绑定（未开启同步）'}${tr.nickname || tr.username ? ` · ${esc(tr.nickname || tr.username)}${tr.username ? ` (@${esc(tr.username)})` : ''}` : ''}</span>`
+                : `<span class="badge">未绑定 Bangumi 账号</span>`}
+              ${tr.hasToken ? `<span class="badge ${tr.autoRefresh ? 'badge-accent' : ''}">${tr.autoRefresh ? 'OAuth 自动续期' : 'Personal Access Token'}</span>` : ''}
+              ${tr.hasToken && tr.expired ? `<span class="badge badge-danger">授权已过期</span>` : (tr.hasToken && tr.expiresSoon ? `<span class="badge" style="color:var(--warn);border-color:var(--warn)">即将到期</span>` : '')}
+            </div>
+          </div>
+          <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-secondary);line-height:1.65">
+            绑定你自己的 Bangumi 账号后，你在本站的新增阅读进度会自动单向同步到你的 Bangumi 收藏（与其他用户的进度和 Bangumi 账号完全隔离）。
+          </p>
+          ${tr.hasToken ? `
+            <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border);font-size:12px;color:var(--text-secondary)">
+              <span>当前方式：<strong>${tr.autoRefresh ? 'Bangumi OAuth（自动续期）' : 'Personal Access Token'}</strong></span>
+              ${tr.expiresAt ? `<span>到期：<strong style="color:${tr.expired ? 'var(--danger)' : tr.expiresSoon ? 'var(--warn)' : 'var(--text)'}">${esc(fmtTime(tr.expiresAt))}</strong></span>` : ''}
+              ${tr.lastRefreshAt ? `<span>最近刷新：${esc(fmtTime(tr.lastRefreshAt))}</span>` : ''}
+              ${tr.lastRefreshError ? `<span style="color:var(--danger)">最近刷新失败：${esc(tr.lastRefreshError)}</span>` : ''}
+            </div>` : ''}
+          <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">
+            <button type="button" class="btn btn-bgm" id="acc-bgm-oauth-start">${tr.hasToken && tr.autoRefresh ? '重新进行 Bangumi OAuth 授权' : '使用 Bangumi OAuth 一键授权（推荐）'}</button>
+            ${tr.hasToken && tr.autoRefresh ? `<button type="button" class="btn btn-sm" id="acc-bgm-oauth-refresh">立即刷新授权</button>` : ''}
+            ${tr.hasToken ? `<button type="button" class="btn btn-sm" id="acc-bgm-test">测试连接</button>` : ''}
+            ${tr.hasToken ? `<button type="button" class="btn btn-sm btn-danger" id="acc-bgm-clear">解绑清空</button>` : ''}
+          </div>
+          <form id="acc-bgm-form" style="display:grid;gap:10px">
+            <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
+              <label class="check-row" style="font-size:13px;font-weight:600;color:var(--text)">
+                <input type="checkbox" id="acc-bgm-enabled" ${tr.enabled ? 'checked' : ''}>
+                <span>启用自动单向同步</span>
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-secondary)">
+                <span>NSFW 策略：</span>
+                <select id="acc-bgm-nsfw-mode" style="height:32px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+                  <option value="skip" ${(tr.nsfwMode || 'skip') === 'skip' ? 'selected' : ''}>跳过 NSFW 作品不同步（默认）</option>
+                  <option value="private" ${tr.nsfwMode === 'private' ? 'selected' : ''}>以私密收藏（private）同步 NSFW</option>
+                </select>
+              </label>
+              <label class="check-row" style="font-size:12.5px;color:var(--text-secondary)">
+                <input type="checkbox" id="acc-bgm-private-default" ${tr.privateDefault ? 'checked' : ''}>
+                <span>新建普通作品收藏时默认设为私密</span>
+              </label>
+              <button type="submit" class="btn btn-primary btn-sm" id="acc-bgm-save">保存追踪设置</button>
+            </div>
+            <details style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-input)">
+              <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary)">备选方式：手动粘贴 Personal Access Token 或 OAuth 回调链接</summary>
+              <div style="display:grid;gap:10px;margin-top:8px">
+                <div>
+                  <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">Personal Access Token（<a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">前往获取 ↗</a>）：</div>
+                  <div class="inline-action-bar">
+                    <input type="password" id="acc-bgm-token" autocomplete="off" placeholder="粘贴 Bangumi Personal Access Token" style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                    <button type="submit" class="btn btn-sm btn-primary">验证并保存 PAT</button>
+                    <button type="button" class="btn btn-sm" id="acc-bgm-pat-test">测试输入 Token</button>
+                  </div>
+                </div>
+                <div>
+                  <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">若 OAuth 弹窗被拦截，可手动粘贴回调 URL 或授权码 code：</div>
+                  <div class="inline-action-bar">
+                    <input type="text" id="acc-bgm-oauth-manual-code" placeholder="粘贴回调链接（含 ?code=...）或纯 code" style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                    <button type="button" class="btn btn-sm" id="acc-bgm-oauth-manual-submit">提交完成授权</button>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </form>
+          <div id="acc-bgm-test-result" style="margin-top:8px;font-size:12.5px"></div>
+          ${trRecords.length > 0 ? `
+            <div style="margin-top:12px">
+              <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary)">我的最近同步记录（最多 20 条）</div>
+              <div class="table-wrap"><table class="data-table">
+                <thead><tr><th>作品</th><th>Bangumi 条目</th><th>状态</th><th>远端进度</th><th>更新时间 / 说明</th><th>操作</th></tr></thead>
+                <tbody>
+                  ${trRecords.map((rec) => {
+                    const statusBadge = rec.status === 'synced'
+                      ? `<span class="badge badge-success">已同步</span>`
+                      : rec.status === 'skipped'
+                        ? `<span class="badge">已跳过</span>`
+                        : `<span class="badge badge-danger">失败</span>`;
+                    const progParts = [];
+                    const tLbl = fmtBgmCollectionType(rec.remoteType);
+                    if (tLbl) progParts.push(tLbl);
+                    if (rec.remoteVolStatus > 0) progParts.push(`第 ${rec.remoteVolStatus} 卷`);
+                    if (rec.remotePrivate) progParts.push('私密');
+                    return `
+                      <tr>
+                        <td>${rec.seriesId ? `<a href="/series/${encodeURIComponent(rec.seriesId)}" data-nav style="color:var(--accent);font-weight:500">${esc(rec.seriesTitle || rec.seriesId)}</a>` : esc(rec.seriesTitle || '—')}</td>
+                        <td><a href="https://bgm.tv/subject/${rec.bgmSubjectId}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm">#${rec.bgmSubjectId} ↗</a></td>
+                        <td>${statusBadge}</td>
+                        <td style="font-size:12px">${esc(progParts.join(' · ') || '—')}</td>
+                        <td class="cell-wrap" style="font-size:12px;color:${rec.status === 'failed' ? 'var(--danger)' : 'var(--text-muted)'}">${esc(rec.lastError || fmtTime(rec.lastSyncedAt || rec.updatedAt))}</td>
+                        <td>${rec.seriesId && rec.status === 'failed' ? `<button type="button" class="btn btn-sm" data-acc-retry-tracker="${esc(rec.seriesId)}">重试</button>` : ''}</td>
+                      </tr>`;
+                  }).join('')}
+                </tbody>
+              </table></div>
+            </div>` : ''}
+        </div>` : ''}
+
+        <div class="card">
+          <h3>我的活跃登录会话（${(sessions || []).length}）</h3>
+          <div class="table-wrap"><table class="data-table">
+            <thead><tr><th>会话标识</th><th>浏览器 / 客户端</th><th>最近活跃</th><th>过期时间</th><th>操作</th></tr></thead>
+            <tbody>
+              ${(sessions || []).map((s) => {
+                const sid = s.id || s.tokenPrefix || '';
+                const expTxt = (!s.expiresAt || String(s.expiresAt).startsWith('9999-')) ? '永久有效（自动续期）' : fmtTime(s.expiresAt);
+                return `
+                  <tr>
+                    <td><code>${esc(sid)}</code> ${s.current ? '<span class="badge badge-success">当前设备</span>' : ''}</td>
+                    <td style="font-size:12px;color:var(--text-secondary);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.userAgent || '—')}</td>
+                    <td>${fmtTime(s.lastSeenAt)}</td>
+                    <td>${esc(expTxt)}</td>
+                    <td>${!s.current && sid ? `<button type="button" class="btn btn-sm btn-danger" data-acc-del-sess="${esc(sid)}">强制下线</button>` : ''}</td>
+                  </tr>`;
+              }).join('')}
+            </tbody>
+          </table></div>
+        </div>
+      `;
+
+      const nsfwToggle = document.getElementById('acc-show-nsfw');
+      if (nsfwToggle) {
+        nsfwToggle.onchange = async (e) => {
+          const showNsfw = e.target.checked;
+          try {
+            await api('/admin/api/me/preferences', { method: 'PUT', body: { showNsfw } });
+            state.auth.showNsfw = showNsfw;
+            state.taxonomies.loaded = false;
+            toast(showNsfw ? '已开启显示 NSFW 作品' : '已隐藏 NSFW 作品');
+          } catch (err) {
+            e.target.checked = !showNsfw;
+            toast(err.message, 'error');
+          }
+        };
+      }
+
+      document.getElementById('acc-pw-form').onsubmit = async (e) => {
+        e.preventDefault();
+        const currentPassword = document.getElementById('acc-cur-pw').value;
+        const newPassword = document.getElementById('acc-new-pw').value;
+        const newPassword2 = document.getElementById('acc-new-pw2').value;
+        if (newPassword.length < 8) { toast('新密码至少需要 8 位字符', 'error'); return; }
+        if (newPassword !== newPassword2) { toast('两次输入的新密码不一致', 'error'); return; }
+        try {
+          await api('/admin/api/auth/credentials', {
+            method: 'PUT',
+            body: { currentPassword, newPassword },
+          });
+          toast('登录密码已更新，其他设备会话已自动下线');
+          renderAccountPage();
+        } catch (err) { toast(err.message, 'error'); }
+      };
+
+      content.querySelectorAll('button[data-acc-copy]').forEach((btn) => {
+        btn.onclick = async () => {
+          const ok = await copyTextSafeGlobal(btn.getAttribute('data-acc-copy') || '');
+          toast(ok ? '已复制到剪贴板' : '请手动选中复制', ok ? 'ok' : 'error');
+        };
+      });
+
+      const accUsPairBtn = document.getElementById('acc-us-pair-key');
+      if (accUsPairBtn) {
+        accUsPairBtn.onclick = async () => {
+          accUsPairBtn.disabled = true;
+          const popup = window.open('about:blank', '_blank');
+          try {
+            const res = await api('/admin/api/bangumi/userscript/pair-key', { method: 'POST' });
+            const hash = `server=${encodeURIComponent(location.origin)}&key=${encodeURIComponent(res.key)}`;
+            const pairUrl = `${location.origin}${res.pairPath || '/bgm/userscript/pair'}#${hash}`;
+            if (popup && !popup.closed) popup.location.href = pairUrl;
+            else window.location.href = pairUrl;
+            toast('已打开配对页同步个人专属 Key 到油猴');
+          } catch (err) {
+            if (popup && !popup.closed) popup.close();
+            toast(err.message || '配对失败', 'error');
+          } finally {
+            accUsPairBtn.disabled = false;
+          }
+        };
+      }
+
+      document.getElementById('acc-ak-create').onclick = async () => {
+        const name = document.getElementById('acc-ak-name').value.trim();
+        if (!name) { toast('请填写 API Key 备注名称', 'error'); return; }
+        try {
+          const res = await api('/admin/api/auth/api-keys', { method: 'POST', body: { name } });
+          await renderAccountPage();
+          const rev = document.getElementById('acc-ak-revealed');
+          if (rev) {
+            rev.style.display = '';
+            rev.innerHTML = `
+              <div style="padding:10px 12px;border-radius:8px;background:var(--success-soft);border:1px solid var(--success)">
+                <div style="font-size:12px;font-weight:600;color:var(--success);margin-bottom:4px">请立即复制保存，此完整密钥仅显示一次：</div>
+                <div class="code-box" style="user-select:all">${esc(res.key)}</div>
+              </div>`;
+          }
+        } catch (err) { toast(err.message, 'error'); }
+      };
+
+      content.querySelectorAll('button[data-acc-del-ak]').forEach((btn) => {
+        btn.onclick = async () => {
+          if (!confirm('确认吊销该 API Key？')) return;
+          try {
+            await api(`/admin/api/auth/api-keys/${encodeURIComponent(btn.getAttribute('data-acc-del-ak'))}`, { method: 'DELETE' });
+            toast('API Key 已吊销');
+            renderAccountPage();
+          } catch (err) { toast(err.message, 'error'); }
+        };
+      });
+
+      content.querySelectorAll('button[data-acc-del-sess]').forEach((btn) => {
+        btn.onclick = async () => {
+          try {
+            await api(`/admin/api/auth/sessions/${encodeURIComponent(btn.getAttribute('data-acc-del-sess'))}`, { method: 'DELETE' });
+            toast('会话已移除');
+            renderAccountPage();
+          } catch (err) { toast(err.message, 'error'); }
+        };
+      });
+
+      if (tracker) {
+        const oauthStartBtn = document.getElementById('acc-bgm-oauth-start');
+        if (oauthStartBtn) {
+          oauthStartBtn.onclick = async () => {
+            oauthStartBtn.disabled = true;
+            const box = document.getElementById('acc-bgm-test-result');
+            if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在生成 Bangumi OAuth 授权链接…</span>`;
+            try {
+              const rep = await api('/admin/api/bangumi/tracker/oauth/start', { method: 'POST' });
+              state.bgmOAuthLastState = rep.state || '';
+              const popup = window.open(rep.authorizeUrl, 'mangaalpha_bgm_oauth', 'width=560,height=720');
+              if (!popup && box) {
+                box.innerHTML = `<span style="color:var(--warn)">浏览器拦截了弹窗，请点此 <a href="${esc(rep.authorizeUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">手动打开 Bangumi 授权页 ↗</a></span>`;
+              } else if (box) {
+                box.innerHTML = `<span style="color:var(--text-secondary)">已打开 Bangumi 授权窗口，请在弹出的页面中点击「同意授权」…</span>`;
+              }
+            } catch (err) {
+              toast(err.message || '启动 OAuth 授权失败', 'error');
+              if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
+            } finally {
+              oauthStartBtn.disabled = false;
+            }
+          };
+        }
+        const oauthRefreshBtn = document.getElementById('acc-bgm-oauth-refresh');
+        if (oauthRefreshBtn) {
+          oauthRefreshBtn.onclick = async () => {
+            oauthRefreshBtn.disabled = true;
+            try {
+              await api('/admin/api/bangumi/tracker/oauth/refresh', { method: 'POST' });
+              toast('Bangumi OAuth 授权已刷新续期');
+              renderAccountPage();
+            } catch (err) {
+              toast(err.message || '刷新失败', 'error');
+              oauthRefreshBtn.disabled = false;
+            }
+          };
+        }
+        const manualBtn = document.getElementById('acc-bgm-oauth-manual-submit');
+        if (manualBtn) {
+          manualBtn.onclick = async () => {
+            const val = (document.getElementById('acc-bgm-oauth-manual-code')?.value || '').trim();
+            if (!val) { toast('请先粘贴回调链接或授权码 code', 'error'); return; }
+            manualBtn.disabled = true;
+            try {
+              await api('/admin/api/bangumi/tracker/oauth/exchange', {
+                method: 'POST',
+                body: { codeOrUrl: val, state: state.bgmOAuthLastState || '' },
+              });
+              toast('Bangumi OAuth 授权绑定成功');
+              renderAccountPage();
+            } catch (err) {
+              toast(err.message || '换取 OAuth Token 失败', 'error');
+              manualBtn.disabled = false;
+            }
+          };
+        }
+        const formEl = document.getElementById('acc-bgm-form');
+        if (formEl) {
+          formEl.onsubmit = async (e) => {
+            e.preventDefault();
+            const tokVal = (document.getElementById('acc-bgm-token')?.value || '').trim();
+            const payload = {
+              enabled: Boolean(document.getElementById('acc-bgm-enabled')?.checked),
+              nsfwMode: document.getElementById('acc-bgm-nsfw-mode')?.value || 'skip',
+              privateDefault: Boolean(document.getElementById('acc-bgm-private-default')?.checked),
+            };
+            if (tokVal) payload.accessToken = tokVal;
+            try {
+              await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: payload });
+              toast(tokVal ? 'Bangumi Token 验证通过，追踪器配置已保存' : 'Bangumi 追踪器配置已保存');
+              renderAccountPage();
+            } catch (err) { toast(err.message || '保存失败', 'error'); }
+          };
+        }
+        const runAccTrackerTest = async (btn, useInput) => {
+          if (!btn) return;
+          btn.disabled = true;
+          const box = document.getElementById('acc-bgm-test-result');
+          const tokVal = useInput ? (document.getElementById('acc-bgm-token')?.value || '').trim() : '';
+          if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在连接 api.bgm.tv 验证授权…</span>`;
+          try {
+            const rep = await api('/admin/api/bangumi/tracker/test', {
+              method: 'POST',
+              body: tokVal ? { accessToken: tokVal } : {},
+            });
+            if (rep && rep.ok && box) {
+              box.innerHTML = `<span style="color:var(--success)">✅ 授权有效：${esc(rep.nickname || rep.username)}${rep.username ? ` (@${esc(rep.username)})` : ''} · 延迟 ${rep.latencyMs} ms</span>`;
+            } else if (box) {
+              box.innerHTML = `<span style="color:var(--danger)">❌ 验证失败：${esc((rep && rep.error) || 'Token 无效')}</span>`;
+            }
+          } catch (err) {
+            if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
+          } finally {
+            btn.disabled = false;
+          }
+        };
+        const tBtn = document.getElementById('acc-bgm-test');
+        if (tBtn) tBtn.onclick = () => runAccTrackerTest(tBtn, false);
+        const ptBtn = document.getElementById('acc-bgm-pat-test');
+        if (ptBtn) ptBtn.onclick = () => runAccTrackerTest(ptBtn, true);
+        const clearBtn = document.getElementById('acc-bgm-clear');
+        if (clearBtn) {
+          clearBtn.onclick = async () => {
+            if (!confirm('确认解绑并清空个人 Bangumi 追踪器授权？')) return;
+            try {
+              await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearToken: true } });
+              toast('已解绑 Bangumi 追踪器');
+              renderAccountPage();
+            } catch (err) { toast(err.message, 'error'); }
+          };
+        }
+        content.querySelectorAll('button[data-acc-retry-tracker]').forEach((btn) => {
+          btn.onclick = async () => {
+            const sid = btn.getAttribute('data-acc-retry-tracker');
+            btn.disabled = true;
+            btn.textContent = '同步中…';
+            try {
+              await api(`/admin/api/series/${encodeURIComponent(sid)}/bangumi/tracker/retry`, { method: 'POST' });
+              toast('已重试同步至 Bangumi');
+              renderAccountPage();
+            } catch (err) {
+              toast(err.message || '重试同步失败', 'error');
+              renderAccountPage();
+            }
+          };
+        });
+      }
+    } catch (err) {
+      if (seq !== routeSeq) return;
+      toast(err.message, 'error');
+    }
+  }
+
   // --- AI Agent One-Click Authorization Page (/agent-auth/:requestID) ---
 
   async function renderAgentAuthPage(requestID) {
+    if (!isAdminUser()) {
+      document.title = '权限不足 · MangaAlpha';
+      renderShell('account', `
+        <div class="card" style="max-width:520px;margin:24px auto;text-align:center">
+          <h2 style="margin:0 0 8px">需要管理员权限</h2>
+          <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px">AI Agent 管理授权仅限管理员账号批准。请切换为管理员账号后再访问此链接。</p>
+          <a href="/" data-nav class="btn btn-primary">返回书架首页</a>
+        </div>`);
+      return;
+    }
     document.title = 'AI Agent 授权确认 · MangaAlpha';
     renderShell('admin', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载授权请求…</p></div>`);
     const content = document.getElementById('page-content');
@@ -5602,7 +6487,11 @@
       return;
     }
     if (data.type !== 'MANGAALPHA_BGM_OAUTH_DONE') return;
-    toast(data.message || (data.ok ? 'Bangumi OAuth 授权成功' : 'Bangumi OAuth 授权失败'), data.ok ? 'info' : 'error');
+    toast(data.message || (data.ok ? 'Bangumi OAuth 授权成功' : 'Bangumi OAuth 授权失败'), data.ok ? 'ok' : 'error');
+    if (location.pathname === '/account' || location.pathname === '/account/') {
+      renderAccountPage();
+      return;
+    }
     const target = state.bgmOAuthRefreshTarget || document.getElementById('admin-tab-body');
     if (target && state.adminTab === 'bangumi') {
       renderAdminBangumi(target);
@@ -5613,23 +6502,32 @@
 
   function updateFooterVersion(auth) {
     const el = document.getElementById('site-footer-version');
+    const sep = document.getElementById('site-footer-sep');
     if (!el) return;
     const raw = (auth && auth.authenticated && typeof auth.version === 'string') ? auth.version.trim() : '';
     if (!raw) {
       el.hidden = true;
-      el.textContent = '';
+      if (sep) sep.hidden = true;
+      el.innerHTML = '';
       el.removeAttribute('href');
       el.removeAttribute('title');
       return;
     }
     const stableMatch = /^v\d+\.\d+\.\d+$/.test(raw);
     const previewMatch = raw.match(/^(v\d+\.\d+\.\d+)-(?:local-)?preview\b/i);
-    el.textContent = previewMatch ? `${previewMatch[1]}-preview` : raw;
-    el.title = raw;
+    const verLabel = previewMatch ? `${previewMatch[1]}-preview` : raw;
+    const codename = (typeof auth.codename === 'string') ? auth.codename.trim() : '';
+    const quote = (typeof auth.codenameQuote === 'string') ? auth.codenameQuote.trim() : '';
+    el.innerHTML = `<span class="site-footer-ver-num">${esc(verLabel)}</span>${codename ? `<span class="site-footer-codename">${esc(codename)}</span>` : ''}`;
+    let tip = raw;
+    if (codename) tip += ` · ${codename}`;
+    if (quote) tip += `\n${quote}`;
+    el.title = tip;
     el.href = stableMatch
       ? `https://github.com/xJogger/MangaAlpha/releases/tag/${encodeURIComponent(raw)}`
       : 'https://github.com/xJogger/MangaAlpha/releases';
     el.hidden = false;
+    if (sep) sep.hidden = false;
   }
 
   let routeSeq = 0;
@@ -5727,6 +6625,10 @@
     if (p.startsWith('/agent-auth/')) {
       const rid = decodeURIComponent(p.slice('/agent-auth/'.length));
       await renderAgentAuthPage(rid);
+      return;
+    }
+    if (p === '/account' || p === '/account/') {
+      await renderAccountPage();
       return;
     }
     if (p === '/admin' || p === '/admin/') {

@@ -99,10 +99,18 @@ func (s *Store) GetSetting(ctx context.Context, key string) (string, error) {
 }
 
 func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	now := nowText()
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO settings(key,value,updated_at) VALUES(?,?,?)
 ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
-		key, value, nowText())
+		key, value, now)
+	if err == nil && key == "show_nsfw" {
+		show := 0
+		if strings.EqualFold(strings.TrimSpace(value), "true") {
+			show = 1
+		}
+		_, _ = s.db.ExecContext(ctx, `UPDATE users SET show_nsfw=?,updated_at=? WHERE id=?`, show, now, PrimaryAdminUserID)
+	}
 	return err
 }
 
@@ -210,6 +218,7 @@ LEFT JOIN libraries up ON up.id=ul.union_library_id`
 		return nil, err
 	}
 	defer rows.Close()
+	scope, hasScope := UserScopeFromContext(ctx)
 	out := make([]Library, 0)
 	for rows.Next() {
 		var item Library
@@ -221,6 +230,9 @@ LEFT JOIN libraries up ON up.id=ul.union_library_id`
 			&item.LastScanStartedAt, &item.LastScanCompletedAt, &item.LastScanStatus, &item.LastScanError,
 		); err != nil {
 			return nil, err
+		}
+		if enabledOnly && hasScope && !scope.AllowsLibrary(item.ID) {
+			continue
 		}
 		item.ProviderType = item.EffectiveProvider()
 		out = append(out, item)
@@ -258,6 +270,7 @@ LEFT JOIN (SELECT library_id, count(*) AS cnt, coalesce(sum(size),0) AS bytes FR
 		return nil, err
 	}
 	defer rows.Close()
+	scope, hasScope := UserScopeFromContext(ctx)
 	out := make([]Library, 0)
 	for rows.Next() {
 		var item Library
@@ -270,6 +283,9 @@ LEFT JOIN (SELECT library_id, count(*) AS cnt, coalesce(sum(size),0) AS bytes FR
 			&item.SeriesCount, &item.BookCount, &item.ComicBytes,
 		); err != nil {
 			return nil, err
+		}
+		if enabledOnly && hasScope && !scope.AllowsLibrary(item.ID) {
+			continue
 		}
 		item.ProviderType = item.EffectiveProvider()
 		out = append(out, item)
@@ -327,7 +343,7 @@ ORDER BY ul.union_library_id,ul.priority ASC,ul.member_library_id ASC`, args...)
 }
 
 // enabledLibraryIDs returns all library IDs visible to Bookshelf/Komga clients
-// (enabled=1 AND not enrolled as a union sub-library).
+// (enabled=1 AND not enrolled as a union sub-library, intersected with current UserScope).
 func (s *Store) enabledLibraryIDs(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT l.id FROM libraries l
@@ -338,11 +354,15 @@ ORDER BY l.id`)
 		return nil, err
 	}
 	defer rows.Close()
+	scope, hasScope := UserScopeFromContext(ctx)
 	out := make([]string, 0, 8)
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
+		}
+		if hasScope && !scope.AllowsLibrary(id) {
+			continue
 		}
 		out = append(out, id)
 	}
@@ -520,8 +540,11 @@ func (s *Store) IsLibraryEnabled(ctx context.Context, id string) bool {
 }
 
 // IsLibraryVisible reports whether the library is exposed on the Bookshelf and Komga APIs
-// (enabled=1 AND not enrolled as a union sub-library).
+// (enabled=1 AND not enrolled as a union sub-library AND allowed by UserScope).
 func (s *Store) IsLibraryVisible(ctx context.Context, id string) bool {
+	if scope, ok := UserScopeFromContext(ctx); ok && !scope.AllowsLibrary(id) {
+		return false
+	}
 	var count int
 	if err := s.db.QueryRowContext(ctx, `
 SELECT count(*) FROM libraries l
@@ -533,6 +556,9 @@ WHERE l.id=? AND l.enabled=1 AND ul.union_library_id IS NULL`, id).Scan(&count);
 }
 
 func (s *Store) ShowNSFW(ctx context.Context) bool {
+	if scope, ok := UserScopeFromContext(ctx); ok {
+		return scope.EffectiveShowNSFW()
+	}
 	return s.BoolSetting(ctx, "show_nsfw", false)
 }
 

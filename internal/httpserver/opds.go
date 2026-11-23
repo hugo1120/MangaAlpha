@@ -449,11 +449,12 @@ func (s *Server) recordOPDSReadProgress(ctx context.Context, book database.Book,
 		s.logger.Warn("record opds read progress", "error", err, "book_id", book.ID)
 		return
 	}
-	s.sse.Publish("ReadProgressChanged", map[string]any{
+	userID := database.UserIDFromContext(ctx)
+	s.sse.PublishForUser(userID, "ReadProgressChanged", map[string]any{
 		"bookId": book.ID,
-		"userId": "admin",
+		"userId": userID,
 	})
-	s.notifyBangumiTracker(book.SeriesID)
+	s.notifyBangumiTracker(ctx, book.SeriesID)
 }
 
 // ============================================================================
@@ -1701,6 +1702,10 @@ func (s *Server) opdsKomgaLibraries(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) opdsKomgaLibrarySeries(w http.ResponseWriter, r *http.Request) {
 	libID := chi.URLParam(r, "libraryID")
+	if !s.store.IsLibraryVisible(r.Context(), libID) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Library not found.")
+		return
+	}
 	lib, err := s.store.LibraryBasic(r.Context(), libID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1708,10 +1713,6 @@ func (s *Server) opdsKomgaLibrarySeries(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		s.writeDBError(w, r, err)
-		return
-	}
-	if !lib.Enabled || lib.UnionParentID != "" {
-		writeError(w, http.StatusNotFound, "NOT_FOUND", "Library not found.")
 		return
 	}
 	s.renderKomgaSeriesFeed(

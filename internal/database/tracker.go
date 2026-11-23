@@ -41,6 +41,7 @@ func (s *Store) UpsertBangumiTrackerRecord(ctx context.Context, rec BangumiTrack
 	if rec.BgmSubjectID <= 0 {
 		return nil
 	}
+	userID := UserIDFromContext(ctx)
 	now := nowText()
 	if strings.TrimSpace(rec.UpdatedAt) == "" {
 		rec.UpdatedAt = now
@@ -51,10 +52,10 @@ func (s *Store) UpsertBangumiTrackerRecord(ctx context.Context, rec BangumiTrack
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO bangumi_tracker_records(
- bgm_subject_id,series_id,series_title,status,remote_type,remote_vol_status,
+ user_id,bgm_subject_id,series_id,series_title,status,remote_type,remote_vol_status,
  remote_private,last_local_vol,last_error,last_synced_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(bgm_subject_id) DO UPDATE SET
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(user_id,bgm_subject_id) DO UPDATE SET
  series_id=excluded.series_id,
  series_title=excluded.series_title,
  status=excluded.status,
@@ -65,7 +66,7 @@ ON CONFLICT(bgm_subject_id) DO UPDATE SET
  last_error=excluded.last_error,
  last_synced_at=coalesce(excluded.last_synced_at, bangumi_tracker_records.last_synced_at),
  updated_at=excluded.updated_at`,
-		rec.BgmSubjectID, strings.TrimSpace(rec.SeriesID), strings.TrimSpace(rec.SeriesTitle),
+		userID, rec.BgmSubjectID, strings.TrimSpace(rec.SeriesID), strings.TrimSpace(rec.SeriesTitle),
 		strings.TrimSpace(rec.Status), rec.RemoteType, rec.RemoteVolStatus,
 		privateInt, rec.LastLocalVol, strings.TrimSpace(rec.LastError),
 		rec.LastSyncedAt, rec.UpdatedAt,
@@ -77,6 +78,7 @@ func (s *Store) BangumiTrackerRecordBySubject(ctx context.Context, subjectID int
 	if subjectID <= 0 {
 		return BangumiTrackerRecord{}, false, nil
 	}
+	userID := UserIDFromContext(ctx)
 	var (
 		rec        BangumiTrackerRecord
 		privateInt int
@@ -85,7 +87,7 @@ func (s *Store) BangumiTrackerRecordBySubject(ctx context.Context, subjectID int
 	err := s.db.QueryRowContext(ctx, `
 SELECT bgm_subject_id,series_id,series_title,status,remote_type,remote_vol_status,
  remote_private,last_local_vol,last_error,last_synced_at,updated_at
-FROM bangumi_tracker_records WHERE bgm_subject_id=?`, subjectID).Scan(
+FROM bangumi_tracker_records WHERE user_id=? AND bgm_subject_id=?`, userID, subjectID).Scan(
 		&rec.BgmSubjectID, &rec.SeriesID, &rec.SeriesTitle, &rec.Status,
 		&rec.RemoteType, &rec.RemoteVolStatus, &privateInt, &rec.LastLocalVol,
 		&rec.LastError, &syncedAt, &rec.UpdatedAt,
@@ -108,12 +110,14 @@ func (s *Store) ListBangumiTrackerRecords(ctx context.Context, limit int) ([]Ban
 	if limit <= 0 || limit > 100 {
 		limit = 30
 	}
+	userID := UserIDFromContext(ctx)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT bgm_subject_id,series_id,series_title,status,remote_type,remote_vol_status,
  remote_private,last_local_vol,last_error,last_synced_at,updated_at
 FROM bangumi_tracker_records
+WHERE user_id=?
 ORDER BY updated_at DESC
-LIMIT ?`, limit)
+LIMIT ?`, userID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -172,13 +176,14 @@ func (s *Store) BangumiTrackerSeriesSnapshot(ctx context.Context, seriesID strin
 		TotalBookCount: meta.TotalBookCount,
 		IsNSFW:         meta.IsNSFW,
 	}
+	userID := UserIDFromContext(ctx)
 	rows, err := s.db.QueryContext(ctx, `
 SELECT CASE WHEN p.book_id IS NULL THEN 0 ELSE 1 END AS has_progress,
  coalesce(p.completed,0), coalesce(p.page,0)
 FROM books b
-LEFT JOIN book_read_progress p ON p.book_id=b.id
+LEFT JOIN book_read_progress p ON p.user_id=? AND p.book_id=b.id
 WHERE b.series_id=?
-ORDER BY b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`, series.ID)
+ORDER BY b.number_sort ASC,b.name COLLATE NOCASE ASC,b.id ASC`, userID, series.ID)
 	if err != nil {
 		return BangumiTrackerSeriesSnapshot{}, false, err
 	}

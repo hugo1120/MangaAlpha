@@ -32,6 +32,7 @@ type AdminUser struct {
 
 type AuthSession struct {
 	ID         string `json:"id"`
+	UserID     string `json:"userId,omitempty"`
 	Username   string `json:"username"`
 	Remember   bool   `json:"remember"`
 	UserAgent  string `json:"userAgent"`
@@ -44,6 +45,7 @@ type AuthSession struct {
 
 type APIKey struct {
 	ID         string  `json:"id"`
+	UserID     string  `json:"userId,omitempty"`
 	Name       string  `json:"name"`
 	KeyPrefix  string  `json:"keyPrefix"`
 	CreatedAt  string  `json:"createdAt"`

@@ -1499,34 +1499,35 @@ func inheritUnionProgressTx(
 ) (int, error) {
 	// Drive from book_read_progress (small) via idx_union_book_sources_src instead of scanning all union books.
 	rows, err := tx.QueryContext(ctx, `
-SELECT ub.id, ub.series_id, sp.completed, sp.page, sp.read_date, sp.completed_at, sp.updated_at
+SELECT sp.user_id, ub.id, ub.series_id, sp.completed, sp.page, sp.read_date, sp.completed_at, sp.updated_at
 FROM book_read_progress sp
 CROSS JOIN union_book_sources ubs ON ubs.source_book_id=sp.book_id
 CROSS JOIN books ub ON ub.id=ubs.union_book_id AND ub.library_id=?
-LEFT JOIN book_read_progress up ON up.book_id=ub.id
-LEFT JOIN book_read_progress_tombstones ut ON ut.book_id=ub.id
+LEFT JOIN book_read_progress up ON up.user_id=sp.user_id AND up.book_id=ub.id
+LEFT JOIN book_read_progress_tombstones ut ON ut.user_id=sp.user_id AND ut.book_id=ub.id
 WHERE up.book_id IS NULL AND ut.book_id IS NULL
-ORDER BY ub.id ASC, sp.completed DESC, sp.updated_at DESC, ubs.priority ASC`, unionLibraryID)
+ORDER BY sp.user_id ASC, ub.id ASC, sp.completed DESC, sp.updated_at DESC, ubs.priority ASC`, unionLibraryID)
 	if err != nil {
 		return 0, err
 	}
 	type progRow struct {
-		bookID, seriesID      string
-		completed             int
-		page                  sql.NullInt64
-		readDate, completedAt sql.NullString
-		updatedAt             string
+		userID, bookID, seriesID string
+		completed                int
+		page                     sql.NullInt64
+		readDate, completedAt    sql.NullString
+		updatedAt                string
 	}
 	var chosen []progRow
 	seen := map[string]bool{}
 	for rows.Next() {
 		var r progRow
-		if err := rows.Scan(&r.bookID, &r.seriesID, &r.completed, &r.page, &r.readDate, &r.completedAt, &r.updatedAt); err != nil {
+		if err := rows.Scan(&r.userID, &r.bookID, &r.seriesID, &r.completed, &r.page, &r.readDate, &r.completedAt, &r.updatedAt); err != nil {
 			rows.Close()
 			return 0, err
 		}
-		if !seen[r.bookID] {
-			seen[r.bookID] = true
+		key := r.userID + "\x00" + r.bookID
+		if !seen[key] {
+			seen[key] = true
 			chosen = append(chosen, r)
 		}
 	}
@@ -1541,13 +1542,13 @@ ORDER BY ub.id ASC, sp.completed DESC, sp.updated_at DESC, ubs.priority ASC`, un
 			return 0, err
 		}
 		stmt, err := tx.PrepareContext(ctx, `
-INSERT OR IGNORE INTO book_read_progress(book_id,series_id,completed,page,read_date,completed_at,updated_at)
-VALUES(?,?,?,?,?,?,?)`)
+INSERT OR IGNORE INTO book_read_progress(user_id,book_id,series_id,completed,page,read_date,completed_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?)`)
 		if err != nil {
 			return 0, err
 		}
 		for _, r := range chosen {
-			if _, err := stmt.ExecContext(ctx, r.bookID, r.seriesID, r.completed, r.page, r.readDate, r.completedAt, r.updatedAt); err != nil {
+			if _, err := stmt.ExecContext(ctx, r.userID, r.bookID, r.seriesID, r.completed, r.page, r.readDate, r.completedAt, r.updatedAt); err != nil {
 				stmt.Close()
 				return 0, err
 			}
@@ -1557,14 +1558,14 @@ VALUES(?,?,?,?,?,?,?)`)
 
 	// Also inherit inferred book_page_progress where missing on union books (driven from book_page_progress).
 	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO book_page_progress(book_id,series_id,last_loaded_page,max_loaded_page,page_count,updated_at)
-SELECT ub.id, ub.series_id, sp.last_loaded_page, sp.max_loaded_page, sp.page_count, sp.updated_at
+INSERT OR IGNORE INTO book_page_progress(user_id,book_id,series_id,last_loaded_page,max_loaded_page,page_count,updated_at)
+SELECT sp.user_id, ub.id, ub.series_id, sp.last_loaded_page, sp.max_loaded_page, sp.page_count, sp.updated_at
 FROM book_page_progress sp
 CROSS JOIN union_book_sources ubs ON ubs.source_book_id=sp.book_id
 CROSS JOIN books ub ON ub.id=ubs.union_book_id AND ub.library_id=?
-LEFT JOIN book_page_progress up ON up.book_id=ub.id
+LEFT JOIN book_page_progress up ON up.user_id=sp.user_id AND up.book_id=ub.id
 WHERE up.book_id IS NULL
-ORDER BY sp.updated_at DESC, ubs.priority ASC`, unionLibraryID); err != nil {
+ORDER BY sp.user_id ASC, sp.updated_at DESC, ubs.priority ASC`, unionLibraryID); err != nil {
 		return 0, err
 	}
 	return len(chosen), nil
@@ -1852,10 +1853,12 @@ func (s *Store) LookupSeriesByBangumiSubject(ctx context.Context, subjectID int6
 	if subjectID <= 0 {
 		return []BangumiMatch{}, nil
 	}
+	userID := UserIDFromContext(ctx)
+	scope, hasScope := UserScopeFromContext(ctx)
 	query := `
 SELECT s.id, COALESCE(NULLIF(sm.title,''), s.name), s.name, s.library_id,
  l.name, l.provider_type, coalesce(w.name,''), s.books_count, s.one_shot,
- (SELECT count(*) FROM book_read_progress p WHERE p.series_id=s.id AND p.completed=1)
+ (SELECT count(*) FROM book_read_progress p WHERE p.user_id=? AND p.series_id=s.id AND p.completed=1)
 FROM series_metadata sm
 JOIN series s ON s.id=sm.series_id
 JOIN libraries l ON l.id=s.library_id AND l.enabled=1
@@ -1869,7 +1872,7 @@ WHERE sm.bgm_subject_id=? AND ul.union_library_id IS NULL`
 ORDER BY s.books_count DESC,
  CASE WHEN l.provider_type='union' THEN 0 ELSE 1 END ASC,
  l.name COLLATE NOCASE ASC, s.name COLLATE NOCASE ASC, s.id ASC`
-	rows, err := s.db.QueryContext(ctx, query, subjectID)
+	rows, err := s.db.QueryContext(ctx, query, userID, subjectID)
 	if err != nil {
 		return nil, err
 	}
@@ -1884,6 +1887,9 @@ ORDER BY s.books_count DESC,
 			&item.BooksCount, &oneShotInt, &item.BooksReadCount,
 		); err != nil {
 			return nil, err
+		}
+		if hasScope && !scope.AllowsLibrary(item.LibraryID) {
+			continue
 		}
 		item.OneShot = oneShotInt != 0
 		item.URL = "/series/" + item.SeriesID

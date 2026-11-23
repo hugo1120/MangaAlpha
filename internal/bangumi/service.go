@@ -210,10 +210,14 @@ func (s *Service) RefreshTrackerOAuthNow(ctx context.Context) (TrackerStatus, er
 }
 
 func (s *Service) NotifyProgress(seriesID string) {
+	s.NotifyProgressForUser(database.PrimaryAdminUserID, seriesID)
+}
+
+func (s *Service) NotifyProgressForUser(userID, seriesID string) {
 	if s == nil || s.tracker == nil {
 		return
 	}
-	s.tracker.NotifyProgress(seriesID)
+	s.tracker.NotifyProgressForUser(userID, seriesID)
 }
 
 func (s *Service) SyncSeriesTrackerNow(ctx context.Context, seriesID string) (database.BangumiTrackerRecord, error) {

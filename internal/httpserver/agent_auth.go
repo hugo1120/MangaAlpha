@@ -549,8 +549,9 @@ func (s *Server) approveAdminAgentAuthRequest(w http.ResponseWriter, r *http.Req
 			return
 		}
 	}
+	principal, _ := s.currentPrincipal(r)
 	keyName := sanitizeShortLabel(body.KeyName, 80, "AI Agent · "+existing.ClientName)
-	rawKey, meta, err := s.store.CreateAPIKey(r.Context(), keyName)
+	rawKey, meta, err := s.store.CreateAPIKeyForUser(r.Context(), principal.UserID, keyName)
 	if err != nil {
 		s.writeDBError(w, r, err)
 		return
@@ -558,7 +559,7 @@ func (s *Server) approveAdminAgentAuthRequest(w http.ResponseWriter, r *http.Req
 	approved, err := s.agentAuth.Approve(reqID, meta.Name, meta.KeyPrefix, rawKey)
 	if err != nil {
 		// Race: rollback the newly created API key if request was simultaneously handled/expired.
-		_ = s.store.DeleteAPIKey(r.Context(), meta.ID)
+		_ = s.store.DeleteAPIKeyForUser(r.Context(), principal.UserID, meta.ID)
 		writeError(w, http.StatusConflict, "APPROVE_CONFLICT", err.Error())
 		return
 	}

@@ -98,14 +98,16 @@ jobs:
           tag="${GITHUB_REF_NAME}"
           package="mangaalpha_${tag}_${GOOS}_${GOARCH}"
           executable="mangaalpha"
+          extra_ldflags=""
           if [[ "${GOOS}" == "windows" ]]; then
             executable="${executable}.exe"
+            extra_ldflags=" -H=windowsgui"
           fi
 
           mkdir -p "dist/${package}"
           CGO_ENABLED=0 go build \
             -trimpath \
-            -ldflags="-s -w -X github.com/xJogger/fake-komga-115/internal/buildinfo.Version=${tag}" \
+            -ldflags="-s -w${extra_ldflags} -X github.com/xJogger/fake-komga-115/internal/buildinfo.Version=${tag}" \
             -o "dist/${package}/${executable}" \
             ./cmd/server
           cp README.md LICENSE SECURITY.md AGENTS.md "dist/${package}/"

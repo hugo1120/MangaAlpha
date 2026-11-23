@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"image/png"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/xJogger/fake-komga-115/internal/httpserver"
 )
 
 func TestDefaultDataDir(t *testing.T) {
@@ -60,5 +65,44 @@ func TestBrowserCommand(t *testing.T) {
 	}
 	if _, _, err := browserCommand("plan9", "http://localhost"); err == nil {
 		t.Fatal("unsupported platform must return an error")
+	}
+}
+
+func TestResizePNGForIcon(t *testing.T) {
+	raw := httpserver.AppIconPNG()
+	if len(raw) == 0 {
+		t.Fatal("embedded AppIconPNG must not be empty")
+	}
+	scaled := resizePNGForIcon(raw, 64)
+	img, err := png.Decode(bytes.NewReader(scaled))
+	if err != nil {
+		t.Fatalf("scaled PNG decode failed: %v", err)
+	}
+	b := img.Bounds()
+	if b.Dx() > 64 || b.Dy() > 64 || b.Dx() <= 0 || b.Dy() <= 0 {
+		t.Fatalf("unexpected scaled icon dimensions: %dx%d", b.Dx(), b.Dy())
+	}
+}
+
+func TestRollingLogWriterRotation(t *testing.T) {
+	logPath := filepath.Join(t.TempDir(), "mangaalpha.log")
+	w, err := newRollingLogWriter(logPath, 32)
+	if err != nil {
+		t.Fatalf("newRollingLogWriter: %v", err)
+	}
+	defer w.Close()
+	if _, err := w.Write([]byte("0123456789abcdef0123456789abcdef")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write([]byte("rotated-entry\n")); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := os.ReadFile(logPath)
+	if err != nil || string(cur) != "rotated-entry\n" {
+		t.Fatalf("unexpected active log: %q err=%v", cur, err)
+	}
+	bak, err := os.ReadFile(logPath + ".1")
+	if err != nil || len(bak) != 32 {
+		t.Fatalf("unexpected backup log: len=%d err=%v", len(bak), err)
 	}
 }

@@ -56,6 +56,14 @@ func NewRARServiceWithWebDAV(
 	}
 }
 
+func (r *RARService) maxPageSize(ctx context.Context) int64 {
+	maxPageSize := r.store.Int64Setting(ctx, "max_page_size", 100<<20)
+	if maxPageSize <= 0 {
+		maxPageSize = 100 << 20
+	}
+	return maxPageSize
+}
+
 func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
 	version := bookVersion(book)
 	if raw, ok, err := r.store.ArchiveIndexRawForVersion(ctx, book.ID, version); err != nil {
@@ -63,42 +71,100 @@ func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	} else if ok {
 		var pages []PageEntry
 		if json.Unmarshal([]byte(raw), &pages) == nil {
+			if err := r.ensureEncryptedPagesUnlocked(ctx, book, pages); err != nil {
+				return nil, err
+			}
 			return pages, nil
 		}
 	}
 
 	started := time.Now()
-	files, _, err := r.listFiles(ctx, book)
+	cands, hasExplicit, err := resolveArchivePasswordCandidates(ctx, r.store, book)
 	if err != nil {
-		diagnostics.Default().Record(diagnostics.Event{
-			Level:         diagnostics.LevelError,
-			Component:     "archive",
-			Stage:         "archive_index",
-			Action:        "parse_rar",
-			Code:          diagnostics.ClassifyError(err),
-			DurationMs:    time.Since(started).Milliseconds(),
-			CorrelationID: book.ID,
-			Detail:        err.Error(),
-			Meta:          map[string]any{"format": formatRAR, "sizeBytes": book.Size},
-		})
 		return nil, err
 	}
 
-	pages, err := rarPageEntries(files)
-	if err != nil {
-		diagnostics.Default().Record(diagnostics.Event{
-			Level:         diagnostics.LevelError,
-			Component:     "archive",
-			Stage:         "archive_index",
-			Action:        "validate_rar",
-			Code:          diagnostics.ClassifyError(err),
-			DurationMs:    time.Since(started).Milliseconds(),
-			CorrelationID: book.ID,
-			Detail:        err.Error(),
-			Meta:          map[string]any{"format": formatRAR},
-		})
-		return nil, err
+	var (
+		pages    []PageEntry
+		parseErr error
+	)
+	if len(cands) == 0 {
+		files, _, err := r.listFilesWithPassword(ctx, book, "")
+		if err != nil {
+			if hasExplicit && isArchivePasswordError(err) {
+				return nil, ErrArchivePasswordInvalid
+			}
+			if !isArchivePasswordError(err) {
+				r.recordRARError(book, started, "parse_rar", err)
+			}
+			return nil, err
+		}
+		pages, err = rarPageEntries(files)
+		if err != nil {
+			r.recordRARError(book, started, "validate_rar", err)
+			return nil, err
+		}
+		if _, hasEnc := firstEncryptedPageEntry(pages); hasEnc {
+			if hasExplicit {
+				return nil, ErrArchivePasswordInvalid
+			}
+			return nil, ErrArchivePasswordRequired
+		}
+	} else {
+		maxPageSize := r.maxPageSize(ctx)
+		hasDirect := false
+		unlocked := false
+		for _, cand := range cands {
+			if cand.Source == "direct" {
+				hasDirect = true
+			}
+			files, remoteFS, lErr := r.listFilesWithPassword(ctx, book, cand.Password)
+			if lErr != nil {
+				if isArchivePasswordError(lErr) {
+					continue
+				}
+				parseErr = lErr
+				break
+			}
+			candPages, vErr := rarPageEntries(files)
+			if vErr != nil {
+				parseErr = vErr
+				break
+			}
+			sample, hasEnc := firstEncryptedPageEntry(candPages)
+			if !hasEnc {
+				pages = candPages
+				unlocked = true
+				break
+			}
+			if sample.UncompressedSize > uint64(maxPageSize) || sample.CompressedSize > uint64(maxPageSize) {
+				parseErr = ErrPageTooLarge
+				break
+			}
+			if _, rErr := readRARFileEntry(remoteFS, files, sample, maxPageSize, true); rErr != nil {
+				if isArchivePasswordError(rErr) {
+					continue
+				}
+				parseErr = rErr
+				break
+			}
+			maybeAutoBindArchivePassword(ctx, r.store, book, cand)
+			pages = candPages
+			unlocked = true
+			break
+		}
+		if !unlocked {
+			if parseErr != nil {
+				r.recordRARError(book, started, "parse_rar", parseErr)
+				return nil, parseErr
+			}
+			if hasExplicit || hasDirect {
+				return nil, ErrArchivePasswordInvalid
+			}
+			return nil, ErrArchivePasswordRequired
+		}
 	}
+
 	reportLoadPagesFound(ctx, len(pages))
 	if err := r.saveIndex(ctx, book, pages, time.Since(started)); err != nil {
 		return nil, err
@@ -116,6 +182,55 @@ func (r *RARService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	return pages, nil
 }
 
+func (r *RARService) recordRARError(book database.Book, started time.Time, action string, err error) {
+	diagnostics.Default().Record(diagnostics.Event{
+		Level:         diagnostics.LevelError,
+		Component:     "archive",
+		Stage:         "archive_index",
+		Action:        action,
+		Code:          diagnostics.ClassifyError(err),
+		DurationMs:    time.Since(started).Milliseconds(),
+		CorrelationID: book.ID,
+		Detail:        err.Error(),
+		Meta:          map[string]any{"format": formatRAR, "sizeBytes": book.Size},
+	})
+}
+
+func (r *RARService) ensureEncryptedPagesUnlocked(ctx context.Context, book database.Book, pages []PageEntry) error {
+	sample, hasEnc := firstEncryptedPageEntry(pages)
+	if !hasEnc {
+		return nil
+	}
+	cands, hasExplicit, err := resolveArchivePasswordCandidates(ctx, r.store, book)
+	if err != nil {
+		return err
+	}
+	if len(cands) == 0 {
+		if hasExplicit {
+			return ErrArchivePasswordInvalid
+		}
+		return ErrArchivePasswordRequired
+	}
+	if !hasExplicit && cands[0].Source == "direct" {
+		return nil
+	}
+	maxPageSize := r.maxPageSize(ctx)
+	hasDirect := false
+	for _, cand := range cands {
+		if cand.Source == "direct" {
+			hasDirect = true
+		}
+		if _, err := r.readEntryWithPassword(ctx, book, sample, maxPageSize, cand.Password); err == nil {
+			maybeAutoBindArchivePassword(ctx, r.store, book, cand)
+			return nil
+		}
+	}
+	if hasExplicit || hasDirect {
+		return ErrArchivePasswordInvalid
+	}
+	return ErrArchivePasswordRequired
+}
+
 func rarPageEntries(files []*rardecode.File) ([]PageEntry, error) {
 	pages := make([]PageEntry, 0, len(files))
 	for index, file := range files {
@@ -129,6 +244,11 @@ func rarPageEntries(files []*rardecode.File) ([]PageEntry, error) {
 		if mimeType == "" {
 			continue
 		}
+		encrypted := file.Encrypted || file.HeaderEncrypted
+		scheme := ""
+		if encrypted {
+			scheme = encSchemeRAR
+		}
 		pages = append(pages, PageEntry{
 			Name:             file.Name,
 			Format:           formatRAR,
@@ -136,6 +256,8 @@ func rarPageEntries(files []*rardecode.File) ([]PageEntry, error) {
 			CompressedSize:   uint64(file.PackedSize),
 			UncompressedSize: uint64(file.UnPackedSize),
 			MimeType:         mimeType,
+			Encrypted:        encrypted,
+			EncScheme:        scheme,
 		})
 	}
 	slices.SortFunc(pages, func(a, b PageEntry) int {
@@ -166,21 +288,58 @@ func (r *RARService) ReadPage(
 		return PageData{}, sql.ErrNoRows
 	}
 	entry := pages[pageNumber-1]
-	maxPageSize := r.store.Int64Setting(ctx, "max_page_size", 100<<20)
-	if maxPageSize <= 0 {
-		maxPageSize = 100 << 20
-	}
+	maxPageSize := r.maxPageSize(ctx)
 	if entry.UncompressedSize > uint64(maxPageSize) ||
 		entry.CompressedSize > uint64(maxPageSize) {
 		return PageData{}, ErrPageTooLarge
+	}
+	_, hasExplicit := explicitArchivePasswordFromContext(ctx)
+	var cands []database.ArchivePasswordCandidate
+	if entry.Encrypted {
+		var cErr error
+		cands, hasExplicit, cErr = resolveArchivePasswordCandidates(ctx, r.store, book)
+		if cErr != nil {
+			return PageData{}, cErr
+		}
+		if len(cands) == 0 {
+			if hasExplicit {
+				return PageData{}, ErrArchivePasswordInvalid
+			}
+			return PageData{}, ErrArchivePasswordRequired
+		}
+	}
+	loader := func(loadCtx context.Context) ([]byte, error) {
+		if !entry.Encrypted {
+			return r.readEntryWithPassword(loadCtx, book, entry, maxPageSize, "")
+		}
+		hasDirect := false
+		for _, cand := range cands {
+			if cand.Source == "direct" {
+				hasDirect = true
+			}
+			data, err := r.readEntryWithPassword(loadCtx, book, entry, maxPageSize, cand.Password)
+			if err == nil {
+				maybeAutoBindArchivePassword(loadCtx, r.store, book, cand)
+				return data, nil
+			}
+			if !isArchivePasswordError(err) {
+				return nil, err
+			}
+		}
+		if hasExplicit || hasDirect {
+			return nil, ErrArchivePasswordInvalid
+		}
+		return nil, ErrArchivePasswordRequired
+	}
+	if hasExplicit {
+		data, err := loader(ctx)
+		return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 	}
 	pageKey := fmt.Sprintf("%s:%s:%d", book.ID, bookVersion(book), pageNumber)
 	data, _, err := r.cache.GetOrLoad(
 		ctx, cache.TypePage, pageKey,
 		r.store.Int64Setting(ctx, "page_cache_max_bytes", 5<<30),
-		func(loadCtx context.Context) ([]byte, error) {
-			return r.readEntry(loadCtx, book, entry, maxPageSize)
-		},
+		loader,
 	)
 	return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 }
@@ -204,6 +363,14 @@ func (r *RARService) listFiles(
 	ctx context.Context,
 	book database.Book,
 ) ([]*rardecode.File, *remoteArchiveFS, error) {
+	return r.listFilesWithPassword(ctx, book, "")
+}
+
+func (r *RARService) listFilesWithPassword(
+	ctx context.Context,
+	book database.Book,
+	password string,
+) ([]*rardecode.File, *remoteArchiveFS, error) {
 	indexBlockSize := r.store.Int64Setting(ctx, "rar_index_block_size", 64<<10)
 	dataBlockSize := r.store.Int64Setting(ctx, "range_block_size", 1<<20)
 	remoteFS := newRemoteArchiveFS(
@@ -213,17 +380,20 @@ func (r *RARService) listFiles(
 	if maxDictionarySize < 256<<10 {
 		maxDictionarySize = 256 << 10
 	}
-	files, err := rardecode.List(
-		remoteRARName,
+	opts := []rardecode.Option{
 		rardecode.FileSystem(remoteFS),
-		rardecode.BufferSize(32<<10),
+		rardecode.BufferSize(32 << 10),
 		rardecode.MaxDictionarySize(maxDictionarySize),
-	)
+	}
+	if password != "" {
+		opts = append(opts, rardecode.Password(password))
+	}
+	files, err := rardecode.List(remoteRARName, opts...)
 	if err != nil {
 		if remoteFS.lastOpenErr != nil {
 			return nil, remoteFS, remoteFS.lastOpenErr
 		}
-		return nil, remoteFS, mapRARError(err)
+		return nil, remoteFS, mapRARErrorWithPassword(err, password != "")
 	}
 	return files, remoteFS, nil
 }
@@ -234,10 +404,30 @@ func (r *RARService) readEntry(
 	entry PageEntry,
 	maxPageSize int64,
 ) ([]byte, error) {
-	files, remoteFS, err := r.listFiles(ctx, book)
+	return r.readEntryWithPassword(ctx, book, entry, maxPageSize, "")
+}
+
+func (r *RARService) readEntryWithPassword(
+	ctx context.Context,
+	book database.Book,
+	entry PageEntry,
+	maxPageSize int64,
+	password string,
+) ([]byte, error) {
+	files, remoteFS, err := r.listFilesWithPassword(ctx, book, password)
 	if err != nil {
 		return nil, err
 	}
+	return readRARFileEntry(remoteFS, files, entry, maxPageSize, password != "")
+}
+
+func readRARFileEntry(
+	remoteFS *remoteArchiveFS,
+	files []*rardecode.File,
+	entry PageEntry,
+	maxPageSize int64,
+	hasPassword bool,
+) ([]byte, error) {
 	remoteFS.UseDataBlocks()
 	if entry.ArchiveIndex < 0 || entry.ArchiveIndex >= len(files) {
 		return nil, fmt.Errorf("%w: page entry no longer exists", ErrInvalidRAR)
@@ -249,22 +439,26 @@ func (r *RARService) readEntry(
 	if file.Name != entry.Name || uint64(file.UnPackedSize) != entry.UncompressedSize {
 		return nil, fmt.Errorf("%w: page entry changed", ErrInvalidRAR)
 	}
+	isEnc := file.Encrypted || file.HeaderEncrypted || entry.Encrypted
 	reader, err := file.Open()
 	if err != nil {
-		return nil, mapRARError(err)
+		return nil, mapRARErrorWithPassword(err, hasPassword && isEnc)
 	}
 	data, readErr := io.ReadAll(io.LimitReader(reader, maxPageSize+1))
 	closeErr := reader.Close()
 	if readErr != nil {
-		return nil, mapRARError(readErr)
+		return nil, mapRARErrorWithPassword(readErr, hasPassword && isEnc)
 	}
 	if closeErr != nil {
-		return nil, mapRARError(closeErr)
+		return nil, mapRARErrorWithPassword(closeErr, hasPassword && isEnc)
 	}
 	if int64(len(data)) > maxPageSize {
 		return nil, ErrPageTooLarge
 	}
 	if uint64(len(data)) != entry.UncompressedSize {
+		if hasPassword && isEnc {
+			return nil, ErrArchivePasswordInvalid
+		}
 		return nil, fmt.Errorf("%w: page size mismatch", ErrInvalidRAR)
 	}
 	return data, nil
@@ -287,8 +481,6 @@ func (r *RARService) saveIndex(
 
 func validateRARFile(file *rardecode.File) error {
 	switch {
-	case file.Encrypted || file.HeaderEncrypted:
-		return ErrEncryptedRAR
 	case !file.IsDir && file.Solid:
 		return ErrSolidRAR
 	case !file.IsDir && file.UnKnownSize:
@@ -301,26 +493,50 @@ func validateRARFile(file *rardecode.File) error {
 }
 
 func mapRARError(err error) error {
+	return mapRARErrorWithPassword(err, false)
+}
+
+func mapRARErrorWithPassword(err error, hasPassword bool) error {
 	if err == nil {
 		return nil
 	}
 	switch {
 	case errors.Is(err, ErrSolidRAR),
 		errors.Is(err, ErrEncryptedRAR),
+		errors.Is(err, ErrArchivePasswordRequired),
+		errors.Is(err, ErrArchivePasswordInvalid),
 		errors.Is(err, ErrMultiVolumeRAR),
 		errors.Is(err, ErrUnsupportedRAR),
 		errors.Is(err, ErrInvalidRAR):
 		return err
 	case errors.Is(err, rardecode.ErrSolidOpen):
 		return ErrSolidRAR
+	case errors.Is(err, rardecode.ErrBadPassword):
+		return ErrArchivePasswordInvalid
 	case errors.Is(err, rardecode.ErrArchiveEncrypted),
 		errors.Is(err, rardecode.ErrArchivedFileEncrypted):
-		return ErrEncryptedRAR
+		if hasPassword {
+			return ErrArchivePasswordInvalid
+		}
+		return ErrArchivePasswordRequired
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("%w: a required volume is unavailable", ErrMultiVolumeRAR)
 	case errors.Is(err, rardecode.ErrDictionaryTooLarge):
 		return fmt.Errorf("%w: decompression dictionary exceeds the configured limit", ErrUnsupportedRAR)
 	default:
+		if hasPassword {
+			// RAR4 has no dedicated header password check hash; an incorrect password on
+			// an encrypted RAR4 archive surfaces as a header CRC, file checksum, or decode error.
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "password") ||
+				strings.Contains(msg, "checksum") ||
+				strings.Contains(msg, "corrupt") ||
+				strings.Contains(msg, "bad header") ||
+				strings.Contains(msg, "decode") ||
+				strings.Contains(msg, "unexpected eof") {
+				return ErrArchivePasswordInvalid
+			}
+		}
 		return fmt.Errorf("%w: %v", ErrInvalidRAR, err)
 	}
 }

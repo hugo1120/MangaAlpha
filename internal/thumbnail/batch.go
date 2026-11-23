@@ -99,6 +99,10 @@ func NewBatchManager(
 		started := time.Now()
 		page, err := archiveService.ReadPage(ctx, book, 1)
 		if err != nil {
+			if errors.Is(err, archive.ErrArchivePasswordRequired) || errors.Is(err, archive.ErrArchivePasswordInvalid) {
+				// Skip locked encrypted archives silently during background cover generation.
+				return false, nil
+			}
 			return false, err
 		}
 		if err := service.Generate(ctx, book, page.Data); err != nil {

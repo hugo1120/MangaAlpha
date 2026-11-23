@@ -93,6 +93,21 @@ function writeJSONStorage(key: string, value: unknown): void {
     }
 }
 
+export interface ArchivePasswordPromptRequest {
+    bookId: string;
+    bookName: string;
+    seriesId: string;
+    seriesTitle: string;
+    invalid: boolean;
+}
+
+type ArchivePasswordPromptHandler = (req: ArchivePasswordPromptRequest) => Promise<boolean>;
+
+interface KomgaAPIError extends Error {
+    code?: string;
+    status?: number;
+}
+
 async function komgaFetch<T>(path: string, init?: RequestInit): Promise<T> {
     const headers = new Headers(init?.headers ?? {});
     headers.set('X-FK115-UI', '1');
@@ -114,13 +129,18 @@ async function komgaFetch<T>(path: string, init?: RequestInit): Promise<T> {
     }
     if (!resp.ok) {
         let msg = `HTTP ${resp.status}`;
+        let code: string | undefined;
         try {
             const errJson = await resp.json();
             if (errJson?.message) msg = errJson.message;
+            if (typeof errJson?.code === 'string') code = errJson.code;
         } catch {
             // ignore
         }
-        throw new Error(msg);
+        const err = new Error(msg) as KomgaAPIError;
+        err.code = code;
+        err.status = resp.status;
+        throw err;
     }
     return (await resp.json()) as T;
 }
@@ -145,6 +165,22 @@ class KomgaBridgeImpl {
     private pendingProgressPayloads = new Map<string, { page: number; completed: boolean }>();
 
     private clientSettingsLoaded = false;
+
+    private passwordPromptHandler: ArchivePasswordPromptHandler | null = null;
+
+    public setPasswordPromptHandler(handler: ArchivePasswordPromptHandler | null): void {
+        this.passwordPromptHandler = handler;
+    }
+
+    public async unlockBookArchive(bookId: string, password: string): Promise<void> {
+        await komgaFetch<{ ok: boolean; pageCount: number }>(
+            `/admin/api/books/${encodeURIComponent(bookId)}/unlock`,
+            {
+                method: 'POST',
+                body: JSON.stringify({ password }),
+            },
+        );
+    }
 
     constructor() {
         const saved = readJSONStorage<Record<string, number>>(SERIES_MAP_KEY, {});
@@ -669,15 +705,40 @@ class KomgaBridgeImpl {
                 if (!chap) {
                     throw new Error(`未找到章节缓存 (#${chapterId})`);
                 }
-                const komgaPages = await komgaFetch<{ number: number }[]>(
-                    `/api/v1/books/${encodeURIComponent(chap.bookId)}/pages`,
-                );
+                const bundle = this.bundles.get(chap.mangaId);
+                let komgaPages: { number: number }[] | null = null;
+                while (komgaPages === null) {
+                    try {
+                        komgaPages = await komgaFetch<{ number: number }[]>(
+                            `/api/v1/books/${encodeURIComponent(chap.bookId)}/pages`,
+                        );
+                    } catch (err) {
+                        const apiErr = err as KomgaAPIError;
+                        const isPwErr =
+                            apiErr?.code === 'ARCHIVE_PASSWORD_REQUIRED' ||
+                            apiErr?.code === 'ARCHIVE_PASSWORD_INVALID';
+                        if (!isPwErr || !this.passwordPromptHandler) {
+                            throw err;
+                        }
+                        const seriesTitle =
+                            bundle?.series.metadata?.title?.trim() || bundle?.series.name || '';
+                        const unlocked = await this.passwordPromptHandler({
+                            bookId: chap.bookId,
+                            bookName: chap.name,
+                            seriesId: chap.seriesId,
+                            seriesTitle,
+                            invalid: apiErr.code === 'ARCHIVE_PASSWORD_INVALID',
+                        });
+                        if (!unlocked) {
+                            throw new Error('已取消输入压缩包密码');
+                        }
+                    }
+                }
                 const count = komgaPages.length;
                 chap.pageCount = count;
                 const pages = komgaPages.map(
                     (p) => `/api/v1/books/${encodeURIComponent(chap.bookId)}/pages/${p.number}`,
                 );
-                const bundle = this.bundles.get(chap.mangaId);
                 return {
                     fetchChapterPages: {
                         __typename: 'FetchChapterPagesPayload',

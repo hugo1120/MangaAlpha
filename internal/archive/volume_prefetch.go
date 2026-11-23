@@ -173,7 +173,7 @@ func volumePrefetchErrorReason(err error) string {
 		return "unsupported_archive_feature"
 	case errors.Is(err, ErrSolidRAR):
 		return "solid_rar"
-	case errors.Is(err, ErrEncryptedRAR):
+	case errors.Is(err, ErrEncryptedRAR), errors.Is(err, ErrArchivePasswordRequired), errors.Is(err, ErrArchivePasswordInvalid):
 		return "encrypted_archive"
 	case errors.Is(err, ErrMultiVolumeRAR):
 		return "multi_volume_rar"

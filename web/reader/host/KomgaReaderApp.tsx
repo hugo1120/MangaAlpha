@@ -10,10 +10,19 @@
 import CssBaseline from '@mui/material/CssBaseline';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
+import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
 import Stack from '@mui/material/Stack';
+import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
+import VisibilityIcon from '@mui/icons-material/Visibility';
+import VisibilityOffIcon from '@mui/icons-material/VisibilityOff';
 import type { PropsWithChildren } from 'react';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { AwaitableComponent } from 'awaitable-component';
 import { loadable } from 'react-lazily/loadable';
@@ -24,7 +33,7 @@ import { ReactRouter } from '@/lib/react-router/ReactRouter.ts';
 import { requestManager } from '@/lib/requests/RequestManager.ts';
 import { useNavBarContext } from '@/features/navigation-bar/NavbarContext.tsx';
 import { ReaderResumeMode } from '@/features/reader/Reader.types.ts';
-import { KomgaHostBridge } from '@/host/KomgaHostBridge.ts';
+import { KomgaHostBridge, type ArchivePasswordPromptRequest } from '@/host/KomgaHostBridge.ts';
 
 const blackLoadingFallback = {
     fallback: (
@@ -156,9 +165,141 @@ const ExitToHome: React.FC = () => {
     return null;
 };
 
+const ArchivePasswordPromptHost: React.FC = () => {
+    const [req, setReq] = useState<ArchivePasswordPromptRequest | null>(null);
+    const [password, setPassword] = useState('');
+    const [showPassword, setShowPassword] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
+    const [errorText, setErrorText] = useState('');
+    const resolverRef = useRef<((unlocked: boolean) => void) | null>(null);
+
+    useEffect(() => {
+        KomgaHostBridge.setPasswordPromptHandler(
+            (promptReq) =>
+                new Promise<boolean>((resolve) => {
+                    resolverRef.current = resolve;
+                    setPassword('');
+                    setShowPassword(false);
+                    setSubmitting(false);
+                    setErrorText(promptReq.invalid ? '之前保存的密码未能解压此文件，请重新输入密码。' : '');
+                    setReq(promptReq);
+                }),
+        );
+        return () => {
+            KomgaHostBridge.setPasswordPromptHandler(null);
+        };
+    }, []);
+
+    const handleCancel = () => {
+        if (submitting) return;
+        const resolve = resolverRef.current;
+        const currentReq = req;
+        resolverRef.current = null;
+        setReq(null);
+        resolve?.(false);
+        if (currentReq?.seriesId) {
+            window.location.assign(`/series/${encodeURIComponent(currentReq.seriesId)}`);
+        }
+    };
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        if (!req || submitting) return;
+        if (!password) {
+            setErrorText('请输入解压密码');
+            return;
+        }
+        setSubmitting(true);
+        setErrorText('');
+        try {
+            await KomgaHostBridge.unlockBookArchive(req.bookId, password);
+            const resolve = resolverRef.current;
+            resolverRef.current = null;
+            setReq(null);
+            resolve?.(true);
+        } catch (err) {
+            setErrorText(err instanceof Error ? err.message : '解压密码验证失败，请重试');
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    return (
+        <Dialog
+            open={Boolean(req)}
+            onClose={handleCancel}
+            fullWidth
+            maxWidth="xs"
+            slotProps={{
+                paper: {
+                    sx: {
+                        bgcolor: '#14171f',
+                        color: '#f8fafc',
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        borderRadius: 2.5,
+                    },
+                },
+            }}
+        >
+            <form onSubmit={handleSubmit}>
+                <DialogTitle sx={{ pb: 1, fontSize: '1.05rem', fontWeight: 600 }}>
+                    压缩包已加密，请输入解压密码
+                </DialogTitle>
+                <DialogContent sx={{ pt: '6px !important' }}>
+                    {req && (
+                        <Typography variant="body2" sx={{ color: 'rgba(226,232,240,0.8)', mb: 1.5, wordBreak: 'break-all' }}>
+                            {req.seriesTitle ? `${req.seriesTitle} · ` : ''}
+                            {req.bookName}
+                        </Typography>
+                    )}
+                    <TextField
+                        autoFocus
+                        fullWidth
+                        size="small"
+                        type={showPassword ? 'text' : 'password'}
+                        label="解压密码"
+                        placeholder="输入此压缩包的解压密码"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        disabled={submitting}
+                        error={Boolean(errorText)}
+                        helperText={errorText || '验证通过后将自动记住并与该漫画绑定，同文件夹其它加密文件会自动尝试复用。'}
+                        slotProps={{
+                            input: {
+                                endAdornment: (
+                                    <InputAdornment position="end">
+                                        <IconButton
+                                            size="small"
+                                            edge="end"
+                                            aria-label={showPassword ? '隐藏密码' : '显示密码'}
+                                            onClick={() => setShowPassword((v) => !v)}
+                                            sx={{ color: 'rgba(226,232,240,0.75)' }}
+                                        >
+                                            {showPassword ? <VisibilityOffIcon fontSize="small" /> : <VisibilityIcon fontSize="small" />}
+                                        </IconButton>
+                                    </InputAdornment>
+                                ),
+                            },
+                        }}
+                    />
+                </DialogContent>
+                <DialogActions sx={{ px: 3, pb: 2 }}>
+                    <Button onClick={handleCancel} disabled={submitting} color="inherit">
+                        返回书架
+                    </Button>
+                    <Button type="submit" variant="contained" disabled={submitting}>
+                        {submitting ? '正在验证…' : '解锁并记住'}
+                    </Button>
+                </DialogActions>
+            </form>
+        </Dialog>
+    );
+};
+
 export const App: React.FC = () => (
     <AppContext>
         <AwaitableComponent.Root />
+        <ArchivePasswordPromptHost />
         <ReactRouterSetter />
         <CssBaseline enableColorScheme />
         <InitializeGuard>

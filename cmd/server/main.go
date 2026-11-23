@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -20,6 +19,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/app"
 	"github.com/xJogger/fake-komga-115/internal/buildinfo"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
+	"github.com/xJogger/fake-komga-115/internal/httpserver"
 )
 
 func main() {
@@ -33,6 +33,11 @@ func main() {
 			envBool("FK115_OPEN_BROWSER", runtime.GOOS == "windows"),
 			"open the web bookshelf after the server starts",
 		)
+		noTray = flag.Bool(
+			"no-tray",
+			envBool("FK115_NO_TRAY", false),
+			"disable the Windows system tray icon and run headless",
+		)
 		trustedProxies = flag.String(
 			"trusted-proxies",
 			envOr("FK115_TRUSTED_PROXIES", ""),
@@ -42,13 +47,21 @@ func main() {
 	)
 	flag.Parse()
 	if *showVersion {
-		fmt.Println(buildinfo.Version)
+		printVersionForPlatform(buildinfo.Version)
 		return
 	}
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	trayMode := isWindowsTrayEnabled(*noTray)
+	logger, logPath, closeLogger := newServerLogger(*dataDir, trayMode)
+	defer closeLogger()
+
+	parentCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	shelfURL := localAdminURL(*host, *port)
+	adminURL := strings.TrimRight(shelfURL, "/") + "/admin"
 
 	a, err := app.New(ctx, app.Options{
 		Host:                 *host,
@@ -62,6 +75,9 @@ func main() {
 	if err != nil {
 		diagnostics.WriteStartupFailure(*dataDir, "server", "startup", err)
 		logger.Error("initialize application", "error", err)
+		if trayMode {
+			showStartupErrorDialog(err, *port, shelfURL, logPath)
+		}
 		os.Exit(1)
 	}
 	defer a.Close()
@@ -71,31 +87,52 @@ func main() {
 		diagnostics.WriteStartupFailure(*dataDir, "server", "startup", err)
 		logger.Error("start server", "error", err)
 		_ = a.Close()
+		if trayMode {
+			showStartupErrorDialog(err, *port, shelfURL, logPath)
+		}
 		os.Exit(1)
 	}
 	if *openBrowser {
-		adminURL := localAdminURL(*host, *port)
 		go func() {
 			time.Sleep(250 * time.Millisecond)
-			if err := openURL(runtime.GOOS, adminURL); err != nil {
-				logger.Warn("open browser", "error", err, "url", adminURL)
+			if err := openURL(runtime.GOOS, shelfURL); err != nil {
+				logger.Warn("open browser", "error", err, "url", shelfURL)
 			}
 		}()
 	}
 
-	select {
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := a.Shutdown(shutdownCtx); err != nil {
-			logger.Error("shutdown", "error", err)
+	var runErr error
+	if trayMode {
+		runErr = runPlatformLoop(ctx, cancel, errCh, trayConfig{
+			Version:  buildinfo.Version,
+			Port:     *port,
+			ShelfURL: shelfURL,
+			AdminURL: adminURL,
+			DataDir:  *dataDir,
+			LogPath:  logPath,
+			IconPNG:  httpserver.AppIconPNG(),
+			Logger:   logger,
+		})
+	} else {
+		select {
+		case <-ctx.Done():
+		case runErr = <-errCh:
 		}
-	case err := <-errCh:
-		if err != nil {
-			logger.Error("server stopped", "error", err)
-			_ = a.Close()
-			os.Exit(1)
+	}
+
+	if runErr != nil {
+		logger.Error("server stopped", "error", runErr)
+		_ = a.Close()
+		if trayMode {
+			showStartupErrorDialog(runErr, *port, shelfURL, logPath)
 		}
+		os.Exit(1)
+	}
+
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+	if err := a.Shutdown(shutdownCtx); err != nil {
+		logger.Error("shutdown", "error", err)
 	}
 }
 
@@ -160,6 +197,7 @@ func openURL(goos, url string) error {
 		return err
 	}
 	command := exec.Command(name, args...)
+	configureCommandForPlatform(command)
 	if err := command.Start(); err != nil {
 		return err
 	}

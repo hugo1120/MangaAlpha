@@ -251,6 +251,16 @@ func (s *Server) serveFavicon(w http.ResponseWriter, _ *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// AppIconPNG returns the embedded MangaAlpha application icon PNG bytes (used by
+// the Windows system tray to avoid duplicating binary icon assets).
+func AppIconPNG() []byte {
+	data, err := staticFiles.ReadFile("static/ui/mangaalpha-icon.png")
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
 func (s *Server) serveCollectionPageOrSPA(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "collectionID")
 	if _, err := s.store.CollectionByID(r.Context(), id); err != nil {
@@ -582,8 +592,12 @@ func (s *Server) archiveError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnprocessableEntity, "INVALID_ZIP", err.Error())
 	case errors.Is(err, archive.ErrSolidRAR):
 		writeError(w, http.StatusUnprocessableEntity, "SOLID_RAR_NOT_SUPPORTED", err.Error())
+	case errors.Is(err, archive.ErrArchivePasswordRequired):
+		writeError(w, http.StatusUnprocessableEntity, "ARCHIVE_PASSWORD_REQUIRED", "此压缩包已加密，请输入解压密码。")
+	case errors.Is(err, archive.ErrArchivePasswordInvalid):
+		writeError(w, http.StatusUnprocessableEntity, "ARCHIVE_PASSWORD_INVALID", "解压密码不正确，请重新输入。")
 	case errors.Is(err, archive.ErrEncryptedRAR):
-		writeError(w, http.StatusUnprocessableEntity, "ENCRYPTED_RAR_NOT_SUPPORTED", err.Error())
+		writeError(w, http.StatusUnprocessableEntity, "ARCHIVE_PASSWORD_REQUIRED", "此压缩包已加密，请输入解压密码。")
 	case errors.Is(err, archive.ErrMultiVolumeRAR):
 		writeError(w, http.StatusUnprocessableEntity, "MULTI_VOLUME_RAR_NOT_SUPPORTED", err.Error())
 	case errors.Is(err, archive.ErrInvalidRAR), errors.Is(err, archive.ErrUnsupportedRAR):

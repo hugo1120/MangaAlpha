@@ -188,6 +188,52 @@ func (m *Manager) EnforceLimit(ctx context.Context, cacheType string, maxBytes i
 	return m.enforceLimit(ctx, cacheType, maxBytes)
 }
 
+// DeleteBookPages removes cached decrypted/decompressed page entries belonging to
+// the specified book IDs (matching cache_key prefix "<bookID>:").
+func (m *Manager) DeleteBookPages(ctx context.Context, bookIDs []string) error {
+	if m == nil || len(bookIDs) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(bookIDs))
+	for _, bookID := range bookIDs {
+		if bookID == "" || seen[bookID] {
+			continue
+		}
+		seen[bookID] = true
+		prefix := bookID + ":"
+		rows, err := m.store.DB().QueryContext(ctx, `
+SELECT cache_key, path FROM cache_entries
+WHERE cache_type=? AND cache_key >= ? AND cache_key < ?`,
+			TypePage, prefix, bookID+";")
+		if err != nil {
+			return err
+		}
+		type item struct{ key, path string }
+		var victims []item
+		for rows.Next() {
+			var v item
+			if err := rows.Scan(&v.key, &v.path); err != nil {
+				rows.Close()
+				return err
+			}
+			victims = append(victims, v)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+		for _, v := range victims {
+			_ = os.Remove(v.path)
+			if _, err := m.store.DB().ExecContext(ctx,
+				`DELETE FROM cache_entries WHERE cache_key=? AND cache_type=?`, v.key, TypePage); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (m *Manager) path(cacheType, key string) string {
 	sum := sha256.Sum256([]byte(cacheType + "\x00" + key))
 	name := hex.EncodeToString(sum[:])

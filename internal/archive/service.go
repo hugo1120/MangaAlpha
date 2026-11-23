@@ -35,6 +35,10 @@ type PageEntry struct {
 	MimeType         string `json:"mimeType"`
 	DataOffset       int64  `json:"dataOffset,omitempty"`
 	CRC32            uint32 `json:"crc32,omitempty"`
+	Encrypted        bool   `json:"encrypted,omitempty"`
+	EncScheme        string `json:"encScheme,omitempty"`
+	EncCheckByte     byte   `json:"encCheckByte,omitempty"`
+	EncAEVersion     uint16 `json:"encAEVersion,omitempty"`
 }
 
 type PageData struct {
@@ -97,7 +101,7 @@ func shouldFallbackReplica(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, sql.ErrNoRows) || isArchivePasswordError(err) {
 		return false
 	}
 	return true
@@ -274,6 +278,7 @@ func (s *Service) LoadStatus(bookID string, pageNumber int) LoadProgress {
 }
 
 func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntry, error) {
+	ctx = withLogicalBookContext(ctx, book)
 	candidates, isUnion := s.resolveCandidates(ctx, book)
 	ctx, finish := s.loadTracker.begin(ctx, book.ID, 0, "indexing", "正在读取归档目录索引…", book.Size)
 	defer finish()
@@ -301,11 +306,53 @@ func (s *Service) ListPages(ctx context.Context, book database.Book) ([]PageEntr
 	return nil, lastErr
 }
 
+// VerifyAndBindBookPassword tests password against the real encrypted archive
+// (verifying decryption of its first image page) and persists the password binding
+// on success. Returns the page count or ErrArchivePasswordInvalid.
+func (s *Service) VerifyAndBindBookPassword(ctx context.Context, book database.Book, password string) (int, error) {
+	if password == "" {
+		return 0, ErrArchivePasswordRequired
+	}
+	verifyCtx := WithExplicitArchivePassword(withLogicalBookContext(ctx, book), password)
+	candidates, isUnion := s.resolveCandidates(ctx, book)
+	var lastErr error
+	for idx, cand := range candidates {
+		started := time.Now()
+		pages, err := s.listPagesDirect(verifyCtx, cand)
+		if err == nil {
+			if len(pages) > 0 {
+				if _, pErr := s.readPageDirect(verifyCtx, cand, 1); pErr != nil {
+					return 0, pErr
+				}
+			}
+			var extra []database.Book
+			if isUnion && cand.ID != "" && cand.ID != book.ID {
+				extra = append(extra, cand)
+			}
+			if s.store != nil {
+				if err := s.store.SaveArchivePasswordBinding(ctx, book, password, extra...); err != nil {
+					return 0, err
+				}
+			}
+			if isUnion {
+				s.syncUnionIndexSummary(ctx, book, len(pages), time.Since(started))
+			}
+			return len(pages), nil
+		}
+		lastErr = err
+		if !shouldFallbackReplica(err) || idx+1 >= len(candidates) {
+			return 0, err
+		}
+	}
+	return 0, lastErr
+}
+
 func (s *Service) ReadPage(
 	ctx context.Context,
 	book database.Book,
 	pageNumber int,
 ) (PageData, error) {
+	ctx = withLogicalBookContext(ctx, book)
 	candidates, isUnion := s.resolveCandidates(ctx, book)
 	ctx, finish := s.loadTracker.begin(ctx, book.ID, pageNumber, "downloading", "正在准备远程页面数据…", 0)
 	defer finish()

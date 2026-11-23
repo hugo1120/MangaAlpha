@@ -78,7 +78,7 @@
 
 ## 尚不支持
 
-- 固实（Solid）RAR、加密 RAR、分卷 RAR、7z、加密 ZIP
+- 固实（Solid）RAR、分卷 RAR、7z（非固实加密 ZIP / RAR4 / RAR5 已支持在网页阅读器输入并记住解压密码，同文件夹自动复用并在后台集中查看或清空）
 - 对远程网盘或本地磁盘上的原始文件执行上传、删除、移动或重命名（书库始终只读访问你的漫画源文件）
 - 多用户分权体系（当前采用单管理员安全模型）
 - 上游 `downurl` 或 WebDAV 服务端不支持 HTTP `Range` 时静默整包下载（会明确返回 `501 RANGE_NOT_SUPPORTED`）
@@ -92,7 +92,7 @@
 ### 方式一：Windows 下载即用
 
 1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `_windows_amd64.zip` 压缩包（例如 `mangaalpha_v2.8.0_windows_amd64.zip`）并解压。
-2. 双击运行 `mangaalpha.exe`，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置。
+2. 双击运行 `mangaalpha.exe`（无控制台黑窗，自动常驻系统托盘）后，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置；点击托盘小鱼图标可随时打开书架，右键菜单可打开管理后台、数据目录、运行日志（`mangaalpha.log`）或安全退出服务。如需以无托盘命令行/Windows 服务模式运行，可附加 `--no-tray` 参数。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`（保持兼容，原地升级无需迁移目录）。
 
 ### 方式二：Linux / macOS 二进制运行
@@ -149,6 +149,7 @@ make build
 | `--port` | `FK115_PORT` | `25600` | HTTP 监听端口 |
 | `--data-dir` | `FK115_DATA_DIR` | Windows: `%LOCALAPPDATA%\fake-komga-115\data`<br>其他平台: `./data` | SQLite 数据库、Bangumi 索引、封面与缓存目录 |
 | `--open-browser` | `FK115_OPEN_BROWSER` | Windows: `true` / 其他: `false` | 启动后是否自动打开浏览器 |
+| `--no-tray` | `FK115_NO_TRAY` | `false` | 仅 Windows 生效：禁用系统托盘图标，以无界面后台模式运行 |
 | `--version` | — | — | 打印版本号并退出 |
 
 ---

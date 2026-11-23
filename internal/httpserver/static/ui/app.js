@@ -4235,10 +4235,13 @@
   // --- Admin Security & API Keys Tab ---
 
   async function renderAdminSecurity(body) {
-    const [keys, sessions] = await Promise.all([
+    const [keys, sessions, apwData] = await Promise.all([
       api('/admin/api/auth/api-keys'),
       api('/admin/api/auth/sessions'),
+      api('/admin/api/archive-passwords').catch(() => ({ groups: [], totalPasswords: 0, totalBindings: 0 })),
     ]);
+    const apwGroups = (apwData && Array.isArray(apwData.groups)) ? apwData.groups : [];
+    const apwTotalBindings = Number(apwData && apwData.totalBindings) || 0;
     const presetKey = (new URLSearchParams(location.search).get('presetKey') || '').trim();
 
     body.innerHTML = `
@@ -4282,6 +4285,43 @@
               </tbody>
             </table></div>`}
         </div>
+      </div>
+
+      <div class="card">
+        <div class="section-head" style="margin-bottom:8px">
+          <h3 style="margin:0">已记住的压缩包密码（${apwGroups.length} 组 · ${apwTotalBindings} 本）</h3>
+          ${apwGroups.length > 0 ? `<button type="button" class="btn btn-sm btn-danger" id="apw-clear-all">全部清空</button>` : ''}
+        </div>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">在网页阅读器打开加密 ZIP / RAR 并输入正确密码后会自动记住并绑定对应漫画，同文件夹其它文件也会自动尝试复用。删除或清空密码后将同步清理对应解密页缓存，下次打开会重新提示输入密码。</p>
+        ${apwGroups.length === 0 ? `<div class="empty-box" style="padding:18px">暂未记住任何压缩包密码。</div>` : `
+          <div style="display:grid;gap:12px">
+            ${apwGroups.map((g, idx) => `
+              <div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--bg-soft, var(--bg))">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span class="badge">密码 #${idx + 1}</span>
+                    <code data-apw-text="${esc(g.id)}" data-apw-shown="0" style="font-size:13px;padding:2px 8px;border-radius:6px;background:var(--bg-input)">••••••••</code>
+                    <button type="button" class="btn btn-sm btn-ghost" data-apw-toggle="${esc(g.id)}">显示</button>
+                    <span style="font-size:12px;color:var(--text-muted)">绑定 ${(g.bindings || []).length} 本 · 更新于 ${fmtTime(g.updatedAt)}</span>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-danger" data-apw-del-group="${esc(g.id)}">删除此密码</button>
+                </div>
+                ${(g.bindings || []).length === 0 ? `<div style="font-size:12px;color:var(--text-muted)">暂无可见绑定条目</div>` : `
+                  <div class="table-wrap"><table class="data-table">
+                    <thead><tr><th>作品</th><th>卷名</th><th>书库</th><th>绑定时间</th><th>操作</th></tr></thead>
+                    <tbody>
+                      ${(g.bindings || []).map((b) => `
+                        <tr>
+                          <td>${b.seriesId ? `<a href="/series/${encodeURIComponent(b.seriesId)}" style="color:var(--accent)">${esc(b.seriesTitle || b.seriesId)}</a>` : esc(b.seriesTitle || '—')}</td>
+                          <td style="font-size:12.5px">${esc(b.bookName)}</td>
+                          <td style="font-size:12px;color:var(--text-secondary)">${esc(b.libraryName || '—')}</td>
+                          <td style="font-size:12px;color:var(--text-muted)">${fmtTime(b.updatedAt)}</td>
+                          <td><button type="button" class="btn btn-sm btn-ghost" data-apw-del-binding="${esc(b.bookId)}">解绑</button></td>
+                        </tr>`).join('')}
+                    </tbody>
+                  </table></div>`}
+              </div>`).join('')}
+          </div>`}
       </div>
 
       <div class="card">
@@ -4346,6 +4386,58 @@
         try {
           await api(`/admin/api/auth/api-keys/${encodeURIComponent(btn.getAttribute('data-del-ak'))}`, { method: 'DELETE' });
           toast('API Key 已吊销');
+          renderAdminSecurity(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+
+    const apwPwMap = new Map(apwGroups.map((g) => [g.id, g.password || '']));
+    body.querySelectorAll('button[data-apw-toggle]').forEach((btn) => {
+      btn.onclick = () => {
+        const gid = btn.getAttribute('data-apw-toggle');
+        const codeEl = body.querySelector(`code[data-apw-text="${CSS.escape(gid)}"]`);
+        if (!codeEl) return;
+        const shown = codeEl.getAttribute('data-apw-shown') === '1';
+        if (shown) {
+          codeEl.textContent = '••••••••';
+          codeEl.setAttribute('data-apw-shown', '0');
+          btn.textContent = '显示';
+        } else {
+          codeEl.textContent = apwPwMap.get(gid) || '';
+          codeEl.setAttribute('data-apw-shown', '1');
+          btn.textContent = '隐藏';
+        }
+      };
+    });
+
+    const apwClearBtn = document.getElementById('apw-clear-all');
+    if (apwClearBtn) {
+      apwClearBtn.onclick = async () => {
+        if (!confirm('确认清空全部已记住的压缩包密码？对应加密卷缓存也将同步清理，下次打开需重新输入密码。')) return;
+        try {
+          await api('/admin/api/archive-passwords', { method: 'DELETE' });
+          toast('已清空全部压缩包密码');
+          renderAdminSecurity(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+
+    body.querySelectorAll('button[data-apw-del-group]').forEach((btn) => {
+      btn.onclick = async () => {
+        if (!confirm('确认删除此条已记住的密码并解除名下全部漫画绑定？')) return;
+        try {
+          await api(`/admin/api/archive-passwords/${encodeURIComponent(btn.getAttribute('data-apw-del-group'))}`, { method: 'DELETE' });
+          toast('压缩包密码已删除');
+          renderAdminSecurity(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+
+    body.querySelectorAll('button[data-apw-del-binding]').forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          await api(`/admin/api/archive-passwords/bindings/${encodeURIComponent(btn.getAttribute('data-apw-del-binding'))}`, { method: 'DELETE' });
+          toast('已解除该卷密码绑定');
           renderAdminSecurity(body);
         } catch (err) { toast(err.message, 'error'); }
       };

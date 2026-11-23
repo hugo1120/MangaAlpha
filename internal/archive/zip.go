@@ -60,6 +60,9 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	} else if ok {
 		var pages []PageEntry
 		if json.Unmarshal([]byte(raw), &pages) == nil {
+			if err := z.ensureEncryptedPagesUnlocked(ctx, book, pages); err != nil {
+				return nil, err
+			}
 			return pages, nil
 		}
 	}
@@ -106,8 +109,9 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 		if mimeType == "" {
 			continue
 		}
-		if file.Flags&1 != 0 || (file.Method != zip.Store && file.Method != zip.Deflate) {
-			return nil, ErrUnsupportedZIP
+		encrypted, scheme, realMethod, checkByte, aeVer, cErr := inspectZIPEntryCrypto(file)
+		if cErr != nil {
+			return nil, cErr
 		}
 		offset, err := file.DataOffset()
 		if err != nil {
@@ -118,10 +122,14 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 			Format:           formatZIP,
 			CompressedSize:   file.CompressedSize64,
 			UncompressedSize: file.UncompressedSize64,
-			Method:           file.Method,
+			Method:           realMethod,
 			MimeType:         mimeType,
 			DataOffset:       offset,
 			CRC32:            file.CRC32,
+			Encrypted:        encrypted,
+			EncScheme:        scheme,
+			EncCheckByte:     checkByte,
+			EncAEVersion:     aeVer,
 		})
 		if len(pages)%10 == 0 {
 			reportLoadPagesFound(ctx, len(pages))
@@ -140,6 +148,11 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	for index := range pages {
 		pages[index].Number = index + 1
 	}
+
+	if err := z.verifyEncryptedPagesWithReader(ctx, book, pages, readerAt); err != nil {
+		return nil, err
+	}
+
 	encoded, err := json.Marshal(pages)
 	if err != nil {
 		return nil, err
@@ -162,6 +175,98 @@ func (z *ZIPService) ListPages(ctx context.Context, book database.Book) ([]PageE
 	return pages, nil
 }
 
+func firstEncryptedPageEntry(pages []PageEntry) (PageEntry, bool) {
+	for _, p := range pages {
+		if p.Encrypted {
+			return p, true
+		}
+	}
+	return PageEntry{}, false
+}
+
+func (z *ZIPService) ensureEncryptedPagesUnlocked(ctx context.Context, book database.Book, pages []PageEntry) error {
+	sample, hasEnc := firstEncryptedPageEntry(pages)
+	if !hasEnc {
+		return nil
+	}
+	cands, hasExplicit, err := resolveArchivePasswordCandidates(ctx, z.store, book)
+	if err != nil {
+		return err
+	}
+	if len(cands) == 0 {
+		if hasExplicit {
+			return ErrArchivePasswordInvalid
+		}
+		return ErrArchivePasswordRequired
+	}
+	// Fast path: already has a direct password binding and not running explicit verification.
+	if !hasExplicit && cands[0].Source == "direct" {
+		return nil
+	}
+	maxPageSize := z.maxPageSize(ctx)
+	hasDirect := false
+	for _, cand := range cands {
+		if cand.Source == "direct" {
+			hasDirect = true
+		}
+		if _, err := z.readEntryWithPassword(ctx, book, sample, maxPageSize, cand.Password); err == nil {
+			maybeAutoBindArchivePassword(ctx, z.store, book, cand)
+			return nil
+		}
+	}
+	if hasExplicit || hasDirect {
+		return ErrArchivePasswordInvalid
+	}
+	return ErrArchivePasswordRequired
+}
+
+func (z *ZIPService) verifyEncryptedPagesWithReader(ctx context.Context, book database.Book, pages []PageEntry, readerAt ReaderAtCloser) error {
+	sample, hasEnc := firstEncryptedPageEntry(pages)
+	if !hasEnc {
+		return nil
+	}
+	cands, hasExplicit, err := resolveArchivePasswordCandidates(ctx, z.store, book)
+	if err != nil {
+		return err
+	}
+	if len(cands) == 0 {
+		if hasExplicit {
+			return ErrArchivePasswordInvalid
+		}
+		return ErrArchivePasswordRequired
+	}
+	maxPageSize := z.maxPageSize(ctx)
+	if sample.UncompressedSize > uint64(maxPageSize) || sample.CompressedSize > uint64(maxPageSize) {
+		return ErrPageTooLarge
+	}
+	compressed := make([]byte, int(sample.CompressedSize))
+	if _, err := readerAt.ReadAt(compressed, sample.DataOffset); err != nil {
+		return err
+	}
+	hasDirect := false
+	for _, cand := range cands {
+		if cand.Source == "direct" {
+			hasDirect = true
+		}
+		if _, err := decodeZIPEntryBytes(compressed, sample, maxPageSize, cand.Password); err == nil {
+			maybeAutoBindArchivePassword(ctx, z.store, book, cand)
+			return nil
+		}
+	}
+	if hasExplicit || hasDirect {
+		return ErrArchivePasswordInvalid
+	}
+	return ErrArchivePasswordRequired
+}
+
+func (z *ZIPService) maxPageSize(ctx context.Context) int64 {
+	maxPageSize := z.store.Int64Setting(ctx, "max_page_size", 100<<20)
+	if maxPageSize <= 0 {
+		maxPageSize = 100 << 20
+	}
+	return maxPageSize
+}
+
 func (z *ZIPService) ReadPage(ctx context.Context, book database.Book, pageNumber int) (PageData, error) {
 	pages, err := z.ListPages(ctx, book)
 	if err != nil {
@@ -171,26 +276,63 @@ func (z *ZIPService) ReadPage(ctx context.Context, book database.Book, pageNumbe
 		return PageData{}, sql.ErrNoRows
 	}
 	entry := pages[pageNumber-1]
-	maxPageSize := z.store.Int64Setting(ctx, "max_page_size", 100<<20)
-	if maxPageSize <= 0 {
-		maxPageSize = 100 << 20
-	}
+	maxPageSize := z.maxPageSize(ctx)
 	if entry.UncompressedSize > uint64(maxPageSize) ||
 		entry.CompressedSize > uint64(maxPageSize) {
 		return PageData{}, ErrPageTooLarge
 	}
+	_, hasExplicit := explicitArchivePasswordFromContext(ctx)
+	var cands []database.ArchivePasswordCandidate
+	if entry.Encrypted {
+		var cErr error
+		cands, hasExplicit, cErr = resolveArchivePasswordCandidates(ctx, z.store, book)
+		if cErr != nil {
+			return PageData{}, cErr
+		}
+		if len(cands) == 0 {
+			if hasExplicit {
+				return PageData{}, ErrArchivePasswordInvalid
+			}
+			return PageData{}, ErrArchivePasswordRequired
+		}
+	}
+	loader := func(loadCtx context.Context) ([]byte, error) {
+		if !entry.Encrypted {
+			return z.readEntryWithPassword(loadCtx, book, entry, maxPageSize, "")
+		}
+		hasDirect := false
+		for _, cand := range cands {
+			if cand.Source == "direct" {
+				hasDirect = true
+			}
+			data, err := z.readEntryWithPassword(loadCtx, book, entry, maxPageSize, cand.Password)
+			if err == nil {
+				maybeAutoBindArchivePassword(loadCtx, z.store, book, cand)
+				return data, nil
+			}
+			if !isArchivePasswordError(err) {
+				return nil, err
+			}
+		}
+		if hasExplicit || hasDirect {
+			return nil, ErrArchivePasswordInvalid
+		}
+		return nil, ErrArchivePasswordRequired
+	}
+	if hasExplicit {
+		data, err := loader(ctx)
+		return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
+	}
 	pageKey := fmt.Sprintf("%s:%s:%d", book.ID, bookVersion(book), pageNumber)
-	if entry.Method == zip.Deflate {
+	if entry.Method == zip.Deflate || entry.Encrypted {
 		data, _, err := z.cache.GetOrLoad(
 			ctx, cache.TypePage, pageKey,
 			z.store.Int64Setting(ctx, "page_cache_max_bytes", 5<<30),
-			func(loadCtx context.Context) ([]byte, error) {
-				return z.readEntry(loadCtx, book, entry, maxPageSize)
-			},
+			loader,
 		)
 		return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 	}
-	data, err := z.readEntry(ctx, book, entry, maxPageSize)
+	data, err := loader(ctx)
 	return PageData{Entry: entry, Data: data, TotalPages: len(pages)}, err
 }
 
@@ -209,11 +351,12 @@ func (z *ZIPService) Prefetch(book database.Book, afterPage, count int) {
 	}()
 }
 
-func (z *ZIPService) readEntry(
+func (z *ZIPService) readEntryWithPassword(
 	ctx context.Context,
 	book database.Book,
 	entry PageEntry,
 	maxPageSize int64,
+	password string,
 ) ([]byte, error) {
 	compressed := make([]byte, int(entry.CompressedSize))
 	reportLoadBytes(ctx, 0, int64(entry.CompressedSize))
@@ -227,16 +370,32 @@ func (z *ZIPService) readEntry(
 		return nil, err
 	}
 	reportLoadStage(ctx, "decompressing", "正在解压页面图像…")
+	return decodeZIPEntryBytes(compressed, entry, maxPageSize, password)
+}
+
+func decodeZIPEntryBytes(
+	compressed []byte,
+	entry PageEntry,
+	maxPageSize int64,
+	password string,
+) ([]byte, error) {
+	payload, err := decryptZIPEntryPayload(compressed, entry, password)
+	if err != nil {
+		return nil, err
+	}
 	var data []byte
 	switch entry.Method {
 	case zip.Store:
-		data = compressed
+		data = payload
 	case zip.Deflate:
-		reader := flate.NewReader(bytes.NewReader(compressed))
+		reader := flate.NewReader(bytes.NewReader(payload))
 		defer reader.Close()
 		var err error
 		data, err = io.ReadAll(io.LimitReader(reader, maxPageSize+1))
 		if err != nil {
+			if entry.Encrypted {
+				return nil, ErrArchivePasswordInvalid
+			}
 			return nil, err
 		}
 		if int64(len(data)) > maxPageSize {
@@ -245,7 +404,18 @@ func (z *ZIPService) readEntry(
 	default:
 		return nil, ErrUnsupportedZIP
 	}
-	if uint64(len(data)) != entry.UncompressedSize || crc32.ChecksumIEEE(data) != entry.CRC32 {
+	if uint64(len(data)) != entry.UncompressedSize {
+		if entry.Encrypted {
+			return nil, ErrArchivePasswordInvalid
+		}
+		return nil, fmt.Errorf("%w: page checksum or size mismatch", ErrInvalidZIP)
+	}
+	// WinZip AE-2 omits CRC-32 (sets it to 0) and relies on HMAC-SHA1-80 authentication above.
+	verifyCRC := !(entry.Encrypted && entry.EncAEVersion == 2 && entry.CRC32 == 0)
+	if verifyCRC && crc32.ChecksumIEEE(data) != entry.CRC32 {
+		if entry.Encrypted {
+			return nil, ErrArchivePasswordInvalid
+		}
 		return nil, fmt.Errorf("%w: page checksum or size mismatch", ErrInvalidZIP)
 	}
 	return data, nil

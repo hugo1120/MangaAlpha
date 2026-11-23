@@ -93,23 +93,47 @@ VALUES(?,?,?,?,?,?)`,
 }
 
 func TestRARUnsupportedVariants(t *testing.T) {
-	tests := []struct {
-		name    string
-		fixture string
-		want    error
-	}{
-		{"solid", "test_read_format_rar5_multiple_files_solid.rar", ErrSolidRAR},
-		{"encrypted", "test_read_format_rar5_encrypted.rar", ErrEncryptedRAR},
+	data := readRARFixture(t, "test_read_format_rar5_multiple_files_solid.rar")
+	service, book, _ := newRemoteRARTest(t, data)
+	_, err := service.ListPages(context.Background(), book)
+	if !errors.Is(err, ErrSolidRAR) {
+		t.Fatalf("error=%v want %v", err, ErrSolidRAR)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			data := readRARFixture(t, test.fixture)
-			service, book, _ := newRemoteRARTest(t, data)
-			_, err := service.ListPages(context.Background(), book)
-			if !errors.Is(err, test.want) {
-				t.Fatalf("error=%v want %v", err, test.want)
-			}
-		})
+}
+
+func TestRAR5EncryptedEntry(t *testing.T) {
+	data := readRARFixture(t, "test_read_format_rar5_encrypted.rar")
+	service, book, _ := newRemoteRARTest(t, data)
+	files, _, err := service.listFilesWithPassword(context.Background(), book, "")
+	if err != nil {
+		t.Fatalf("listFiles: %v", err)
+	}
+	if len(files) < 2 || !files[1].Encrypted {
+		t.Fatalf("expected encrypted entry at index 1, got %+v", files)
+	}
+	entry := PageEntry{
+		Number: 1, Name: files[1].Name, Format: formatRAR, ArchiveIndex: 1,
+		CompressedSize:   uint64(files[1].PackedSize),
+		UncompressedSize: uint64(files[1].UnPackedSize),
+		MimeType:         "image/jpeg",
+		Encrypted:        true,
+		EncScheme:        encSchemeRAR,
+	}
+	// No password -> ErrArchivePasswordRequired
+	if _, err := service.readEntryWithPassword(context.Background(), book, entry, 1<<20, ""); !errors.Is(err, ErrArchivePasswordRequired) {
+		t.Fatalf("expected ErrArchivePasswordRequired without password, got %v", err)
+	}
+	// Wrong password -> ErrArchivePasswordInvalid
+	if _, err := service.readEntryWithPassword(context.Background(), book, entry, 1<<20, "wrong-pass"); !errors.Is(err, ErrArchivePasswordInvalid) {
+		t.Fatalf("expected ErrArchivePasswordInvalid with wrong password, got %v", err)
+	}
+	// Right password ("password" from libarchive fixture) -> exact decrypted content!
+	plain, err := service.readEntryWithPassword(context.Background(), book, entry, 1<<20, "password")
+	if err != nil {
+		t.Fatalf("expected RAR5 decrypt success with correct password, got %v", err)
+	}
+	if string(plain) != "This is from b.txt" {
+		t.Fatalf("unexpected decrypted RAR5 bytes: %q", string(plain))
 	}
 }
 

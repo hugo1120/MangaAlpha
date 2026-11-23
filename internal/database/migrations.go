@@ -37,6 +37,9 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensureBangumiTrackerTable(db); err != nil {
 		return err
 	}
+	if err := ensureArchivePasswordTables(db); err != nil {
+		return err
+	}
 	migrations := []struct {
 		table      string
 		column     string
@@ -336,6 +339,34 @@ CREATE TABLE IF NOT EXISTS bangumi_tracker_records (
 );
 CREATE INDEX IF NOT EXISTS idx_bgm_tracker_updated ON bangumi_tracker_records(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_bgm_tracker_series ON bangumi_tracker_records(series_id);
+`)
+	return err
+}
+
+func ensureArchivePasswordTables(db *sql.DB) error {
+	_, err := db.Exec(`
+CREATE TABLE IF NOT EXISTS archive_passwords (
+  id TEXT PRIMARY KEY,
+  password TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_archive_passwords_updated ON archive_passwords(updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS archive_password_bindings (
+  book_id TEXT PRIMARY KEY,
+  password_id TEXT NOT NULL,
+  series_id TEXT NOT NULL DEFAULT '',
+  library_id TEXT NOT NULL DEFAULT '',
+  parent_cid TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY(password_id) REFERENCES archive_passwords(id) ON DELETE CASCADE,
+  FOREIGN KEY(book_id) REFERENCES books(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_apb_password ON archive_password_bindings(password_id);
+CREATE INDEX IF NOT EXISTS idx_apb_series ON archive_password_bindings(series_id);
+CREATE INDEX IF NOT EXISTS idx_apb_folder ON archive_password_bindings(library_id, parent_cid);
 `)
 	return err
 }

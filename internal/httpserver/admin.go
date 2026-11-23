@@ -40,6 +40,9 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/auth/api-keys", s.listAPIKeysHandler)
 	r.Post("/auth/api-keys", s.createAPIKeyHandler)
 	r.Delete("/auth/api-keys/{keyID}", s.deleteAPIKeyHandler)
+	r.Get("/agent/auth-requests/{requestID}", s.getAdminAgentAuthRequest)
+	r.Post("/agent/auth-requests/{requestID}/approve", s.approveAdminAgentAuthRequest)
+	r.Post("/agent/auth-requests/{requestID}/reject", s.rejectAdminAgentAuthRequest)
 
 	// Status & 115 account
 	r.Get("/status", s.adminStatus)
@@ -107,6 +110,10 @@ func (s *Server) adminRoutes(r chi.Router) {
 	r.Get("/bangumi/tracker", s.getBangumiTracker)
 	r.Put("/bangumi/tracker/config", s.putBangumiTrackerConfig)
 	r.Post("/bangumi/tracker/test", s.testBangumiTracker)
+	r.Post("/bangumi/tracker/oauth/start", s.startBangumiTrackerOAuth)
+	r.Get("/bangumi/tracker/oauth/callback", s.bangumiTrackerOAuthCallback)
+	r.Post("/bangumi/tracker/oauth/exchange", s.exchangeBangumiTrackerOAuthCode)
+	r.Post("/bangumi/tracker/oauth/refresh", s.refreshBangumiTrackerOAuth)
 	r.Post("/series/{seriesID}/bangumi/tracker/retry", s.retrySeriesBangumiTracker)
 	r.Get("/bangumi/status", s.bangumiStatus)
 	r.Put("/bangumi/config", s.putBangumiConfig)

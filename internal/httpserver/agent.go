@@ -17,6 +17,11 @@ import (
 )
 
 func (s *Server) agentRoutes(r chi.Router) {
+	r.Get("/guide", s.agentGuide)
+	r.Get("/playbooks/bangumi-match", s.agentGuide)
+	r.Post("/auth/requests", s.createAgentAuthRequest)
+	r.Get("/auth/requests/{requestID}", s.pollAgentAuthRequest)
+
 	r.Get("/manifest", s.agentManifest)
 	r.Get("/overview", s.agentOverview)
 
@@ -73,6 +78,10 @@ func (s *Server) agentManifest(w http.ResponseWriter, _ *http.Request) {
 		"scrapeModes": []string{bangumi.ScrapeModeIncremental, bangumi.ScrapeModeRetryUnmatched, bangumi.ScrapeModeForce},
 		"nsfwFilters": []string{"all", "only", "exclude"},
 		"endpoints": []map[string]string{
+			{"method": "GET", "path": "/api/agent/v1/guide", "summary": "Public read-only Agent onboarding guide & Bangumi matching SOP (Markdown or ?format=json)"},
+			{"method": "GET", "path": "/api/agent/v1/playbooks/bangumi-match", "summary": "Alias of /api/agent/v1/guide focused on Bangumi unmatched series curation"},
+			{"method": "POST", "path": "/api/agent/v1/auth/requests", "summary": "Public rate-limited Device Auth request returning an admin approval link + verification code"},
+			{"method": "GET", "path": "/api/agent/v1/auth/requests/{requestID}", "summary": "Poll authorization status with X-Poll-Token and receive the approved API key once"},
 			{"method": "GET", "path": "/api/agent/v1/manifest", "summary": "Self-describing capability and endpoint manifest"},
 			{"method": "GET", "path": "/api/agent/v1/overview", "summary": "Compact library, Bangumi scrape, and NSFW visibility summary"},
 			{"method": "GET", "path": "/api/agent/v1/libraries", "summary": "List libraries (includes hidden libraries by default)"},

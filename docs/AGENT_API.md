@@ -12,9 +12,21 @@
 
 ---
 
-## 1. 认证准备
+## 1. 认证准备（支持一键授权流或手动创建 API Key）
 
-1. 登录网页管理后台 `/admin?tab=security`（「账号与 API Key」）。
+### 方式一：AI Agent 一键授权流（推荐，无需手输密码、无需手动复制 Key）
+
+1. 在「管理后台 → Bangumi 刮削中心」找到 **「使用 AI Agent 协助匹配未命中作品」** 卡片，点击 **「复制给 AI Agent」**，粘贴给 Claude Code / Codex / Cursor / Antigravity / OpenClaw 等任意 AI Agent。
+2. Agent 可免鉴权读取公开只读的内置指引：`GET /api/agent/v1/guide`（或 `GET /api/agent/v1/playbooks/bangumi-match`，不含任何私密书库数据）。
+3. Agent 调用 `POST /api/agent/v1/auth/requests` 发起授权申请，获得 10 分钟有效的直达确认链接（`/agent-auth/<requestId>`）与 6 位核对码（例如 `K7M-92Q`）发送给你。
+4. 你在浏览器点开链接（未登录会先走管理员登录页再自动跳回），核对确认码一致后点击 **「批准授权」**，服务端自动签发专属 API Key：
+   - 支持轮询的 Agent 凭 `X-Poll-Token` 调 `GET /api/agent/v1/auth/requests/<requestId>` **一次性自动取走密钥**（取走即销毁内存明文）；
+   - 纯聊天型 Agent 也可直接从批准成功页复制密钥发回对话。
+5. 签发的密钥照常记录在「账号与 API Key」中，可随时一键吊销。
+
+### 方式二：手动创建 API Key
+
+1. 登录网页管理后台 `/admin?tab=security`（「账号与 API Key」，支持 `?presetKey=<备注名>` 快捷预填）。
 2. 创建一个专属 API Key（例如备注 `Library-Agent`）。
 3. 在所有请求中携带以下任一请求头：
 

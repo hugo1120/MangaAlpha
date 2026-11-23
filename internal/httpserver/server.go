@@ -63,6 +63,8 @@ type Server struct {
 	trustedProxies    *trustedProxyChecker
 	authLimiter       *authRateLimiter
 	userscriptTickets *userscriptTicketStore
+	bgmOAuthStates    *bangumiOAuthStateStore
+	agentAuth         *agentAuthStore
 
 	placeholder []byte
 }
@@ -100,6 +102,8 @@ func New(
 		trustedProxies:    newTrustedProxyChecker(runtimeInfo.TrustedProxies),
 		authLimiter:       newAuthRateLimiter(),
 		userscriptTickets: newUserscriptTicketStore(),
+		bgmOAuthStates:    newBangumiOAuthStateStore(),
+		agentAuth:         newAgentAuthStore(),
 		placeholder:       makePlaceholder(),
 		web:               template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
@@ -169,6 +173,7 @@ func (s *Server) routes() chi.Router {
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/bgm/userscript/{ticket}/mangaalpha-bangumi.user.js", s.serveUserscriptByTicket)
 	r.Get("/bgm/{subjectID}", s.serveBangumiJump)
+	r.Get("/agent-auth/{requestID}", s.serveSPA)
 	r.Get("/admin", s.serveSPA)
 	r.Get("/admin/", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/admin", http.StatusTemporaryRedirect)

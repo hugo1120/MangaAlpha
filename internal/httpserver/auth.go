@@ -41,12 +41,14 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 
-		// 1. Always public health check, static UI/reader bundles, and ephemeral ticket-authenticated userscript install links.
+		// 1. Always public health check, static UI/reader bundles, ticket/state-authenticated callbacks, and read-only Agent discovery guide.
 		if p == "/health" || p == "/favicon.ico" ||
 			strings.HasPrefix(p, "/ui/") ||
 			strings.HasPrefix(p, "/assets/") ||
 			isStaticReaderAssetPath(p) ||
-			isUserscriptTicketPath(p, r.Method) {
+			isUserscriptTicketPath(p, r.Method) ||
+			isBangumiOAuthCallbackPath(p, r.Method) ||
+			isPublicAgentDiscoveryPath(p, r.Method) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -82,7 +84,11 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// 3. Claimed state: try authenticating incoming credentials.
 		principal, authed, basicRateLimited, basicRetryAfter := s.authenticateRequest(r)
 
-		// Public auth/claim status endpoints when already claimed:
+		// Public auth/claim status endpoints & Agent Device Auth handshake when already claimed:
+		if isPublicAgentAuthFlowPath(p, r.Method) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if p == "/api/v1/claim" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return

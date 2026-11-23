@@ -188,6 +188,27 @@ func (s *Service) TestTrackerToken(ctx context.Context, candidateToken *string) 
 	return s.tracker.TestToken(ctx, candidateToken)
 }
 
+func (s *Service) BuildTrackerOAuthAuthorizeURL(ctx context.Context, redirectURI, state string) (string, error) {
+	if s == nil || s.tracker == nil {
+		return "", errors.New("Bangumi tracker is not initialized")
+	}
+	return s.tracker.BuildOAuthAuthorizeURL(ctx, redirectURI, state)
+}
+
+func (s *Service) ExchangeTrackerOAuthCode(ctx context.Context, code, redirectURI string) (TrackerStatus, error) {
+	if s == nil || s.tracker == nil {
+		return TrackerStatus{}, errors.New("Bangumi tracker is not initialized")
+	}
+	return s.tracker.ExchangeOAuthCode(ctx, code, redirectURI)
+}
+
+func (s *Service) RefreshTrackerOAuthNow(ctx context.Context) (TrackerStatus, error) {
+	if s == nil || s.tracker == nil {
+		return TrackerStatus{}, errors.New("Bangumi tracker is not initialized")
+	}
+	return s.tracker.RefreshOAuthToken(ctx, true)
+}
+
 func (s *Service) NotifyProgress(seriesID string) {
 	if s == nil || s.tracker == nil {
 		return
@@ -213,6 +234,13 @@ func (s *Service) SeriesTrackerSummary(ctx context.Context, subjectID int64) *Se
 func (s *Service) SetAPIBaseURLForTest(baseURL string) {
 	if s != nil && s.live != nil {
 		s.live.baseURL = baseURL
+	}
+}
+
+// SetOAuthBaseURLForTest overrides the Bangumi OAuth base URL (https://bgm.tv) in automated tests.
+func (s *Service) SetOAuthBaseURLForTest(baseURL string) {
+	if s != nil && s.tracker != nil {
+		s.tracker.SetOAuthBaseURL(baseURL)
 	}
 }
 

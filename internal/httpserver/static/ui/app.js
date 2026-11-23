@@ -3013,6 +3013,19 @@
     const trackerEnabledDraft = editingTracker ? !!document.getElementById('bgm-tracker-enabled')?.checked : !!tr.enabled;
     const trackerNsfwDraft = editingTracker ? (document.getElementById('bgm-tracker-nsfw-mode')?.value || tr.nsfwMode || 'skip') : (tr.nsfwMode || 'skip');
     const trackerPrivateDraft = editingTracker ? !!document.getElementById('bgm-tracker-private-default')?.checked : !!tr.privateDefault;
+    const trackerCustomIDDraft = editingTracker ? (document.getElementById('bgm-tracker-oauth-cid')?.value ?? (tr.customOAuthClientId || '')) : (tr.customOAuthClientId || '');
+    const trackerCustomSecDraft = editingTracker ? (document.getElementById('bgm-tracker-oauth-csec')?.value || '') : '';
+    const trackerManualCodeDraft = editingTracker ? (document.getElementById('bgm-tracker-oauth-manual-code')?.value || '') : '';
+    const agentIncludeNsfw = !!state.bgmAgentIncludeNsfw;
+    const buildAgentPrompt = (includeNsfw) => {
+      const base = location.origin;
+      const guideUrl = `${base}/api/agent/v1/guide`;
+      const nsfwNote = includeNsfw
+        ? '本次请同时包含 NSFW 作品（使用 nsfw=all）。'
+        : '本次仅处理非 NSFW 作品（默认 nsfw=exclude）。';
+      return `请帮我把 MangaAlpha（${base}）中规则未命中的漫画精确匹配并绑定 Bangumi 条目。\n请先读取公开内置指引：${guideUrl}\n然后严格按指引完成两步：\n1. 如尚未授权，先发起一键授权请求并把「授权确认链接」和「核对码」发给我，待我点击批准后自动领取 API Key；\n2. 领取授权后按内置防幻觉 SOP 逐条核实候选并批量绑定。${nsfwNote}`;
+    };
+    const agentPromptText = buildAgentPrompt(agentIncludeNsfw);
     const srcForm = document.getElementById('bgm-arch-source-form');
     const editingSrc = srcForm && srcForm.contains(document.activeElement);
     const srcState = editingSrc ? {
@@ -3178,24 +3191,53 @@
 
       <div class="card">
         <div class="section-head" style="margin-bottom:8px">
+          <h3>使用 AI Agent 协助匹配未命中作品</h3>
+          <span class="badge ${Number(st.unmatchedCount || 0) > 0 ? 'badge-accent' : 'badge-success'}">未命中 ${Number(st.unmatchedCount || 0).toLocaleString()} 部 · 待刮削 ${Number(st.pendingCount || 0).toLocaleString()} 部</span>
+        </div>
+        <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-secondary);line-height:1.65">
+          无需在服务器配置大模型 Key：直接将下方提示词复制给你手头的 <strong>Claude Code / Codex / Cursor / Antigravity / OpenClaw</strong> 等 AI Agent。
+          Agent 会自动读取公开内置指引（不含任何私密书库数据），发给你一个带<strong>核对码</strong>的一键授权链接；你点击批准后，Agent 自动按防幻觉 SOP 核实候选并批量绑定。
+        </p>
+        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:10px">
+          <button type="button" class="btn btn-primary btn-sm" id="bgm-agent-copy-btn">复制给 AI Agent</button>
+          <a class="btn btn-sm" href="/api/agent/v1/guide" target="_blank" rel="noopener noreferrer">查看内置匹配指引 ↗</a>
+          <label class="check-row" style="font-size:12.5px;color:var(--text-secondary)">
+            <input type="checkbox" id="bgm-agent-include-nsfw" ${agentIncludeNsfw ? 'checked' : ''}>
+            <span>本次包含 NSFW 作品（默认排除）</span>
+          </label>
+        </div>
+        <pre id="bgm-agent-prompt-box" class="code-box" style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6;user-select:all">${esc(agentPromptText)}</pre>
+      </div>
+
+      <div class="card">
+        <div class="section-head" style="margin-bottom:8px">
           <h3>Bangumi 进度追踪器（单向自动同步）</h3>
-          ${tr.hasToken
-            ? `<span class="badge ${tr.enabled ? 'badge-success' : ''}">${tr.enabled ? '已启用自动同步' : '已绑定（未开启同步）'}${tr.nickname || tr.username ? ` · ${esc(tr.nickname || tr.username)}${tr.username ? ` (@${esc(tr.username)})` : ''}` : ''}</span>`
-            : `<span class="badge">未绑定 Bangumi 账号</span>`}
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+            ${tr.hasToken
+              ? `<span class="badge ${tr.enabled ? 'badge-success' : ''}">${tr.enabled ? '已启用自动同步' : '已绑定（未开启同步）'}${tr.nickname || tr.username ? ` · ${esc(tr.nickname || tr.username)}${tr.username ? ` (@${esc(tr.username)})` : ''}` : ''}</span>`
+              : `<span class="badge">未绑定 Bangumi 账号</span>`}
+            ${tr.hasToken ? `<span class="badge ${tr.autoRefresh ? 'badge-accent' : ''}">${tr.autoRefresh ? 'OAuth 自动续期' : 'Personal Access Token'}</span>` : ''}
+            ${tr.hasToken && tr.expired ? `<span class="badge badge-danger">授权已过期</span>` : (tr.hasToken && tr.expiresSoon ? `<span class="badge" style="color:var(--warn);border-color:var(--warn)">即将到期</span>` : '')}
+          </div>
         </div>
         <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-secondary);line-height:1.65">
           将<strong>后续新增</strong>的阅读进度自动单向推送到你的 Bangumi 收藏（兼容内置阅读器、Android 端、Mihon 与 Koharia，复用上方 Bangumi 网络代理，不会批量回写历史进度）。
-          前往 <a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Bangumi Personal Access Token 页面 ↗</a> 生成个人令牌粘贴到下方即可（Token 仅保存于本地 SQLite，绝不明文回传）。
+          推荐使用下方 <strong>Bangumi OAuth 一键授权</strong>：服务端会在到期前自动使用 <code>refresh_token</code> 滚动续期，长期免维护。
         </p>
+        ${tr.hasToken ? `
+          <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border);font-size:12px;color:var(--text-secondary)">
+            <span>当前方式：<strong>${tr.autoRefresh ? `Bangumi OAuth（${tr.usingCustomOAuthApp ? '自定义应用' : '官方内置应用'}，自动续期）` : 'Personal Access Token（最长 1 年，需到期更换）'}</strong></span>
+            ${tr.expiresAt ? `<span>当前令牌到期：<strong style="color:${tr.expired ? 'var(--danger)' : tr.expiresSoon ? 'var(--warn)' : 'var(--text)'}">${esc(fmtTime(tr.expiresAt))}</strong></span>` : ''}
+            ${tr.lastRefreshAt ? `<span>最近刷新：${esc(fmtTime(tr.lastRefreshAt))}</span>` : ''}
+            ${tr.lastRefreshError ? `<span style="color:var(--danger)">最近刷新失败：${esc(tr.lastRefreshError)}</span>` : ''}
+          </div>` : ''}
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">
+          <button type="button" class="btn btn-bgm" id="bgm-tracker-oauth-start">${tr.hasToken && tr.autoRefresh ? '重新进行 Bangumi OAuth 授权' : '使用 Bangumi OAuth 一键授权（推荐 · 自动续期）'}</button>
+          ${tr.hasToken && tr.autoRefresh ? `<button type="button" class="btn btn-sm" id="bgm-tracker-oauth-refresh">立即刷新授权</button>` : ''}
+          ${tr.hasToken ? `<button type="button" class="btn btn-sm" id="bgm-tracker-test">测试连接</button>` : ''}
+          ${tr.hasToken ? `<button type="button" class="btn btn-sm btn-danger" id="bgm-tracker-clear">解绑清空</button>` : ''}
+        </div>
         <form id="bgm-tracker-form" style="display:grid;gap:10px">
-          <div class="inline-action-bar">
-            <input type="password" id="bgm-tracker-token" autocomplete="off" value="${esc(trackerTokenDraft)}"
-              placeholder="${tr.hasToken ? '已保存有效 Access Token（留空保持不变，输入新值可替换）' : '粘贴 Bangumi Personal Access Token'}"
-              style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
-            <button type="submit" class="btn btn-primary" id="bgm-tracker-save">保存并验证</button>
-            <button type="button" class="btn" id="bgm-tracker-test">测试 Token</button>
-            ${tr.hasToken ? `<button type="button" class="btn btn-danger" id="bgm-tracker-clear">解绑清空</button>` : ''}
-          </div>
           <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
             <label class="check-row" style="font-size:13px;font-weight:600;color:var(--text)">
               <input type="checkbox" id="bgm-tracker-enabled" ${trackerEnabledDraft ? 'checked' : ''}>
@@ -3212,7 +3254,50 @@
               <input type="checkbox" id="bgm-tracker-private-default" ${trackerPrivateDraft ? 'checked' : ''}>
               <span>新建普通作品收藏时默认设为私密（仅自己可见）</span>
             </label>
+            <button type="submit" class="btn btn-primary btn-sm" id="bgm-tracker-save">保存追踪设置</button>
           </div>
+
+          <details style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-input)">
+            <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary)">备选方式：手动粘贴 Personal Access Token（最长 1 年有效期）</summary>
+            <div style="margin-top:8px;font-size:12px;color:var(--text-muted);line-height:1.6">
+              若不方便走 OAuth 弹窗，也可前往 <a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Bangumi Personal Access Token 页面 ↗</a> 生成个人令牌粘贴到下方（Token 仅保存于本地 SQLite，绝不明文回传）。
+            </div>
+            <div class="inline-action-bar" style="margin-top:8px">
+              <input type="password" id="bgm-tracker-token" autocomplete="off" value="${esc(trackerTokenDraft)}"
+                placeholder="${tr.hasToken && !tr.autoRefresh ? '已保存 Personal Access Token（留空保持不变，输入新值可替换）' : '粘贴 Bangumi Personal Access Token'}"
+                style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+              <button type="submit" class="btn btn-sm btn-primary" id="bgm-tracker-pat-save">验证并保存 PAT</button>
+              <button type="button" class="btn btn-sm" id="bgm-tracker-pat-test">测试输入 Token</button>
+            </div>
+          </details>
+
+          <details style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-input)">
+            <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary)">高级选项：手动粘贴 OAuth 回调链接 / 自定义 Bangumi App${tr.usingCustomOAuthApp ? '（已启用自定义 App）' : ''}</summary>
+            <div style="display:grid;gap:10px;margin-top:10px">
+              <div>
+                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">① 弹窗被拦截时手动完成 OAuth 回调：</div>
+                <div class="inline-action-bar">
+                  <input type="text" id="bgm-tracker-oauth-manual-code" value="${esc(trackerManualCodeDraft)}"
+                    placeholder="粘贴跳转后的完整回调 URL（含 ?code=...）或纯 code"
+                    style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                  <button type="button" class="btn btn-sm" id="bgm-tracker-oauth-manual-submit">提交完成授权</button>
+                </div>
+              </div>
+              <div>
+                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">② 覆盖内置官方 OAuth App（可选，自建于 <a href="https://bgm.tv/dev/app" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">bgm.tv/dev/app ↗</a>，回调地址留空即可）：</div>
+                <div class="inline-action-bar">
+                  <input type="text" id="bgm-tracker-oauth-cid" value="${esc(trackerCustomIDDraft)}" placeholder="自定义 App ID（例如 bgm...）"
+                    style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                  <input type="password" id="bgm-tracker-oauth-csec" autocomplete="off" value="${esc(trackerCustomSecDraft)}"
+                    placeholder="${tr.hasCustomOAuthSecret ? '已保存自定义 App Secret（留空保持不变）' : '自定义 App Secret'}"
+                    style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                  <button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-save">保存自定义 App</button>
+                  ${tr.usingCustomOAuthApp ? `<button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-reset">恢复默认内置 App</button>` : ''}
+                </div>
+              </div>
+            </div>
+          </details>
+
           <div style="font-size:12px;color:var(--text-muted);line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
             <strong>同步规则与提示：</strong>
             ① 卷数进度按本地已读完的最高文件序号单调递增同步（受 Bangumi 总卷数封顶，不会回退）；<strong>若某部作品本地是按单话（而非单行本）拆分存放，推送的卷数可能偏快，请知悉。</strong>
@@ -3453,6 +3538,135 @@
         renderAdminBangumi(body);
       } catch (err) { toast(err.message, 'error'); }
     };
+    const copyTextSafe = async (txt) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(txt); return true; } catch (_) {}
+      }
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      return ok;
+    };
+
+    const agentNsfwCheck = document.getElementById('bgm-agent-include-nsfw');
+    if (agentNsfwCheck) {
+      agentNsfwCheck.onchange = () => {
+        state.bgmAgentIncludeNsfw = !!agentNsfwCheck.checked;
+        const box = document.getElementById('bgm-agent-prompt-box');
+        if (box) box.textContent = buildAgentPrompt(state.bgmAgentIncludeNsfw);
+      };
+    }
+    const agentCopyBtn = document.getElementById('bgm-agent-copy-btn');
+    if (agentCopyBtn) {
+      agentCopyBtn.onclick = async () => {
+        const txt = buildAgentPrompt(!!state.bgmAgentIncludeNsfw);
+        const ok = await copyTextSafe(txt);
+        toast(ok ? '已复制提示词，直接粘贴给你的 AI Agent 即可' : '浏览器阻止自动复制，请手动全选下方文本框复制', ok ? 'info' : 'error');
+      };
+    }
+
+    const oauthStartBtn = document.getElementById('bgm-tracker-oauth-start');
+    if (oauthStartBtn) {
+      oauthStartBtn.onclick = async () => {
+        oauthStartBtn.disabled = true;
+        const box = document.getElementById('bgm-tracker-test-result');
+        if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在生成 Bangumi OAuth 授权链接…</span>`;
+        try {
+          const rep = await api('/admin/api/bangumi/tracker/oauth/start', { method: 'POST' });
+          state.bgmOAuthLastState = rep.state || '';
+          const popup = window.open(rep.authorizeUrl, 'mangaalpha_bgm_oauth', 'width=560,height=720');
+          if (!popup) {
+            if (box) {
+              box.innerHTML = `<span style="color:var(--warn)">浏览器拦截了弹窗，请点此 <a href="${esc(rep.authorizeUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">手动打开 Bangumi 授权页 ↗</a></span>`;
+            }
+          } else if (box) {
+            box.innerHTML = `<span style="color:var(--text-secondary)">已打开 Bangumi 授权窗口，请在弹出的页面中点击「同意授权」…</span>`;
+          }
+          state.bgmOAuthRefreshTarget = body;
+        } catch (err) {
+          toast(err.message || '启动 OAuth 授权失败', 'error');
+          if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
+        } finally {
+          oauthStartBtn.disabled = false;
+        }
+      };
+    }
+    const oauthRefreshBtn = document.getElementById('bgm-tracker-oauth-refresh');
+    if (oauthRefreshBtn) {
+      oauthRefreshBtn.onclick = async () => {
+        oauthRefreshBtn.disabled = true;
+        const box = document.getElementById('bgm-tracker-test-result');
+        if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在通过 refresh_token 刷新 Bangumi 授权…</span>`;
+        try {
+          await api('/admin/api/bangumi/tracker/oauth/refresh', { method: 'POST' });
+          toast('Bangumi OAuth 授权已刷新续期');
+          renderAdminBangumi(body);
+        } catch (err) {
+          toast(err.message || '刷新授权失败', 'error');
+          if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
+        } finally {
+          oauthRefreshBtn.disabled = false;
+        }
+      };
+    }
+    const oauthManualBtn = document.getElementById('bgm-tracker-oauth-manual-submit');
+    if (oauthManualBtn) {
+      oauthManualBtn.onclick = async () => {
+        const val = (document.getElementById('bgm-tracker-oauth-manual-code')?.value || '').trim();
+        if (!val) { toast('请先粘贴回调链接或授权码 code', 'error'); return; }
+        oauthManualBtn.disabled = true;
+        try {
+          await api('/admin/api/bangumi/tracker/oauth/exchange', {
+            method: 'POST',
+            body: { codeOrUrl: val, state: state.bgmOAuthLastState || '' },
+          });
+          toast('Bangumi OAuth 授权绑定成功');
+          renderAdminBangumi(body);
+        } catch (err) {
+          toast(err.message || '换取 OAuth Token 失败', 'error');
+        } finally {
+          oauthManualBtn.disabled = false;
+        }
+      };
+    }
+    const oauthAppSaveBtn = document.getElementById('bgm-tracker-oauth-app-save');
+    if (oauthAppSaveBtn) {
+      oauthAppSaveBtn.onclick = async () => {
+        const cid = (document.getElementById('bgm-tracker-oauth-cid')?.value || '').trim();
+        const csec = (document.getElementById('bgm-tracker-oauth-csec')?.value || '').trim();
+        oauthAppSaveBtn.disabled = true;
+        try {
+          const payload = { customOAuthClientId: cid };
+          if (csec) payload.customOAuthClientSecret = csec;
+          await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: payload });
+          toast('自定义 Bangumi OAuth App 配置已保存，点击上方「OAuth 一键授权」即可使用');
+          renderAdminBangumi(body);
+        } catch (err) {
+          toast(err.message || '保存自定义 OAuth App 失败', 'error');
+        } finally {
+          oauthAppSaveBtn.disabled = false;
+        }
+      };
+    }
+    const oauthAppResetBtn = document.getElementById('bgm-tracker-oauth-app-reset');
+    if (oauthAppResetBtn) {
+      oauthAppResetBtn.onclick = async () => {
+        if (!confirm('确认清除自定义 App 配置并恢复官方内置 MangaAlpha 应用？')) return;
+        try {
+          await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearCustomOAuthApp: true } });
+          toast('已恢复默认内置 Bangumi OAuth 应用');
+          renderAdminBangumi(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+
     const trackerFormEl = document.getElementById('bgm-tracker-form');
     if (trackerFormEl) {
       trackerFormEl.onsubmit = async (e) => {
@@ -3480,36 +3694,38 @@
         }
       };
     }
-    const trackerTestBtn = document.getElementById('bgm-tracker-test');
-    if (trackerTestBtn) {
-      trackerTestBtn.onclick = async () => {
-        trackerTestBtn.disabled = true;
-        const box = document.getElementById('bgm-tracker-test-result');
-        const tokVal = (document.getElementById('bgm-tracker-token')?.value || '').trim();
-        if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在连接 api.bgm.tv 验证 Token…</span>`;
-        try {
-          const rep = await api('/admin/api/bangumi/tracker/test', {
-            method: 'POST',
-            body: tokVal ? { accessToken: tokVal } : {},
-          });
-          if (rep && rep.ok) {
-            if (box) {
-              box.innerHTML = `<span style="color:var(--success)">✅ Token 有效：${esc(rep.nickname || rep.username)}${rep.username ? ` (@${esc(rep.username)})` : ''} · 延迟 ${rep.latencyMs} ms</span>`;
-            }
-          } else if (box) {
-            box.innerHTML = `<span style="color:var(--danger)">❌ 验证失败：${esc((rep && rep.error) || 'Token 无效')}</span>`;
+    const runTrackerTest = async (btn, useInputToken) => {
+      if (!btn) return;
+      btn.disabled = true;
+      const box = document.getElementById('bgm-tracker-test-result');
+      const tokVal = useInputToken ? (document.getElementById('bgm-tracker-token')?.value || '').trim() : '';
+      if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在连接 api.bgm.tv 验证授权…</span>`;
+      try {
+        const rep = await api('/admin/api/bangumi/tracker/test', {
+          method: 'POST',
+          body: tokVal ? { accessToken: tokVal } : {},
+        });
+        if (rep && rep.ok) {
+          if (box) {
+            box.innerHTML = `<span style="color:var(--success)">✅ 授权有效：${esc(rep.nickname || rep.username)}${rep.username ? ` (@${esc(rep.username)})` : ''}${rep.expiresAt ? ` · 到期 ${esc(fmtTime(rep.expiresAt))}` : ''} · 延迟 ${rep.latencyMs} ms</span>`;
           }
-        } catch (err) {
-          if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
-        } finally {
-          trackerTestBtn.disabled = false;
+        } else if (box) {
+          box.innerHTML = `<span style="color:var(--danger)">❌ 验证失败：${esc((rep && rep.error) || 'Token 无效')}</span>`;
         }
-      };
-    }
+      } catch (err) {
+        if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
+      } finally {
+        btn.disabled = false;
+      }
+    };
+    const trackerTestBtn = document.getElementById('bgm-tracker-test');
+    if (trackerTestBtn) trackerTestBtn.onclick = () => runTrackerTest(trackerTestBtn, false);
+    const trackerPatTestBtn = document.getElementById('bgm-tracker-pat-test');
+    if (trackerPatTestBtn) trackerPatTestBtn.onclick = () => runTrackerTest(trackerPatTestBtn, true);
     const trackerClearBtn = document.getElementById('bgm-tracker-clear');
     if (trackerClearBtn) {
       trackerClearBtn.onclick = async () => {
-        if (!confirm('确认解绑并清空 Bangumi Access Token（同时关闭自动同步）？')) return;
+        if (!confirm('确认解绑并清空 Bangumi 追踪器授权（同时关闭自动同步）？')) return;
         try {
           await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearToken: true } });
           toast('已解绑 Bangumi 追踪器');
@@ -4019,6 +4235,7 @@
       api('/admin/api/auth/api-keys'),
       api('/admin/api/auth/sessions'),
     ]);
+    const presetKey = (new URLSearchParams(location.search).get('presetKey') || '').trim();
 
     body.innerHTML = `
       <div class="grid-2">
@@ -4039,11 +4256,11 @@
           <button type="submit" class="btn btn-primary">更新凭据（自动注销其他会话）</button>
         </form>
 
-        <div class="card">
+        <div class="card" ${presetKey ? 'style="border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)"' : ''}>
           <h3>API Key 管理（推荐用于 AI Agent / 外部客户端 / 脚本）</h3>
           <p style="font-size:12.5px;color:var(--text-secondary)">支持通过 <code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code> 访问 Komga 接口与 AI Agent 专用书库管理接口（<code>GET /api/agent/v1/manifest</code>），无需暴露主登录密码，可随时单独吊销。</p>
           <div class="inline-action-bar" style="margin-bottom:12px">
-            <input type="text" id="ak-name" placeholder="备注名称，例如：Mihon 平板" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+            <input type="text" id="ak-name" value="${esc(presetKey)}" placeholder="备注名称，例如：Mihon 平板" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
             <button type="button" class="btn btn-primary" id="ak-create">生成 API Key</button>
           </div>
           <div id="ak-revealed" style="display:none;margin-bottom:12px"></div>
@@ -5135,6 +5352,158 @@
     }
   }
 
+  // --- AI Agent One-Click Authorization Page (/agent-auth/:requestID) ---
+
+  async function renderAgentAuthPage(requestID) {
+    document.title = 'AI Agent 授权确认 · MangaAlpha';
+    renderShell('admin', `<div class="boot-splash" style="min-height:40vh"><div class="spinner"></div><p>正在加载授权请求…</p></div>`);
+    const content = document.getElementById('page-content');
+    if (!content) return;
+
+    const copySafe = async (txt) => {
+      if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(txt); return true; } catch (_) {}
+      }
+      const ta = document.createElement('textarea');
+      ta.value = txt;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+      return ok;
+    };
+
+    try {
+      const req = await api(`/admin/api/agent/auth-requests/${encodeURIComponent(requestID)}`);
+      const isPending = req.status === 'pending';
+      const defaultKeyName = `AI Agent · ${req.clientName || 'Assistant'}`;
+      content.innerHTML = `
+        <div class="card" style="max-width:560px;margin:24px auto">
+          <div class="section-head" style="margin-bottom:10px">
+            <h2 style="margin:0;font-size:20px">AI Agent 授权确认</h2>
+            <span id="agent-auth-status-badge" class="badge ${req.status === 'approved' || req.status === 'consumed' ? 'badge-success' : req.status === 'rejected' ? 'badge-danger' : 'badge-accent'}">
+              ${req.status === 'pending' ? '等待批准' : req.status === 'approved' ? '已批准（等待 Agent 领取）' : req.status === 'consumed' ? '已批准并已被领取' : '已拒绝'}
+            </span>
+          </div>
+          <div style="padding:14px 16px;border-radius:10px;background:var(--bg-input);border:1px solid var(--border);text-align:center;margin-bottom:14px">
+            <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">安全核对码（请确认与 AI Agent 对话中展示的完全一致）</div>
+            <div style="font-size:28px;font-weight:800;letter-spacing:4px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent)">${esc(req.verificationCode)}</div>
+          </div>
+          <div style="display:grid;gap:6px;font-size:13px;color:var(--text-secondary);margin-bottom:14px">
+            <div>申请客户端：<strong style="color:var(--text)">${esc(req.clientName)}</strong></div>
+            <div>申请用途：<strong style="color:var(--text)">${esc(req.purpose)}</strong></div>
+            <div>请求来源 IP：<code>${esc(req.clientIp || '—')}</code> · 过期时间：${esc(fmtTime(req.expiresAt))}</div>
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border);margin-bottom:14px">
+            批准后将自动签发一个专属 API Key 并一次性交付给该 AI Agent（不暴露你的登录密码）。你随时可以在
+            <a href="/admin?tab=security" data-nav style="color:var(--accent)">「管理后台 → 账号与 API Key」</a> 查看或吊销。
+          </div>
+          ${isPending ? `
+            <div class="field" style="margin-bottom:14px">
+              <label>API Key 备注名称（方便后续在「账号与 API Key」识别与吊销）</label>
+              <input type="text" id="agent-auth-key-name" value="${esc(defaultKeyName)}" maxlength="80">
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+              <button type="button" class="btn btn-primary" id="agent-auth-approve">批准授权并签发 API Key</button>
+              <button type="button" class="btn btn-danger" id="agent-auth-reject">拒绝请求</button>
+              <a href="/admin?tab=bangumi" data-nav class="btn">返回管理后台</a>
+            </div>
+          ` : `
+            <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+              <a href="/admin?tab=security" data-nav class="btn btn-primary">查看 / 管理 API Key</a>
+              <a href="/admin?tab=bangumi" data-nav class="btn">返回 Bangumi 刮削中心</a>
+            </div>
+          `}
+          <div id="agent-auth-result" style="margin-top:14px"></div>
+        </div>
+      `;
+
+      if (isPending) {
+        const approveBtn = document.getElementById('agent-auth-approve');
+        const rejectBtn = document.getElementById('agent-auth-reject');
+        const resultBox = document.getElementById('agent-auth-result');
+        approveBtn.onclick = async () => {
+          approveBtn.disabled = true;
+          rejectBtn.disabled = true;
+          const keyName = (document.getElementById('agent-auth-key-name')?.value || '').trim() || defaultKeyName;
+          try {
+            const res = await api(`/admin/api/agent/auth-requests/${encodeURIComponent(requestID)}/approve`, {
+              method: 'POST',
+              body: { keyName },
+            });
+            toast('已批准授权并签发 API Key');
+            const stBadge = document.getElementById('agent-auth-status-badge');
+            if (stBadge) {
+              stBadge.className = 'badge badge-success';
+              stBadge.textContent = '已批准（等待 Agent 领取）';
+            }
+            if (resultBox) {
+              resultBox.innerHTML = `
+                <div style="padding:12px 14px;border-radius:10px;background:var(--success-soft);border:1px solid var(--success)">
+                  <div style="font-size:13px;font-weight:700;color:var(--success);margin-bottom:6px">✅ 授权已批准！支持自动轮询的 AI Agent 正在自动领取密钥并开始匹配。</div>
+                  <div style="font-size:12px;color:var(--text-secondary);margin-bottom:8px">如果你的 Agent 处于纯网页对话环境不支持自动轮询，也可点击下方按钮手动复制密钥发回对话（此完整密钥仅显示一次）：</div>
+                  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                    <code class="code-box" style="flex:1;min-width:200px;margin:0;user-select:all">${esc(res.key)}</code>
+                    <button type="button" class="btn btn-sm btn-primary" id="agent-auth-copy-key">复制密钥</button>
+                  </div>
+                  <div style="margin-top:10px;font-size:12px">
+                    <a href="/admin?tab=security" data-nav style="color:var(--accent)">前往「账号与 API Key」查看 / 随时吊销 →</a>
+                  </div>
+                </div>`;
+              const copyBtn = document.getElementById('agent-auth-copy-key');
+              if (copyBtn) {
+                copyBtn.onclick = async () => {
+                  const ok = await copySafe(res.key);
+                  toast(ok ? '已复制 API Key' : '请手动选中复制', ok ? 'info' : 'error');
+                };
+              }
+            }
+          } catch (err) {
+            toast(err.message || '批准失败', 'error');
+            approveBtn.disabled = false;
+            rejectBtn.disabled = false;
+          }
+        };
+        rejectBtn.onclick = async () => {
+          approveBtn.disabled = true;
+          rejectBtn.disabled = true;
+          try {
+            await api(`/admin/api/agent/auth-requests/${encodeURIComponent(requestID)}/reject`, { method: 'POST' });
+            toast('已拒绝该授权请求');
+            renderAgentAuthPage(requestID);
+          } catch (err) {
+            toast(err.message || '操作失败', 'error');
+            approveBtn.disabled = false;
+            rejectBtn.disabled = false;
+          }
+        };
+      }
+    } catch (err) {
+      content.innerHTML = `
+        <div class="card" style="max-width:520px;margin:24px auto;text-align:center">
+          <h2 style="margin:0 0 8px">授权请求不可用</h2>
+          <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px">${esc(err.message || '授权请求不存在或已过期，请让 AI Agent 重新发起申请。')}</p>
+          <a href="/admin?tab=security" data-nav class="btn btn-primary">前往「账号与 API Key」</a>
+          <a href="/admin?tab=bangumi" data-nav class="btn" style="margin-left:8px">返回 Bangumi 刮削中心</a>
+        </div>`;
+    }
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.origin !== location.origin) return;
+    const data = event.data;
+    if (!data || data.type !== 'MANGAALPHA_BGM_OAUTH_DONE') return;
+    toast(data.message || (data.ok ? 'Bangumi OAuth 授权成功' : 'Bangumi OAuth 授权失败'), data.ok ? 'info' : 'error');
+    const target = state.bgmOAuthRefreshTarget || document.getElementById('admin-tab-body');
+    if (target && state.adminTab === 'bangumi') {
+      renderAdminBangumi(target);
+    }
+  });
+
   // --- Router ---
 
   let routeSeq = 0;
@@ -5226,6 +5595,11 @@
     if (p.startsWith('/books/')) {
       const bid = decodeURIComponent(p.slice('/books/'.length));
       await renderBookDetail(bid);
+      return;
+    }
+    if (p.startsWith('/agent-auth/')) {
+      const rid = decodeURIComponent(p.slice('/agent-auth/'.length));
+      await renderAgentAuthPage(rid);
       return;
     }
     if (p === '/admin' || p === '/admin/') {

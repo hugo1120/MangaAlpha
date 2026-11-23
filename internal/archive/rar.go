@@ -223,6 +223,8 @@ func (r *RARService) ensureEncryptedPagesUnlocked(ctx context.Context, book data
 		if _, err := r.readEntryWithPassword(ctx, book, sample, maxPageSize, cand.Password); err == nil {
 			maybeAutoBindArchivePassword(ctx, r.store, book, cand)
 			return nil
+		} else if !isArchivePasswordError(err) {
+			return err
 		}
 	}
 	if hasExplicit || hasDirect {

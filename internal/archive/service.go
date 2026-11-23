@@ -320,16 +320,14 @@ func (s *Service) VerifyAndBindBookPassword(ctx context.Context, book database.B
 		started := time.Now()
 		pages, err := s.listPagesDirect(verifyCtx, cand)
 		if err == nil {
-			if len(pages) > 0 {
-				if _, pErr := s.readPageDirect(verifyCtx, cand, 1); pErr != nil {
-					return 0, pErr
+			// listPagesDirect already verified decryption of the first encrypted page
+			// against the explicit password; only persist a binding when the archive is
+			// actually encrypted.
+			if _, hasEnc := firstEncryptedPageEntry(pages); hasEnc && s.store != nil {
+				var extra []database.Book
+				if isUnion && cand.ID != "" && cand.ID != book.ID {
+					extra = append(extra, cand)
 				}
-			}
-			var extra []database.Book
-			if isUnion && cand.ID != "" && cand.ID != book.ID {
-				extra = append(extra, cand)
-			}
-			if s.store != nil {
 				if err := s.store.SaveArchivePasswordBinding(ctx, book, password, extra...); err != nil {
 					return 0, err
 				}

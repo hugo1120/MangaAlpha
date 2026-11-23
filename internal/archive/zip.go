@@ -212,6 +212,8 @@ func (z *ZIPService) ensureEncryptedPagesUnlocked(ctx context.Context, book data
 		if _, err := z.readEntryWithPassword(ctx, book, sample, maxPageSize, cand.Password); err == nil {
 			maybeAutoBindArchivePassword(ctx, z.store, book, cand)
 			return nil
+		} else if !isArchivePasswordError(err) {
+			return err
 		}
 	}
 	if hasExplicit || hasDirect {
@@ -251,6 +253,8 @@ func (z *ZIPService) verifyEncryptedPagesWithReader(ctx context.Context, book da
 		if _, err := decodeZIPEntryBytes(compressed, sample, maxPageSize, cand.Password); err == nil {
 			maybeAutoBindArchivePassword(ctx, z.store, book, cand)
 			return nil
+		} else if !isArchivePasswordError(err) {
+			return err
 		}
 	}
 	if hasExplicit || hasDirect {
@@ -410,8 +414,9 @@ func decodeZIPEntryBytes(
 		}
 		return nil, fmt.Errorf("%w: page checksum or size mismatch", ErrInvalidZIP)
 	}
-	// WinZip AE-2 omits CRC-32 (sets it to 0) and relies on HMAC-SHA1-80 authentication above.
-	verifyCRC := !(entry.Encrypted && entry.EncAEVersion == 2 && entry.CRC32 == 0)
+	// WinZip AE-2 (and AE-1 for small/omitted entries) sets CRC-32 to 0 and relies
+	// on HMAC-SHA1-80 authentication already verified above.
+	verifyCRC := !(entry.Encrypted && entry.EncAEVersion >= 1 && entry.CRC32 == 0)
 	if verifyCRC && crc32.ChecksumIEEE(data) != entry.CRC32 {
 		if entry.Encrypted {
 			return nil, ErrArchivePasswordInvalid

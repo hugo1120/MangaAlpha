@@ -301,16 +301,18 @@ func TestV29EncryptedArchivesUnlockAutoRetryAndAdminClear(t *testing.T) {
 		t.Fatalf("unauth /admin/api/archive-passwords expected 401, got %d", rec.Code)
 	}
 
-	// 1. Opening locked Vol.01 returns 422 ARCHIVE_PASSWORD_REQUIRED
+	// 1. Opening locked Vol.01 returns 422 with exact JSON {"error":"ARCHIVE_PASSWORD_REQUIRED"}
 	rec := doReq(http.MethodGet, "/api/v1/books/"+vol1.ID+"/pages", nil, true)
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "ARCHIVE_PASSWORD_REQUIRED") {
-		t.Fatalf("locked vol1 expected ARCHIVE_PASSWORD_REQUIRED, got %d %s", rec.Code, rec.Body.String())
+	var errBody map[string]string
+	if rec.Code != http.StatusUnprocessableEntity || json.Unmarshal(rec.Body.Bytes(), &errBody) != nil || errBody["error"] != "ARCHIVE_PASSWORD_REQUIRED" {
+		t.Fatalf("locked vol1 expected JSON error=ARCHIVE_PASSWORD_REQUIRED, got %d %s", rec.Code, rec.Body.String())
 	}
 
-	// 2. Unlock with wrong password returns 422 ARCHIVE_PASSWORD_INVALID and saves nothing
+	// 2. Unlock with wrong password returns 422 with exact JSON {"error":"ARCHIVE_PASSWORD_INVALID"} and saves nothing
 	rec = doReq(http.MethodPost, "/admin/api/books/"+vol1.ID+"/unlock", map[string]string{"password": "wrong"}, true)
-	if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "ARCHIVE_PASSWORD_INVALID") {
-		t.Fatalf("wrong password expected ARCHIVE_PASSWORD_INVALID, got %d %s", rec.Code, rec.Body.String())
+	errBody = nil
+	if rec.Code != http.StatusUnprocessableEntity || json.Unmarshal(rec.Body.Bytes(), &errBody) != nil || errBody["error"] != "ARCHIVE_PASSWORD_INVALID" {
+		t.Fatalf("wrong password expected JSON error=ARCHIVE_PASSWORD_INVALID, got %d %s", rec.Code, rec.Body.String())
 	}
 
 	// 3. Unlock Vol.01 with correct password -> 200 OK
@@ -319,13 +321,16 @@ func TestV29EncryptedArchivesUnlockAutoRetryAndAdminClear(t *testing.T) {
 		t.Fatalf("unlock vol1 failed: %d %s", rec.Code, rec.Body.String())
 	}
 
-	// 4. Vol.01 pages + page 1 image now succeed and decode as valid PNG
+	// 4. Vol.01 pages + page 1 image now succeed, decode as valid PNG, and disable browser disk caching
 	if rec := doReq(http.MethodGet, "/api/v1/books/"+vol1.ID+"/pages", nil, true); rec.Code != http.StatusOK {
 		t.Fatalf("vol1 pages after unlock expected 200, got %d %s", rec.Code, rec.Body.String())
 	}
 	imgRec := doReq(http.MethodGet, "/api/v1/books/"+vol1.ID+"/pages/1", nil, true)
 	if imgRec.Code != http.StatusOK || imgRec.Header().Get("Content-Type") != "image/png" {
 		t.Fatalf("vol1 page 1 failed: %d ct=%s", imgRec.Code, imgRec.Header().Get("Content-Type"))
+	}
+	if cc := imgRec.Header().Get("Cache-Control"); cc != "private, no-store" {
+		t.Fatalf("encrypted page Cache-Control = %q, want %q", cc, "private, no-store")
 	}
 	if _, err := png.Decode(bytes.NewReader(imgRec.Body.Bytes())); err != nil {
 		t.Fatalf("vol1 page 1 invalid PNG: %v", err)

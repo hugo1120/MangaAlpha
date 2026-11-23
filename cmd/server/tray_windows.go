@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -72,6 +73,11 @@ const (
 
 	attachParentProcess = ^uintptr(0) // (DWORD)-1
 
+	swShowNormal            = 1
+	coinitApartmentThreaded = 0x2
+	coinitDisableOLE1DDE    = 0x4
+	trayClickDebounceWindow = 500 * time.Millisecond
+
 	cmdOpenShelf   = 1001
 	cmdOpenAdmin   = 1002
 	cmdOpenDataDir = 1003
@@ -85,6 +91,7 @@ var (
 	modUser32   = windows.NewLazySystemDLL("user32.dll")
 	modShell32  = windows.NewLazySystemDLL("shell32.dll")
 	modKernel32 = windows.NewLazySystemDLL("kernel32.dll")
+	modOle32    = windows.NewLazySystemDLL("ole32.dll")
 
 	procRegisterClassExW         = modUser32.NewProc("RegisterClassExW")
 	procCreateWindowExW          = modUser32.NewProc("CreateWindowExW")
@@ -108,8 +115,11 @@ var (
 	procGetSystemMetrics         = modUser32.NewProc("GetSystemMetrics")
 	procMessageBoxW              = modUser32.NewProc("MessageBoxW")
 	procShellNotifyIconW         = modShell32.NewProc("Shell_NotifyIconW")
+	procShellExecuteW            = modShell32.NewProc("ShellExecuteW")
 	procGetModuleHandleW         = modKernel32.NewProc("GetModuleHandleW")
 	procAttachConsole            = modKernel32.NewProc("AttachConsole")
+	procCoInitializeEx           = modOle32.NewProc("CoInitializeEx")
+	procCoUninitialize           = modOle32.NewProc("CoUninitialize")
 )
 
 // Exact Win32 ABI layouts for x64 Windows (verified by tray_windows_test.go).
@@ -168,6 +178,7 @@ type windowsTrayState struct {
 	ownedIcon         bool
 	taskbarCreatedMsg uint32
 	menuOpen          bool
+	lastOpenShelf     time.Time
 }
 
 var (
@@ -180,10 +191,14 @@ func isWindowsTrayEnabled(noTray bool) bool {
 	return !noTray
 }
 
-// printVersionForPlatform prints version to the parent console when launched from
-// PowerShell/CMD (reopening CONOUT$ because -H=windowsgui starts without a bound
-// stdout handle), or shows a clean native dialog if double-clicked from Explorer.
+// printVersionForPlatform handles all three invocation modes of a -H=windowsgui binary:
+// 1. redirected stdout (pipe/file): writes directly to os.Stdout
+// 2. interactive PowerShell/CMD: attaches parent console and writes to CONOUT$
+// 3. double-clicked in Explorer: displays a native MessageBoxW dialog
 func printVersionForPlatform(ver string) {
+	if _, err := fmt.Fprintln(os.Stdout, ver); err == nil {
+		return
+	}
 	ret, _, _ := procAttachConsole.Call(attachParentProcess)
 	if ret != 0 {
 		if conOut, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0); err == nil {
@@ -209,7 +224,7 @@ func showStartupErrorDialog(err error, port int, shelfURL, logPath string) {
 			port, shelfURL,
 		)
 		if showMessageBox("MangaAlpha 已在运行或端口被占用", text, mbYesNo|mbIconInformation) == idYes {
-			_ = openURL("windows", shelfURL)
+			openWindowsURL(shelfURL)
 		}
 		return
 	}
@@ -227,11 +242,53 @@ func showMessageBox(title, text string, flags uint32) int {
 	return int(ret)
 }
 
-func configureCommandForPlatform(cmd *exec.Cmd) {
-	if cmd == nil {
-		return
+func configureCommandForPlatform(_ *exec.Cmd) {
+	// rundll32.exe and explorer.exe are GUI subsystem binaries (never spawn a console);
+	// do not pass HideWindow/SW_HIDE so newly launched browser/editor windows open visible.
+}
+
+func shellExecuteOpen(target string) error {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return errors.New("empty target")
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	hr, _, _ := procCoInitializeEx.Call(0, coinitApartmentThreaded|coinitDisableOLE1DDE)
+	if hr == 0 || hr == 1 { // S_OK or S_FALSE
+		defer procCoUninitialize.Call()
+	}
+
+	verbPtr, err := windows.UTF16PtrFromString("open")
+	if err != nil {
+		return err
+	}
+	filePtr, err := windows.UTF16PtrFromString(target)
+	if err != nil {
+		return err
+	}
+	ret, _, callErr := procShellExecuteW.Call(
+		0,
+		uintptr(unsafe.Pointer(verbPtr)),
+		uintptr(unsafe.Pointer(filePtr)),
+		0,
+		0,
+		swShowNormal,
+	)
+	if ret <= 32 {
+		if callErr != nil && callErr != syscall.Errno(0) {
+			return fmt.Errorf("ShellExecuteW(%q): code %d: %w", target, ret, callErr)
+		}
+		return fmt.Errorf("ShellExecuteW(%q): code %d", target, ret)
+	}
+	return nil
+}
+
+func openWindowsURL(targetURL string) {
+	if err := shellExecuteOpen(targetURL); err != nil {
+		_ = openURL("windows", targetURL)
+	}
 }
 
 func openWindowsPath(target string) error {
@@ -239,8 +296,14 @@ func openWindowsPath(target string) error {
 	if target == "" {
 		return errors.New("empty path")
 	}
+	if abs, err := filepath.Abs(target); err == nil {
+		target = abs
+	}
+	target = filepath.Clean(target)
+	if err := shellExecuteOpen(target); err == nil {
+		return nil
+	}
 	cmd := exec.Command("explorer.exe", target)
-	configureCommandForPlatform(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -520,9 +583,9 @@ func (s *windowsTrayState) showContextMenu() {
 
 	switch cmd {
 	case cmdOpenShelf:
-		go func() { _ = openURL("windows", s.cfg.ShelfURL) }()
+		go openWindowsURL(s.cfg.ShelfURL)
 	case cmdOpenAdmin:
-		go func() { _ = openURL("windows", s.cfg.AdminURL) }()
+		go openWindowsURL(s.cfg.AdminURL)
 	case cmdOpenDataDir:
 		go func() { _ = openWindowsPath(s.cfg.DataDir) }()
 	case cmdOpenLog:
@@ -553,7 +616,11 @@ func trayWindowProc(hwnd uintptr, msg uint32, wParam, lParam uintptr) uintptr {
 		case wmTrayCallback:
 			switch uint32(lParam & 0xffff) {
 			case wmLButtonUp:
-				go func() { _ = openURL("windows", st.cfg.ShelfURL) }()
+				now := time.Now()
+				if now.Sub(st.lastOpenShelf) >= trayClickDebounceWindow {
+					st.lastOpenShelf = now
+					go openWindowsURL(st.cfg.ShelfURL)
+				}
 			case wmRButtonUp, wmContextMenu:
 				st.showContextMenu()
 			}

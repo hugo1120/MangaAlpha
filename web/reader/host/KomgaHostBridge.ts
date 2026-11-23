@@ -133,7 +133,8 @@ async function komgaFetch<T>(path: string, init?: RequestInit): Promise<T> {
         try {
             const errJson = await resp.json();
             if (errJson?.message) msg = errJson.message;
-            if (typeof errJson?.code === 'string') code = errJson.code;
+            if (typeof errJson?.error === 'string') code = errJson.error;
+            else if (typeof errJson?.code === 'string') code = errJson.code;
         } catch {
             // ignore
         }
@@ -168,8 +169,40 @@ class KomgaBridgeImpl {
 
     private passwordPromptHandler: ArchivePasswordPromptHandler | null = null;
 
+    private inFlightBookPrompts = new Map<string, Promise<boolean>>();
+
+    private passwordPromptQueue: Promise<void> = Promise.resolve();
+
     public setPasswordPromptHandler(handler: ArchivePasswordPromptHandler | null): void {
         this.passwordPromptHandler = handler;
+    }
+
+    private requestArchivePasswordUnlock(req: ArchivePasswordPromptRequest): Promise<boolean> {
+        const existing = this.inFlightBookPrompts.get(req.bookId);
+        if (existing) {
+            return existing;
+        }
+        const task = new Promise<boolean>((resolve) => {
+            this.passwordPromptQueue = this.passwordPromptQueue.then(async () => {
+                const handler = this.passwordPromptHandler;
+                if (!handler) {
+                    resolve(false);
+                    return;
+                }
+                try {
+                    const unlocked = await handler(req);
+                    resolve(unlocked);
+                } catch {
+                    resolve(false);
+                }
+            });
+        }).finally(() => {
+            if (this.inFlightBookPrompts.get(req.bookId) === task) {
+                this.inFlightBookPrompts.delete(req.bookId);
+            }
+        });
+        this.inFlightBookPrompts.set(req.bookId, task);
+        return task;
     }
 
     public async unlockBookArchive(bookId: string, password: string): Promise<void> {
@@ -722,7 +755,13 @@ class KomgaBridgeImpl {
                         }
                         const seriesTitle =
                             bundle?.series.metadata?.title?.trim() || bundle?.series.name || '';
-                        const unlocked = await this.passwordPromptHandler({
+                        // If another chapter's password dialog is currently open, wait for it first
+                        // and retry /pages in case same-folder auto-retry already unlocked this book.
+                        if (this.inFlightBookPrompts.size > 0 && !this.inFlightBookPrompts.has(chap.bookId)) {
+                            await this.passwordPromptQueue;
+                            continue;
+                        }
+                        const unlocked = await this.requestArchivePasswordUnlock({
                             bookId: chap.bookId,
                             bookName: chap.name,
                             seriesId: chap.seriesId,

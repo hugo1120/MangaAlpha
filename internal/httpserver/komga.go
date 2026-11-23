@@ -665,7 +665,11 @@ func (s *Server) komgaPageImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", page.Entry.MimeType)
-	w.Header().Set("Cache-Control", "private, max-age=86400")
+	if page.Entry.Encrypted {
+		w.Header().Set("Cache-Control", "private, no-store")
+	} else {
+		w.Header().Set("Cache-Control", "private, max-age=86400")
+	}
 	w.Header().Set("Content-Length", strconv.Itoa(len(page.Data)))
 	if _, err := w.Write(page.Data); err != nil {
 		return

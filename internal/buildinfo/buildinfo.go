@@ -1,4 +1,4 @@
 package buildinfo
 
 // Version is overridden by release builds with -ldflags -X.
-var Version = "v2.8.0"
+var Version = "v2.9.0"

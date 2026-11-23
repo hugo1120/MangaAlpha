@@ -1,6 +1,7 @@
 package httpserver
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -391,5 +394,94 @@ func TestV27AgentGuideAndOneClickAuthFlow(t *testing.T) {
 	}
 	if !got429 {
 		t.Fatalf("expected per-IP 429 rate limit on /api/agent/v1/auth/requests")
+	}
+}
+
+func TestV27BangumiLookupArchiveSummaryAndSourceGate(t *testing.T) {
+	_, store, bgmSvc, ts := setupV27TestServer(t, "")
+	cookie := claimAndLoginCookie(t, store)
+	ctx := context.Background()
+
+	// Build a minimal archive zip with a Chinese-translated book subject (NOT in local library).
+	zipPath := filepath.Join(t.TempDir(), "dump-zh.zip")
+	zf, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("create zip: %v", err)
+	}
+	zw := zip.NewWriter(zf)
+	w, err := zw.Create("subject.jsonlines")
+	if err != nil {
+		t.Fatalf("create entry: %v", err)
+	}
+	_, _ = w.Write([]byte(`{"id":404123,"type":1,"platform":1001,"series":true,"nsfw":false,"name":"ファミレス行こ。","name_cn":"去家庭餐厅吧。","summary":"第一行简中译文。\n第二行简中译文。","infobox":"","score":8.5,"rank":120}` + "\n"))
+	if err := zw.Close(); err != nil {
+		t.Fatalf("close zip writer: %v", err)
+	}
+	_ = zf.Close()
+
+	if err := bgmSvc.ImportArchiveZip(ctx, zipPath, "dump-zh.zip", "2026-11-23T00:00:00Z"); err != nil {
+		t.Fatalf("import archive zip: %v", err)
+	}
+
+	rawKey, _, err := store.CreateAPIKey(ctx, "UserscriptSummaryTest")
+	if err != nil {
+		t.Fatalf("create api key: %v", err)
+	}
+
+	lookup := func() map[string]any {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/bangumi/lookup?subject_id=404123", nil)
+		req.Header.Set("X-API-Key", rawKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("lookup: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("lookup status=%d", resp.StatusCode)
+		}
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return out
+	}
+
+	// 1. Default source (zh_cn): returns summary even when found=false!
+	gotZH := lookup()
+	if gotZH["found"] != false || gotZH["summarySource"] != bangumi.ArchiveSourceZH || gotZH["summary"] != "第一行简中译文。\n第二行简中译文。" {
+		t.Fatalf("expected zh_cn summary even when not owned, got %+v", gotZH)
+	}
+
+	// 2. Switch archive source to "official" -> must NOT return summary
+	if _, err := bgmSvc.SetArchiveSource(ctx, bangumi.ArchiveSourceOfficial, ""); err != nil {
+		t.Fatalf("set official source: %v", err)
+	}
+	gotOff := lookup()
+	if _, exists := gotOff["summary"]; exists {
+		t.Fatalf("expected no summary when archive source is official, got %+v", gotOff)
+	}
+
+	// 3. Switch archive source to "custom" -> returns summary again
+	if _, err := bgmSvc.SetArchiveSource(ctx, bangumi.ArchiveSourceCustom, "https://example.com/aux/latest.json"); err != nil {
+		t.Fatalf("set custom source: %v", err)
+	}
+	gotCustom := lookup()
+	if gotCustom["summarySource"] != bangumi.ArchiveSourceCustom || gotCustom["summary"] != "第一行简中译文。\n第二行简中译文。" {
+		t.Fatalf("expected custom source summary, got %+v", gotCustom)
+	}
+
+	// 4. Verify rendered userscript contains v2.7.1 & summary translate button logic
+	usReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/admin/api/bangumi/userscript.user.js", nil)
+	usReq.Header.Set("Cookie", cookie)
+	usResp, err := http.DefaultClient.Do(usReq)
+	if err != nil {
+		t.Fatalf("get userscript: %v", err)
+	}
+	usBytes, _ := io.ReadAll(usResp.Body)
+	usResp.Body.Close()
+	usBody := string(usBytes)
+	for _, needle := range []string{"@version      2.7.1", "#mangaalpha-summary-bar", "显示简中翻译", "查看原文"} {
+		if !strings.Contains(usBody, needle) {
+			t.Fatalf("userscript missing %q", needle)
+		}
 	}
 }

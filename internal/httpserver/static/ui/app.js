@@ -3339,9 +3339,9 @@
       </div>
 
       <div class="card">
-        <h3>油猴脚本（Bangumi 条目页右侧栏快捷跳转）</h3>
+        <h3>油猴脚本（Bangumi 条目页快捷跳转与简介简中翻译）</h3>
         <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary);line-height:1.65">
-          在 <code>bgm.tv</code> / <code>bangumi.tv</code> / <code>chii.in</code> 条目页<strong>右侧收藏盒下方</strong>以原生侧栏卡片展示本库收录状态（自动适配浅色与深色模式），并一键直达作品或多版本切换栏。
+          在 <code>bgm.tv</code> / <code>bangumi.tv</code> / <code>chii.in</code> 条目页<strong>右侧收藏盒下方</strong>以原生侧栏卡片展示本库收录状态（自动适配浅色与深色模式）、一键直达作品或多版本切换栏，并在<strong>简介正上方</strong>自动提供「显示简中翻译 / 查看原文」切换按钮（复用本地中文增强离线库）。
           支持 Tampermonkey / Violentmonkey 直接弹窗安装与覆盖升级。
         </p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">

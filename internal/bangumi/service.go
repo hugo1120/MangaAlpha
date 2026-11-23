@@ -255,6 +255,23 @@ func (s *Service) ArchiveStatus() ArchiveStatus {
 	return s.archive.Status()
 }
 
+// ArchiveSummaryByID returns the locally indexed Chinese-enhanced summary for a Bangumi subject.
+// When the active archive source is the untranslated official upstream ("official"), it returns ok=false.
+func (s *Service) ArchiveSummaryByID(ctx context.Context, subjectID int64) (summary string, source string, ok bool) {
+	if s == nil || s.archive == nil || subjectID <= 0 {
+		return "", "", false
+	}
+	srcCfg := s.ArchiveSource(ctx)
+	if srcCfg.Source == ArchiveSourceOfficial {
+		return "", "", false
+	}
+	sum, found, err := s.archive.SummaryByID(ctx, subjectID)
+	if err != nil || !found {
+		return "", "", false
+	}
+	return sum, srcCfg.Source, true
+}
+
 func (s *Service) StartArchiveUpdate() (ArchiveStatus, error) {
 	return s.archive.StartOnlineUpdateWithOptions(false)
 }

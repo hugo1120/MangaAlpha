@@ -1125,6 +1125,32 @@ FROM bgm_subjects WHERE id=?`, subjectID)
 	return cand, true, nil
 }
 
+// SummaryByID performs a fast primary-key lookup of a subject's summary from the local archive index.
+func (a *ArchiveIndex) SummaryByID(ctx context.Context, subjectID int64) (string, bool, error) {
+	if a == nil || subjectID <= 0 {
+		return "", false, nil
+	}
+	a.mu.RLock()
+	db := a.db
+	a.mu.RUnlock()
+	if db == nil {
+		return "", false, nil
+	}
+	var summary string
+	err := db.QueryRowContext(ctx, `SELECT summary FROM bgm_subjects WHERE id=?`, subjectID).Scan(&summary)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	summary = strings.TrimSpace(summary)
+	if summary == "" {
+		return "", false, nil
+	}
+	return summary, true, nil
+}
+
 func scanSubjectCandidateRow(scanner interface{ Scan(...any) error }) (SubjectCandidate, error) {
 	var (
 		c                          SubjectCandidate

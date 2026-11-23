@@ -185,13 +185,20 @@ func (s *Server) komgaBangumiLookup(w http.ResponseWriter, r *http.Request) {
 	} else if len(matches) > 1 {
 		jumpURL = matches[0].URL + "?versions=1"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"subjectId": subjectID,
 		"found":     len(matches) > 0,
 		"count":     len(matches),
 		"jumpUrl":   jumpURL,
 		"matches":   matches,
-	})
+	}
+	if s.bangumi != nil {
+		if summary, src, ok := s.bangumi.ArchiveSummaryByID(r.Context(), subjectID); ok {
+			resp["summary"] = summary
+			resp["summarySource"] = src
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) requestOrigin(r *http.Request) string {

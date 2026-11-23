@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MangaAlpha Bangumi 一键跳转
 // @namespace    https://github.com/xJogger/MangaAlpha
-// @version      2.7.0
-// @description  在 Bangumi 条目页右侧栏自动探测本地 MangaAlpha 收录状态，并一键直达对应漫画。
+// @version      2.7.1
+// @description  在 Bangumi 条目页右侧栏自动探测本地 MangaAlpha 收录状态、一键直达漫画，并在简介上方提供简中翻译一键切换。
 // @match        https://bgm.tv/subject/*
 // @match        https://bangumi.tv/subject/*
 // @match        https://chii.in/subject/*
@@ -285,6 +285,64 @@
         background: #2c2c2c;
         border-color: #444;
       }
+      #mangaalpha-summary-bar {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0 0 8px 0;
+      }
+      #mangaalpha-summary-bar .ma-sum-btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        padding: 3px 10px;
+        border-radius: 5px;
+        font-size: 12px;
+        font-weight: 600;
+        line-height: 1.5;
+        cursor: pointer;
+        border: 1px solid rgba(201, 70, 98, 0.45);
+        background: rgba(240, 145, 153, 0.14);
+        color: #a93251 !important;
+      }
+      #mangaalpha-summary-bar .ma-sum-btn:hover {
+        background: rgba(240, 145, 153, 0.25);
+        border-color: rgba(201, 70, 98, 0.78);
+      }
+      #mangaalpha-summary-bar .ma-sum-btn.ma-sum-active {
+        background: #c94662;
+        border-color: #b43854;
+        color: #ffffff !important;
+      }
+      #mangaalpha-summary-bar .ma-sum-btn.ma-sum-active:hover {
+        background: #b43854;
+      }
+      #mangaalpha-summary-bar .ma-sum-src {
+        font-size: 11px;
+        color: #777;
+      }
+      html[data-theme="dark"] #mangaalpha-summary-bar .ma-sum-btn {
+        background: rgba(240, 145, 153, 0.18);
+        border-color: rgba(240, 145, 153, 0.50);
+        color: #fda4af !important;
+      }
+      html[data-theme="dark"] #mangaalpha-summary-bar .ma-sum-btn:hover {
+        background: rgba(240, 145, 153, 0.30);
+        border-color: rgba(253, 164, 175, 0.78);
+        color: #ffe4e6 !important;
+      }
+      html[data-theme="dark"] #mangaalpha-summary-bar .ma-sum-btn.ma-sum-active {
+        background: #be4b62;
+        border-color: #f09199;
+        color: #ffffff !important;
+      }
+      html[data-theme="dark"] #mangaalpha-summary-bar .ma-sum-btn.ma-sum-active:hover {
+        background: #d15871;
+      }
+      html[data-theme="dark"] #mangaalpha-summary-bar .ma-sum-src {
+        color: #9ca3af;
+      }
     `;
     (document.head || document.documentElement).appendChild(style);
   }
@@ -379,7 +437,100 @@
     return div;
   }
 
+  let summaryState = null;
+
+  function normalizeSummaryText(raw) {
+    return String(raw || '')
+      .replace(/\r\n?/g, '\n')
+      .replace(/[\u00a0\u3000]/g, ' ')
+      .split('\n')
+      .map((line) => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+
+  function restoreOriginalSummary() {
+    const existingBar = document.getElementById('mangaalpha-summary-bar');
+    if (existingBar) existingBar.remove();
+    if (summaryState && summaryState.showingTranslated && summaryState.el && summaryState.origFrag) {
+      summaryState.el.textContent = '';
+      summaryState.el.appendChild(summaryState.origFrag);
+      summaryState.origFrag = null;
+      summaryState.showingTranslated = false;
+    }
+  }
+
+  function buildPlainSummaryFragment(text) {
+    const frag = document.createDocumentFragment();
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    lines.forEach((line, idx) => {
+      if (idx > 0) frag.appendChild(document.createElement('br'));
+      frag.appendChild(document.createTextNode(line));
+    });
+    return frag;
+  }
+
+  function mountSummaryTranslateBar(translatedSummary) {
+    restoreOriginalSummary();
+    const translated = String(translatedSummary || '').trim();
+    if (!translated) return;
+
+    const summaryEl = document.getElementById('subject_summary');
+    if (!summaryEl || summaryEl.tagName === 'TEXTAREA' || summaryEl.tagName === 'INPUT') return;
+
+    const origText = summaryEl.innerText || summaryEl.textContent || '';
+    if (normalizeSummaryText(origText) === normalizeSummaryText(translated)) return;
+
+    summaryState = {
+      el: summaryEl,
+      origFrag: null,
+      showingTranslated: false,
+    };
+
+    const bar = document.createElement('div');
+    bar.id = 'mangaalpha-summary-bar';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ma-sum-btn';
+    btn.textContent = '显示简中翻译';
+    btn.title = '切换显示 MangaAlpha 本地简中翻译库简介';
+
+    const srcNote = document.createElement('span');
+    srcNote.className = 'ma-sum-src';
+    srcNote.textContent = 'MangaAlpha 简中库';
+
+    btn.onclick = () => {
+      if (!summaryState.showingTranslated) {
+        const frag = document.createDocumentFragment();
+        while (summaryEl.firstChild) {
+          frag.appendChild(summaryEl.firstChild);
+        }
+        summaryState.origFrag = frag;
+        summaryEl.appendChild(buildPlainSummaryFragment(translated));
+        summaryState.showingTranslated = true;
+        btn.textContent = '查看原文';
+        btn.classList.add('ma-sum-active');
+      } else {
+        summaryEl.textContent = '';
+        if (summaryState.origFrag) {
+          summaryEl.appendChild(summaryState.origFrag);
+          summaryState.origFrag = null;
+        }
+        summaryState.showingTranslated = false;
+        btn.textContent = '显示简中翻译';
+        btn.classList.remove('ma-sum-active');
+      }
+    };
+
+    bar.appendChild(btn);
+    bar.appendChild(srcNote);
+    summaryEl.insertAdjacentElement('beforebegin', bar);
+  }
+
   function render() {
+    restoreOriginalSummary();
     const body = buildPanelFrame();
     const serverUrl = getServerUrl();
     const apiKey = getApiKey();
@@ -423,6 +574,10 @@
         } catch {
           body.appendChild(makeLink('在 MangaAlpha 中打开 ↗', jumpUrl, 'warn'));
           return;
+        }
+
+        if (typeof data.summary === 'string' && data.summary.trim()) {
+          mountSummaryTranslateBar(data.summary);
         }
 
         const matches = Array.isArray(data.matches) ? data.matches : [];

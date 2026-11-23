@@ -3235,7 +3235,7 @@
           </div>
         </div>
         <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-secondary);line-height:1.65">
-          将<strong>后续新增</strong>的阅读进度自动单向推送到你的 Bangumi 收藏（兼容内置阅读器、Android 端、Mihon 与 Koharia，复用上方 Bangumi 网络代理，不会批量回写历史进度）。
+          将<strong>后续新增</strong>的阅读进度自动单向推送到你的 Bangumi 收藏（兼容内置阅读器、Android 端、Mihon、Koharia 与 KOReader OPDS，复用上方 Bangumi 网络代理，不会批量回写历史进度）。
           推荐使用下方 <strong>Bangumi OAuth 一键授权</strong>：服务端会在到期前自动使用 <code>refresh_token</code> 滚动续期，长期免维护。
         </p>
         ${tr.hasToken ? `

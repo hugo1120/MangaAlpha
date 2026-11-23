@@ -290,12 +290,13 @@ VALUES(?,?,?,?,?,?,?,'pk',1,?,?,'sc')`, row.bid, row.sid, row.libID, row.bid, ro
 		t.Fatalf("0-match /bgm/123456: status=%d body=%s", rJumpMiss.StatusCode, missBody)
 	}
 
-	// 8. Userscript endpoint returns valid Tampermonkey script with server origin & empty default API key
+	// 8. Userscript endpoint returns valid keyless Tampermonkey script with server origin & @downloadURL
 	rUS := doReq(http.MethodGet, "/admin/api/bangumi/userscript.user.js", "", false)
 	usBody, _ := io.ReadAll(rUS.Body)
 	rUS.Body.Close()
 	if rUS.StatusCode != 200 || !strings.Contains(string(usBody), "==UserScript==") ||
-		!strings.Contains(string(usBody), ts.URL) || !strings.Contains(string(usBody), "const DEFAULT_API_KEY = '';") {
+		!strings.Contains(string(usBody), ts.URL) || !strings.Contains(string(usBody), "@downloadURL") ||
+		strings.Contains(string(usBody), "DEFAULT_API_KEY") {
 		t.Fatalf("unexpected userscript response: status=%d len=%d", rUS.StatusCode, len(usBody))
 	}
 

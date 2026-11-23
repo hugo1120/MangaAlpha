@@ -62,7 +62,6 @@ type Server struct {
 	sse               *sseHub
 	trustedProxies    *trustedProxyChecker
 	authLimiter       *authRateLimiter
-	userscriptTickets *userscriptTicketStore
 	bgmOAuthStates    *bangumiOAuthStateStore
 	agentAuth         *agentAuthStore
 
@@ -101,7 +100,6 @@ func New(
 		sse:               newSSEHub(),
 		trustedProxies:    newTrustedProxyChecker(runtimeInfo.TrustedProxies),
 		authLimiter:       newAuthRateLimiter(),
-		userscriptTickets: newUserscriptTicketStore(),
 		bgmOAuthStates:    newBangumiOAuthStateStore(),
 		agentAuth:         newAgentAuthStore(),
 		placeholder:       makePlaceholder(),
@@ -171,7 +169,8 @@ func (s *Server) routes() chi.Router {
 	r.Get("/series/{seriesID}", s.serveSeriesPageOrSPA)
 	r.Get("/book/{bookID}", s.serveBookPageOrSPA)
 	r.Get("/books/{bookID}", s.serveBookPageOrSPA)
-	r.Get("/bgm/userscript/{ticket}/mangaalpha-bangumi.user.js", s.serveUserscriptByTicket)
+	r.Get("/bgm/userscript/latest.user.js", s.serveLatestUserscript)
+	r.Get("/bgm/userscript/pair", s.serveUserscriptPairPage)
 	r.Get("/bgm/{subjectID}", s.serveBangumiJump)
 	r.Get("/agent-auth/{requestID}", s.serveSPA)
 	r.Get("/admin", s.serveSPA)

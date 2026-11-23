@@ -479,9 +479,12 @@ func TestV27BangumiLookupArchiveSummaryAndSourceGate(t *testing.T) {
 	usBytes, _ := io.ReadAll(usResp.Body)
 	usResp.Body.Close()
 	usBody := string(usBytes)
-	for _, needle := range []string{"@version      2.7.1", "#mangaalpha-summary-bar", "显示简中翻译", "查看原文"} {
+	for _, needle := range []string{"@version      2.7.2", "@updateURL", "@downloadURL", "/bgm/userscript/pair*", "#mangaalpha-summary-bar", "显示简中翻译", "查看原文"} {
 		if !strings.Contains(usBody, needle) {
 			t.Fatalf("userscript missing %q", needle)
 		}
+	}
+	if strings.Contains(usBody, "DEFAULT_API_KEY") {
+		t.Fatalf("keyless userscript must never contain DEFAULT_API_KEY")
 	}
 }

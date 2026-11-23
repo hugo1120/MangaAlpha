@@ -22,7 +22,7 @@ const (
 type ArchiveSchedule struct {
 	Enabled       bool   `json:"enabled"`
 	Frequency     string `json:"frequency"`  // "weekly" | "monthly"
-	DayOfWeek     int    `json:"dayOfWeek"`  // 0=Sun .. 6=Sat (default 3=Wed)
+	DayOfWeek     int    `json:"dayOfWeek"`  // 0=Sun .. 6=Sat (default 4=Thu for zh_cn/custom, 3=Wed for official)
 	DayOfMonth    int    `json:"dayOfMonth"` // 1..28 (default 1)
 	TimeOfDay     string `json:"timeOfDay"`  // "HH:MM" in local server timezone (default "06:00")
 	LastSlot      string `json:"lastSlot,omitempty"`
@@ -41,14 +41,25 @@ type ArchiveScheduleUpdate struct {
 	TimeOfDay  string `json:"timeOfDay"`
 }
 
-func DefaultArchiveSchedule() ArchiveSchedule {
+// DefaultArchiveScheduleForSource returns the recommended check schedule for a given archive source.
+// Official upstream publishes Wed ~05:04 CST (recommend Wed 06:00); Chinese-enhanced mirror runs
+// incremental translation starting Wed 06:00 CST (recommend Thu 06:00 for a full buffer).
+func DefaultArchiveScheduleForSource(source string) ArchiveSchedule {
+	dow := int(time.Thursday)
+	if strings.EqualFold(strings.TrimSpace(source), ArchiveSourceOfficial) {
+		dow = int(time.Wednesday)
+	}
 	return ArchiveSchedule{
 		Enabled:    false,
 		Frequency:  ArchiveFreqWeekly,
-		DayOfWeek:  int(time.Wednesday),
+		DayOfWeek:  dow,
 		DayOfMonth: 1,
 		TimeOfDay:  "06:00",
 	}
+}
+
+func DefaultArchiveSchedule() ArchiveSchedule {
+	return DefaultArchiveScheduleForSource(ArchiveSourceZH)
 }
 
 func ValidateArchiveSchedule(in ArchiveScheduleUpdate) (ArchiveSchedule, error) {
@@ -171,7 +182,7 @@ func archiveScheduleDueSlot(s ArchiveSchedule, now time.Time) (string, bool) {
 }
 
 func (s *Service) ArchiveSchedule(ctx context.Context) ArchiveSchedule {
-	sched := DefaultArchiveSchedule()
+	sched := DefaultArchiveScheduleForSource(s.ArchiveSource(ctx).Source)
 	if raw, err := s.store.GetSetting(ctx, SettingArchiveSchedule); err == nil && strings.TrimSpace(raw) != "" {
 		_ = json.Unmarshal([]byte(raw), &sched)
 	}
@@ -187,6 +198,29 @@ func (s *Service) ArchiveSchedule(ctx context.Context) ArchiveSchedule {
 		sched.NextRunAt = ""
 	}
 	return sched
+}
+
+// adaptDefaultArchiveScheduleOnSourceChange updates a saved schedule's default weekday when switching
+// between official (Wed 06:00) and zh_cn/custom (Thu 06:00), while preserving any user-customized time.
+func (s *Service) adaptDefaultArchiveScheduleOnSourceChange(ctx context.Context, oldSource, newSource string) {
+	oldDef := DefaultArchiveScheduleForSource(oldSource)
+	newDef := DefaultArchiveScheduleForSource(newSource)
+	if oldDef.DayOfWeek == newDef.DayOfWeek && oldDef.TimeOfDay == newDef.TimeOfDay {
+		return
+	}
+	raw, err := s.store.GetSetting(ctx, SettingArchiveSchedule)
+	if err != nil || strings.TrimSpace(raw) == "" {
+		return
+	}
+	var saved ArchiveSchedule
+	if err := json.Unmarshal([]byte(raw), &saved); err != nil {
+		return
+	}
+	if saved.Frequency == ArchiveFreqWeekly && saved.DayOfWeek == oldDef.DayOfWeek && strings.TrimSpace(saved.TimeOfDay) == oldDef.TimeOfDay {
+		saved.DayOfWeek = newDef.DayOfWeek
+		saved.TimeOfDay = newDef.TimeOfDay
+		_ = s.saveArchiveSchedule(ctx, saved)
+	}
 }
 
 func (s *Service) UpdateArchiveSchedule(ctx context.Context, in ArchiveScheduleUpdate) (ArchiveSchedule, error) {

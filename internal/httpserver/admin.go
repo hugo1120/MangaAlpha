@@ -106,7 +106,7 @@ func (s *Server) adminRoutes(r chi.Router) {
 
 	// Bangumi scraping, archive index management, tracker & userscript
 	r.Get("/bangumi/userscript.user.js", s.downloadBangumiUserscript)
-	r.Post("/bangumi/userscript/install-ticket", s.createUserscriptInstallTicket)
+	r.Post("/bangumi/userscript/pair-key", s.createUserscriptPairKey)
 	r.Get("/bangumi/tracker", s.getBangumiTracker)
 	r.Put("/bangumi/tracker/config", s.putBangumiTrackerConfig)
 	r.Post("/bangumi/tracker/test", s.testBangumiTracker)

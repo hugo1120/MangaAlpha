@@ -46,7 +46,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			strings.HasPrefix(p, "/ui/") ||
 			strings.HasPrefix(p, "/assets/") ||
 			isStaticReaderAssetPath(p) ||
-			isUserscriptTicketPath(p, r.Method) ||
+			isPublicUserscriptPath(p, r.Method) ||
 			isBangumiOAuthCallbackPath(p, r.Method) ||
 			isPublicAgentDiscoveryPath(p, r.Method) {
 			next.ServeHTTP(w, r)
@@ -238,13 +238,6 @@ func candidateAPIKeys(r *http.Request) []string {
 func isAPIRequestPath(p string) bool {
 	return p == "/api" || strings.HasPrefix(p, "/api/") ||
 		p == "/admin/api" || strings.HasPrefix(p, "/admin/api/")
-}
-
-func isUserscriptTicketPath(p, method string) bool {
-	if method != http.MethodGet && method != http.MethodHead {
-		return false
-	}
-	return strings.HasPrefix(p, "/bgm/userscript/") && strings.HasSuffix(p, "/mangaalpha-bangumi.user.js")
 }
 
 func isStaticReaderAssetPath(p string) bool {

@@ -1,8 +1,6 @@
 package httpserver
 
 import (
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
 	"html"
 	"net"
@@ -10,7 +8,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -18,87 +15,15 @@ import (
 
 const (
 	userscriptKeyNamePrefix = "Bangumi 油猴脚本"
-	userscriptTicketTTL     = 60 * time.Second
-	userscriptTicketReads   = 5
-	userscriptTicketMaxCap  = 64
+	userscriptLatestPath    = "/bgm/userscript/latest.user.js"
+	userscriptPairPath      = "/bgm/userscript/pair"
 )
 
-type userscriptTicket struct {
-	origin         string
-	apiKey         string
-	expiresAt      time.Time
-	remainingReads int
-}
-
-type userscriptTicketStore struct {
-	mu      sync.Mutex
-	tickets map[string]*userscriptTicket
-	nowFunc func() time.Time
-}
-
-func newUserscriptTicketStore() *userscriptTicketStore {
-	return &userscriptTicketStore{
-		tickets: make(map[string]*userscriptTicket),
-		nowFunc: time.Now,
+func isPublicUserscriptPath(p, method string) bool {
+	if method != http.MethodGet && method != http.MethodHead {
+		return false
 	}
-}
-
-func (st *userscriptTicketStore) now() time.Time {
-	if st != nil && st.nowFunc != nil {
-		return st.nowFunc()
-	}
-	return time.Now()
-}
-
-func (st *userscriptTicketStore) Issue(origin, apiKey string) (string, error) {
-	var raw [32]byte
-	if _, err := rand.Read(raw[:]); err != nil {
-		return "", err
-	}
-	token := base64.RawURLEncoding.EncodeToString(raw[:])
-	now := st.now()
-
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	for k, v := range st.tickets {
-		if !v.expiresAt.After(now) || v.remainingReads <= 0 {
-			delete(st.tickets, k)
-		}
-	}
-	if len(st.tickets) >= userscriptTicketMaxCap {
-		st.tickets = make(map[string]*userscriptTicket)
-	}
-	st.tickets[token] = &userscriptTicket{
-		origin:         origin,
-		apiKey:         apiKey,
-		expiresAt:      now.Add(userscriptTicketTTL),
-		remainingReads: userscriptTicketReads,
-	}
-	return token, nil
-}
-
-func (st *userscriptTicketStore) Consume(token string) (origin, apiKey string, ok bool) {
-	token = strings.TrimSpace(token)
-	if st == nil || token == "" {
-		return "", "", false
-	}
-	now := st.now()
-	st.mu.Lock()
-	defer st.mu.Unlock()
-	item, exists := st.tickets[token]
-	if !exists {
-		return "", "", false
-	}
-	if !item.expiresAt.After(now) || item.remainingReads <= 0 {
-		delete(st.tickets, token)
-		return "", "", false
-	}
-	item.remainingReads--
-	origin, apiKey = item.origin, item.apiKey
-	if item.remainingReads <= 0 {
-		delete(st.tickets, token)
-	}
-	return origin, apiKey, true
+	return p == userscriptLatestPath
 }
 
 func (s *Server) serveBangumiJump(w http.ResponseWriter, r *http.Request) {
@@ -241,37 +166,62 @@ func escapeJSString(s string) string {
 	return replacer.Replace(s)
 }
 
-func renderUserscriptBody(origin, apiKey string) (string, error) {
+func replaceOptionalMetaLine(script, placeholder, line string) string {
+	if line != "" {
+		return strings.ReplaceAll(script, placeholder, line)
+	}
+	script = strings.ReplaceAll(script, placeholder+"\n", "")
+	return strings.ReplaceAll(script, placeholder, "")
+}
+
+// renderUserscriptBody renders the strictly keyless Tampermonkey/Violentmonkey userscript.
+// API keys are never embedded in the script source; instead they are paired into GM_setValue
+// via /bgm/userscript/pair so script updates and diffs stay 100% clean and key-safe.
+func renderUserscriptBody(origin string) (string, error) {
 	raw, err := staticFiles.ReadFile("static/mangaalpha-bangumi.user.js")
 	if err != nil {
 		return "", err
 	}
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	host := sanitizeConnectHost(origin)
+
 	connectLine := ""
-	if host := sanitizeConnectHost(origin); host != "" {
+	pairMatchLine := ""
+	if host != "" {
 		connectLine = "// @connect      " + host
+		matchHost := host
+		if strings.Contains(matchHost, ":") {
+			matchHost = "[" + matchHost + "]"
+		}
+		pairMatchLine = "// @match        *://" + matchHost + userscriptPairPath + "*"
 	}
+	updateLine := ""
+	downloadLine := ""
+	if origin != "" {
+		latestURL := origin + userscriptLatestPath
+		updateLine = "// @updateURL    " + latestURL
+		downloadLine = "// @downloadURL  " + latestURL
+	}
+
 	script := string(raw)
-	if connectLine != "" {
-		script = strings.ReplaceAll(script, "// __MANGAALPHA_CONNECT_LINE__", connectLine)
-	} else {
-		script = strings.ReplaceAll(script, "// __MANGAALPHA_CONNECT_LINE__\n", "")
-		script = strings.ReplaceAll(script, "// __MANGAALPHA_CONNECT_LINE__", "")
-	}
+	script = replaceOptionalMetaLine(script, "// __MANGAALPHA_PAIR_MATCH_LINE__", pairMatchLine)
+	script = replaceOptionalMetaLine(script, "// __MANGAALPHA_UPDATE_URL_LINE__", updateLine)
+	script = replaceOptionalMetaLine(script, "// __MANGAALPHA_DOWNLOAD_URL_LINE__", downloadLine)
+	script = replaceOptionalMetaLine(script, "// __MANGAALPHA_CONNECT_LINE__", connectLine)
 	script = strings.ReplaceAll(script, "__MANGAALPHA_SERVER_URL__", escapeJSString(origin))
-	script = strings.ReplaceAll(script, "__MANGAALPHA_API_KEY__", escapeJSString(apiKey))
 	return script, nil
 }
 
 func writeUserscriptResponse(w http.ResponseWriter, script string) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.Header().Set("Content-Disposition", `inline; filename="mangaalpha-bangumi.user.js"`)
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	_, _ = w.Write([]byte(script))
 }
 
-func (s *Server) downloadBangumiUserscript(w http.ResponseWriter, r *http.Request) {
-	script, err := renderUserscriptBody(s.requestOrigin(r), "")
+func (s *Server) serveLatestUserscript(w http.ResponseWriter, r *http.Request) {
+	script, err := renderUserscriptBody(s.requestOrigin(r))
 	if err != nil {
 		http.Error(w, "userscript template unavailable", http.StatusInternalServerError)
 		return
@@ -279,62 +229,110 @@ func (s *Server) downloadBangumiUserscript(w http.ResponseWriter, r *http.Reques
 	writeUserscriptResponse(w, script)
 }
 
-func (s *Server) createUserscriptInstallTicket(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		WithKey bool `json:"withKey"`
-	}
-	if !decodeJSON(w, r, &req) {
+func (s *Server) downloadBangumiUserscript(w http.ResponseWriter, r *http.Request) {
+	s.serveLatestUserscript(w, r)
+}
+
+func (s *Server) createUserscriptPairKey(w http.ResponseWriter, r *http.Request) {
+	revoked, err := s.store.DeleteAPIKeysByNamePrefix(r.Context(), userscriptKeyNamePrefix)
+	if err != nil {
+		s.writeDBError(w, r, err)
 		return
 	}
-	var (
-		rawKey     string
-		keyPrefix  string
-		rotatedOld int64
-	)
-	if req.WithKey {
-		revoked, err := s.store.DeleteAPIKeysByNamePrefix(r.Context(), userscriptKeyNamePrefix)
-		if err != nil {
-			s.writeDBError(w, r, err)
-			return
-		}
-		rotatedOld = revoked
-		keyName := fmt.Sprintf("%s (%s)", userscriptKeyNamePrefix, time.Now().UTC().Format("2006-01-02"))
-		createdKey, info, err := s.store.CreateAPIKey(r.Context(), keyName)
-		if err != nil {
-			s.writeDBError(w, r, err)
-			return
-		}
-		rawKey = createdKey
-		keyPrefix = info.KeyPrefix
+	keyName := fmt.Sprintf("%s (%s)", userscriptKeyNamePrefix, time.Now().UTC().Format("2006-01-02"))
+	createdKey, info, err := s.store.CreateAPIKey(r.Context(), keyName)
+	if err != nil {
+		s.writeDBError(w, r, err)
+		return
 	}
 	origin := s.requestOrigin(r)
-	ticket, err := s.userscriptTickets.Issue(origin, rawKey)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "TICKET_ERROR", "Failed to generate install ticket.")
-		return
-	}
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"installUrl":       "/bgm/userscript/" + ticket + "/mangaalpha-bangumi.user.js",
-		"expiresInSeconds": int(userscriptTicketTTL.Seconds()),
-		"withKey":          req.WithKey,
-		"rotatedOldKeys":   rotatedOld,
-		"keyPrefix":        keyPrefix,
-		"connectHost":      sanitizeConnectHost(origin),
+		"key":            createdKey,
+		"keyPrefix":      info.KeyPrefix,
+		"rotatedOldKeys": revoked,
+		"pairPath":       userscriptPairPath,
+		"installUrl":     userscriptLatestPath,
+		"connectHost":    sanitizeConnectHost(origin),
 	})
 }
 
-func (s *Server) serveUserscriptByTicket(w http.ResponseWriter, r *http.Request) {
-	ticket := chi.URLParam(r, "ticket")
-	origin, apiKey, ok := s.userscriptTickets.Consume(ticket)
-	if !ok {
-		w.Header().Set("Cache-Control", "no-store")
-		http.Error(w, "Userscript install link has expired. Please regenerate it from MangaAlpha Admin -> Bangumi.", http.StatusNotFound)
-		return
-	}
-	script, err := renderUserscriptBody(origin, apiKey)
-	if err != nil {
-		http.Error(w, "userscript template unavailable", http.StatusInternalServerError)
-		return
-	}
-	writeUserscriptResponse(w, script)
+func (s *Server) serveUserscriptPairPage(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	_, _ = fmt.Fprintf(w, `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>同步专属 Key 到油猴脚本 · MangaAlpha</title>
+<link id="app-favicon" rel="icon" type="image/png" href="/ui/mangaalpha-icon.png">
+<link rel="stylesheet" href="/ui/app.css">
+<script src="/ui/theme-icon.js"></script>
+</head>
+<body style="display:grid;place-items:center;min-height:100vh;margin:0;padding:24px">
+<main id="ma-pair-card" class="card" style="max-width:520px;width:100%%;padding:26px 24px">
+  <h1 style="margin:0 0 10px;font-size:20px">同步专属 Key 到油猴脚本</h1>
+  <p id="ma-pair-status" style="margin:0 0 10px;font-size:14px;font-weight:600;color:var(--accent)">正在等待油猴脚本自动写入本地存储…</p>
+  <p id="ma-pair-detail" style="margin:0 0 16px;font-size:13px;line-height:1.65;color:var(--text-secondary)">
+    如果你已经在当前浏览器安装并启用了新版 MangaAlpha 油猴脚本，本页面会在 1 秒内自动完成写入并清空地址栏中的密钥锚点。
+  </p>
+  <div id="ma-pair-fallback" style="display:none;padding:12px 14px;border-radius:10px;background:var(--bg-input);border:1px solid var(--border);margin-bottom:16px">
+    <div style="font-size:12.5px;font-weight:600;color:var(--warn);margin-bottom:8px">未检测到新版油猴脚本自动接管（可能尚未安装、未升级至 2.7.2+ 或当前扩展已禁用）</div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+      <a class="btn btn-primary btn-sm" href="%s" target="_blank" rel="noopener noreferrer">先安装 / 更新油猴脚本 ↗</a>
+    </div>
+    <div style="font-size:12px;color:var(--text-muted);margin-bottom:4px">也可以在油猴面板点击「⚙ 配置」手动粘贴下方密钥（离开页面后不再显示）：</div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <code id="ma-pair-key-box" class="code-box" style="flex:1;min-width:200px;margin:0;user-select:all"></code>
+      <button type="button" class="btn btn-sm" id="ma-pair-copy-btn">复制密钥</button>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:10px">
+    <a class="btn btn-primary btn-sm" href="/admin?tab=bangumi">返回 Bangumi 刮削中心</a>
+    <a class="btn btn-sm" href="https://bgm.tv/" target="_blank" rel="noopener noreferrer">打开 Bangumi ↗</a>
+  </div>
+</main>
+<script>
+  (function(){
+    var rawHash = (location.hash || '').replace(/^#/, '');
+    var params = new URLSearchParams(rawHash);
+    var key = (params.get('key') || '').trim();
+    var copyBtn = document.getElementById('ma-pair-copy-btn');
+    var keyBox = document.getElementById('ma-pair-key-box');
+    if (keyBox && key) keyBox.textContent = key;
+    if (copyBtn && key) {
+      copyBtn.onclick = function(){
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(key).then(function(){ copyBtn.textContent = '已复制'; }).catch(function(){});
+          return;
+        }
+        var ta = document.createElement('textarea');
+        ta.value = key;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); copyBtn.textContent = '已复制'; } catch (_) {}
+        document.body.removeChild(ta);
+      };
+    }
+    setTimeout(function(){
+      if (!document.documentElement.dataset.mangaalphaUserscriptVersion) {
+        var st = document.getElementById('ma-pair-status');
+        var fb = document.getElementById('ma-pair-fallback');
+        if (st) {
+          st.textContent = '⚠️ 未检测到已启用的新版油猴脚本';
+          st.style.color = 'var(--warn)';
+        }
+        if (fb && key) fb.style.display = '';
+      }
+    }, 1200);
+  })();
+</script>
+</body>
+</html>`, userscriptLatestPath)
 }

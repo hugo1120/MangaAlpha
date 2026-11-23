@@ -1,11 +1,14 @@
 // ==UserScript==
 // @name         MangaAlpha Bangumi 一键跳转
 // @namespace    https://github.com/xJogger/MangaAlpha
-// @version      2.7.1
+// @version      2.7.2
 // @description  在 Bangumi 条目页右侧栏自动探测本地 MangaAlpha 收录状态、一键直达漫画，并在简介上方提供简中翻译一键切换。
 // @match        https://bgm.tv/subject/*
 // @match        https://bangumi.tv/subject/*
 // @match        https://chii.in/subject/*
+// __MANGAALPHA_PAIR_MATCH_LINE__
+// __MANGAALPHA_UPDATE_URL_LINE__
+// __MANGAALPHA_DOWNLOAD_URL_LINE__
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -19,14 +22,6 @@
   'use strict';
 
   const DEFAULT_SERVER_URL = '__MANGAALPHA_SERVER_URL__';
-  const DEFAULT_API_KEY = '__MANGAALPHA_API_KEY__';
-
-  const m = location.pathname.match(/^\/subject\/(\d+)\/?$/);
-  if (!m) return;
-  const subjectId = m[1];
-
-  const titleEl = document.querySelector('#headerSubject h1.nameSingle a') || document.querySelector('#headerSubject h1.nameSingle');
-  const pageTitle = (titleEl && titleEl.textContent ? titleEl.textContent : '').trim();
 
   function cleanServerUrl(raw) {
     return String(raw || '').trim().replace(/\/+$/, '');
@@ -37,28 +32,55 @@
     return s && !s.includes('__MANGAALPHA_') ? s : '';
   }
 
-  // Persist embedded credentials on first install and automatically sync when the user
-  // explicitly installs a rotated key via "一键安装（自动生成并轮换专属 Key）".
-  // When updating via "仅更新脚本（沿用已保存 Key）", embeddedKey is empty so existing
-  // GM_getValue('api_key') and GM_getValue('server_url') remain untouched.
-  (function syncEmbeddedConfig() {
-    const embeddedUrl = cleanServerUrl(validEmbedded(DEFAULT_SERVER_URL));
-    const embeddedKey = validEmbedded(DEFAULT_API_KEY);
-    const savedUrl = cleanServerUrl(GM_getValue('server_url', ''));
-    const savedKey = String(GM_getValue('api_key', '') || '').trim();
-    const seededKey = String(GM_getValue('seeded_api_key', '') || '').trim();
+  // Handle one-click Key pairing page (/bgm/userscript/pair#server=...&key=...)
+  // Key is transferred strictly via URL #fragment (never sent to server/proxy logs)
+  // and immediately persisted to Tampermonkey GM_setValue storage, then wiped from URL history.
+  if (location.pathname === '/bgm/userscript/pair') {
+    document.documentElement.dataset.mangaalphaUserscriptVersion = '2.7.2';
+    const rawHash = (location.hash || '').replace(/^#/, '');
+    const params = new URLSearchParams(rawHash);
+    const pairKey = String(params.get('key') || '').trim();
+    const pairServer = cleanServerUrl(params.get('server') || location.origin);
+    const statusEl = document.getElementById('ma-pair-status');
+    const detailEl = document.getElementById('ma-pair-detail');
+    const fallbackEl = document.getElementById('ma-pair-fallback');
+    if (pairKey) {
+      if (pairServer) GM_setValue('server_url', pairServer);
+      GM_setValue('api_key', pairKey);
+      try {
+        history.replaceState(null, '', location.pathname);
+      } catch (_) {}
+      if (statusEl) {
+        statusEl.textContent = '✅ 已成功同步服务器地址与专属 Key 到油猴本地存储！';
+        statusEl.style.color = '#16a34a';
+      }
+      if (detailEl) {
+        detailEl.textContent = `目标服务器：${pairServer || location.origin}。此后升级油猴脚本不会清空 Key，现在可关闭此页并前往任意 Bangumi 条目页体验。`;
+      }
+      if (fallbackEl) fallbackEl.style.display = 'none';
+      try {
+        if (window.opener) {
+          window.opener.postMessage({ type: 'MANGAALPHA_USERSCRIPT_PAIRED', ok: true, serverUrl: pairServer }, location.origin);
+        }
+      } catch (_) {}
+    } else if (statusEl) {
+      statusEl.textContent = 'ℹ️ 未在链接中检测到待同步的 Key，请从 MangaAlpha 管理后台点击「② 一键生成并同步专属 Key 到油猴」。';
+    }
+    return;
+  }
 
+  const m = location.pathname.match(/^\/subject\/(\d+)\/?$/);
+  if (!m) return;
+  const subjectId = m[1];
+
+  const titleEl = document.querySelector('#headerSubject h1.nameSingle a') || document.querySelector('#headerSubject h1.nameSingle');
+  const pageTitle = (titleEl && titleEl.textContent ? titleEl.textContent : '').trim();
+
+  (function ensureDefaultServerUrl() {
+    const embeddedUrl = cleanServerUrl(validEmbedded(DEFAULT_SERVER_URL));
+    const savedUrl = cleanServerUrl(GM_getValue('server_url', ''));
     if (!savedUrl && embeddedUrl) {
       GM_setValue('server_url', embeddedUrl);
-      GM_setValue('seeded_server_url', embeddedUrl);
-    }
-    if (embeddedKey && (!savedKey || embeddedKey !== seededKey)) {
-      GM_setValue('api_key', embeddedKey);
-      GM_setValue('seeded_api_key', embeddedKey);
-      if (embeddedUrl) {
-        GM_setValue('server_url', embeddedUrl);
-        GM_setValue('seeded_server_url', embeddedUrl);
-      }
     }
   })();
 
@@ -69,9 +91,7 @@
   }
 
   function getApiKey() {
-    const saved = String(GM_getValue('api_key', '') || '').trim();
-    if (saved) return saved;
-    return validEmbedded(DEFAULT_API_KEY);
+    return String(GM_getValue('api_key', '') || '').trim();
   }
 
   function promptConfig() {

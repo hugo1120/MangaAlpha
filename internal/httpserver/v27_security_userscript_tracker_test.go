@@ -323,7 +323,7 @@ func TestV27TrustedProxiesDisabledIgnoresSpoofedHeaders(t *testing.T) {
 	}
 }
 
-func TestV27UserscriptInstallTicketAndKeyRotation(t *testing.T) {
+func TestV27UserscriptKeylessLatestAndPairKeyRotation(t *testing.T) {
 	_, store, _, ts := setupV27TestServer(t, "")
 	ctx := context.Background()
 	if _, err := store.ClaimAdmin(ctx, "owner", "SuperStrongPass123!"); err != nil {
@@ -338,82 +338,64 @@ func TestV27UserscriptInstallTicketAndKeyRotation(t *testing.T) {
 	})
 	loginResp.Body.Close()
 
-	// 1. Issue install ticket WITH key (first install)
-	t1Resp := requestJSONWithClient(t, sessionClient, http.MethodPost, ts.URL+"/admin/api/bangumi/userscript/install-ticket", map[string]any{
-		"withKey": true,
-	})
-	var t1 struct {
-		InstallURL     string `json:"installUrl"`
-		RotatedOldKeys int64  `json:"rotatedOldKeys"`
-		KeyPrefix      string `json:"keyPrefix"`
-		ConnectHost    string `json:"connectHost"`
-	}
-	if err := json.NewDecoder(t1Resp.Body).Decode(&t1); err != nil {
-		t1Resp.Body.Close()
-		t.Fatal(err)
-	}
-	t1Resp.Body.Close()
-	if t1Resp.StatusCode != http.StatusCreated || !strings.HasPrefix(t1.InstallURL, "/bgm/userscript/") || t1.KeyPrefix == "" {
-		t.Fatalf("unexpected ticket response: status=%d body=%+v", t1Resp.StatusCode, t1)
-	}
-	if t1.ConnectHost != "127.0.0.1" {
-		t.Fatalf("expected connectHost 127.0.0.1, got %q", t1.ConnectHost)
-	}
-
-	// Ticket URL must work WITHOUT auth cookie (for Tampermonkey background worker)
-	var firstScript string
-	for i := 0; i < userscriptTicketReads; i++ {
-		r, err := http.Get(ts.URL + t1.InstallURL)
+	// 1. Public permanent keyless endpoint /bgm/userscript/latest.user.js works WITHOUT auth cookie and never expires!
+	for i := 0; i < 3; i++ {
+		r, err := http.Get(ts.URL + userscriptLatestPath)
 		if err != nil {
 			t.Fatal(err)
 		}
 		raw, _ := io.ReadAll(r.Body)
 		r.Body.Close()
 		if r.StatusCode != http.StatusOK {
-			t.Fatalf("read %d expected 200, got %d", i+1, r.StatusCode)
+			t.Fatalf("latest.user.js read %d expected 200, got %d", i+1, r.StatusCode)
 		}
-		if i == 0 {
-			firstScript = string(raw)
-			if r.Header.Get("Cache-Control") != "no-store" || !strings.Contains(r.Header.Get("Content-Disposition"), "inline") {
-				t.Fatalf("unexpected headers: Cache-Control=%q Content-Disposition=%q",
-					r.Header.Get("Cache-Control"), r.Header.Get("Content-Disposition"))
+		body := string(raw)
+		if r.Header.Get("Cache-Control") != "no-cache" || !strings.Contains(r.Header.Get("Content-Disposition"), "inline") {
+			t.Fatalf("unexpected headers: Cache-Control=%q Content-Disposition=%q",
+				r.Header.Get("Cache-Control"), r.Header.Get("Content-Disposition"))
+		}
+		for _, want := range []string{
+			"// @connect      127.0.0.1",
+			"// @match        *://127.0.0.1/bgm/userscript/pair*",
+			"// @updateURL    " + ts.URL + userscriptLatestPath,
+			"// @downloadURL  " + ts.URL + userscriptLatestPath,
+			"#panelInterestWrapper",
+		} {
+			if !strings.Contains(body, want) {
+				t.Fatalf("latest.user.js missing %q", want)
 			}
 		}
+		if strings.Contains(body, "DEFAULT_API_KEY") || strings.Contains(body, "fk115_") {
+			t.Fatalf("public latest.user.js must be strictly keyless")
+		}
 	}
-	// 6th read must 404 (read budget exhausted)
-	rExhausted, err := http.Get(ts.URL + t1.InstallURL)
+
+	// 2. /bgm/userscript/pair requires admin session (unauthenticated redirects to /login)
+	noRedirect := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	unauthPair, err := noRedirect.Get(ts.URL + userscriptPairPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rExhausted.Body.Close()
-	if rExhausted.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected exhausted ticket to 404, got %d", rExhausted.StatusCode)
+	unauthPair.Body.Close()
+	if unauthPair.StatusCode != http.StatusTemporaryRedirect || !strings.Contains(unauthPair.Header.Get("Location"), "/login") {
+		t.Fatalf("unauthenticated /bgm/userscript/pair expected redirect to /login, got %d loc=%q",
+			unauthPair.StatusCode, unauthPair.Header.Get("Location"))
 	}
 
-	if !strings.Contains(firstScript, "// @connect      127.0.0.1") ||
-		!strings.Contains(firstScript, "#panelInterestWrapper") ||
-		!strings.Contains(firstScript, t1.KeyPrefix) {
-		t.Fatalf("rendered userscript missing expected connect/sidebar/key content")
+	// Authenticated admin receives pairing page
+	authPair, err := sessionClient.Get(ts.URL + userscriptPairPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authPairBytes, _ := io.ReadAll(authPair.Body)
+	authPair.Body.Close()
+	if authPair.StatusCode != http.StatusOK || !strings.Contains(string(authPairBytes), "ma-pair-status") {
+		t.Fatalf("authenticated pair page unexpected status=%d", authPair.StatusCode)
 	}
 
-	// Extract first raw key and verify it works against /api/v1/bangumi/lookup
-	extractKey := func(script string) string {
-		marker := "const DEFAULT_API_KEY = '"
-		idx := strings.Index(script, marker)
-		if idx < 0 {
-			return ""
-		}
-		rest := script[idx+len(marker):]
-		end := strings.IndexByte(rest, '\'')
-		if end < 0 {
-			return ""
-		}
-		return rest[:end]
-	}
-	key1 := extractKey(firstScript)
-	if key1 == "" {
-		t.Fatal("failed to extract embedded API key 1")
-	}
+	// 3. First pair-key generates a working key; second pair-key rotates and revokes key1
 	probeKey := func(k string) int {
 		req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/bangumi/lookup?subject_id=1", nil)
 		req.Header.Set("X-API-Key", k)
@@ -424,72 +406,43 @@ func TestV27UserscriptInstallTicketAndKeyRotation(t *testing.T) {
 		resp.Body.Close()
 		return resp.StatusCode
 	}
-	if code := probeKey(key1); code != http.StatusOK {
+
+	p1Resp := requestJSONWithClient(t, sessionClient, http.MethodPost, ts.URL+"/admin/api/bangumi/userscript/pair-key", nil)
+	var p1 struct {
+		Key            string `json:"key"`
+		KeyPrefix      string `json:"keyPrefix"`
+		RotatedOldKeys int64  `json:"rotatedOldKeys"`
+		ConnectHost    string `json:"connectHost"`
+	}
+	if err := json.NewDecoder(p1Resp.Body).Decode(&p1); err != nil {
+		p1Resp.Body.Close()
+		t.Fatal(err)
+	}
+	p1Resp.Body.Close()
+	if p1Resp.StatusCode != http.StatusCreated || !strings.HasPrefix(p1.Key, "fk115_") || p1.RotatedOldKeys != 0 || p1.ConnectHost != "127.0.0.1" {
+		t.Fatalf("unexpected pair-key 1 response: status=%d body=%+v", p1Resp.StatusCode, p1)
+	}
+	if code := probeKey(p1.Key); code != http.StatusOK {
 		t.Fatalf("key1 expected 200, got %d", code)
 	}
 
-	// 2. Update-only ticket (withKey=false) must NOT mint or revoke key1
-	tUpdResp := requestJSONWithClient(t, sessionClient, http.MethodPost, ts.URL+"/admin/api/bangumi/userscript/install-ticket", map[string]any{
-		"withKey": false,
-	})
-	var tUpd struct {
-		InstallURL     string `json:"installUrl"`
+	p2Resp := requestJSONWithClient(t, sessionClient, http.MethodPost, ts.URL+"/admin/api/bangumi/userscript/pair-key", nil)
+	var p2 struct {
+		Key            string `json:"key"`
 		RotatedOldKeys int64  `json:"rotatedOldKeys"`
 	}
-	if err := json.NewDecoder(tUpdResp.Body).Decode(&tUpd); err != nil {
-		tUpdResp.Body.Close()
+	if err := json.NewDecoder(p2Resp.Body).Decode(&p2); err != nil {
+		p2Resp.Body.Close()
 		t.Fatal(err)
 	}
-	tUpdResp.Body.Close()
-	if tUpdResp.StatusCode != http.StatusCreated {
-		t.Fatalf("update-only ticket status=%d", tUpdResp.StatusCode)
+	p2Resp.Body.Close()
+	if p2Resp.StatusCode != http.StatusCreated || p2.RotatedOldKeys != 1 || p2.Key == "" || p2.Key == p1.Key {
+		t.Fatalf("unexpected pair-key 2 response: status=%d body=%+v", p2Resp.StatusCode, p2)
 	}
-	if tUpd.RotatedOldKeys != 0 {
-		t.Fatalf("update-only ticket must not revoke keys, got %d", tUpd.RotatedOldKeys)
-	}
-	updGet, err := http.Get(ts.URL + tUpd.InstallURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	updBytes, _ := io.ReadAll(updGet.Body)
-	updGet.Body.Close()
-	if extractKey(string(updBytes)) != "" {
-		t.Fatalf("update-only script must keep DEFAULT_API_KEY empty")
-	}
-	if code := probeKey(key1); code != http.StatusOK {
-		t.Fatalf("key1 must still work after update-only ticket, got %d", code)
-	}
-
-	// 3. Rotating withKey=true must revoke key1 and activate key2
-	t2Resp := requestJSONWithClient(t, sessionClient, http.MethodPost, ts.URL+"/admin/api/bangumi/userscript/install-ticket", map[string]any{
-		"withKey": true,
-	})
-	var t2 struct {
-		InstallURL     string `json:"installUrl"`
-		RotatedOldKeys int64  `json:"rotatedOldKeys"`
-	}
-	if err := json.NewDecoder(t2Resp.Body).Decode(&t2); err != nil {
-		t2Resp.Body.Close()
-		t.Fatal(err)
-	}
-	t2Resp.Body.Close()
-	if t2Resp.StatusCode != http.StatusCreated {
-		t.Fatalf("rotate ticket status=%d", t2Resp.StatusCode)
-	}
-	if t2.RotatedOldKeys != 1 {
-		t.Fatalf("expected 1 old userscript key rotated, got %d", t2.RotatedOldKeys)
-	}
-	t2Get, _ := http.Get(ts.URL + t2.InstallURL)
-	t2Bytes, _ := io.ReadAll(t2Get.Body)
-	t2Get.Body.Close()
-	key2 := extractKey(string(t2Bytes))
-	if key2 == "" || key2 == key1 {
-		t.Fatalf("expected fresh key2 != key1")
-	}
-	if code := probeKey(key1); code != http.StatusUnauthorized {
+	if code := probeKey(p1.Key); code != http.StatusUnauthorized {
 		t.Fatalf("revoked key1 must return 401, got %d", code)
 	}
-	if code := probeKey(key2); code != http.StatusOK {
+	if code := probeKey(p2.Key); code != http.StatusOK {
 		t.Fatalf("new key2 must return 200, got %d", code)
 	}
 }

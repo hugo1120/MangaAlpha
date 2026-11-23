@@ -329,6 +329,7 @@ func (s *Service) ArchiveSource(ctx context.Context) ArchiveSourceConfig {
 }
 
 func (s *Service) SetArchiveSource(ctx context.Context, source, customURL string) (ArchiveSourceConfig, error) {
+	oldSource := s.ArchiveSource(ctx).Source
 	cfg, err := ResolveArchiveSource(source, customURL)
 	if err != nil {
 		return ArchiveSourceConfig{}, err
@@ -342,6 +343,7 @@ func (s *Service) SetArchiveSource(ctx context.Context, source, customURL string
 		}
 	}
 	s.archive.SetMetaURL(cfg.MetaURL)
+	s.adaptDefaultArchiveScheduleOnSourceChange(ctx, oldSource, cfg.Source)
 	return cfg, nil
 }
 

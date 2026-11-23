@@ -75,6 +75,65 @@ func TestArchiveScheduleValidationAndDueSlot(t *testing.T) {
 	}
 }
 
+func TestArchiveScheduleDefaultsAndSourceAdaptation(t *testing.T) {
+	dir := t.TempDir()
+	store, err := database.Open(filepath.Join(dir, "sched_source.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	svc, err := NewService(store, dir, nil)
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+	defer svc.Close()
+	ctx := context.Background()
+
+	// 1. Default zh_cn source -> Thursday 06:00
+	s0 := svc.ArchiveSchedule(ctx)
+	if s0.DayOfWeek != int(time.Thursday) || s0.TimeOfDay != "06:00" {
+		t.Fatalf("expected Thu 06:00 default for zh_cn, got %+v", s0)
+	}
+
+	// 2. Unsaved schedule follows source switch to official -> Wednesday 06:00
+	if _, err := svc.SetArchiveSource(ctx, ArchiveSourceOfficial, ""); err != nil {
+		t.Fatalf("set official: %v", err)
+	}
+	sOff := svc.ArchiveSchedule(ctx)
+	if sOff.DayOfWeek != int(time.Wednesday) || sOff.TimeOfDay != "06:00" {
+		t.Fatalf("expected Wed 06:00 default for official, got %+v", sOff)
+	}
+
+	// 3. Saved default schedule (enabled=true, Wed 06:00 under official) auto-adapts to Thu 06:00 when switched back to zh_cn!
+	if _, err := svc.UpdateArchiveSchedule(ctx, ArchiveScheduleUpdate{
+		Enabled: true, Frequency: ArchiveFreqWeekly, DayOfWeek: int(time.Wednesday), TimeOfDay: "06:00",
+	}); err != nil {
+		t.Fatalf("save default official schedule: %v", err)
+	}
+	if _, err := svc.SetArchiveSource(ctx, ArchiveSourceZH, ""); err != nil {
+		t.Fatalf("switch back to zh_cn: %v", err)
+	}
+	sAdapted := svc.ArchiveSchedule(ctx)
+	if !sAdapted.Enabled || sAdapted.DayOfWeek != int(time.Thursday) || sAdapted.TimeOfDay != "06:00" {
+		t.Fatalf("expected saved default schedule to auto-adapt to Thu 06:00, got %+v", sAdapted)
+	}
+
+	// 4. User-customized schedule (Sunday 22:30) MUST NOT be overwritten when switching source!
+	if _, err := svc.UpdateArchiveSchedule(ctx, ArchiveScheduleUpdate{
+		Enabled: true, Frequency: ArchiveFreqWeekly, DayOfWeek: int(time.Sunday), TimeOfDay: "22:30",
+	}); err != nil {
+		t.Fatalf("save custom schedule: %v", err)
+	}
+	if _, err := svc.SetArchiveSource(ctx, ArchiveSourceOfficial, ""); err != nil {
+		t.Fatalf("switch to official with custom schedule: %v", err)
+	}
+	sCustom := svc.ArchiveSchedule(ctx)
+	if sCustom.DayOfWeek != int(time.Sunday) || sCustom.TimeOfDay != "22:30" {
+		t.Fatalf("custom schedule should be preserved, got %+v", sCustom)
+	}
+}
+
 func TestArchiveSkipUnchangedAndAutoIncrementalMetadataSync(t *testing.T) {
 	dir := t.TempDir()
 	store, err := database.Open(filepath.Join(dir, "test.db"))

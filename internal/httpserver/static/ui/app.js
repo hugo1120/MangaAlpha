@@ -2998,7 +2998,8 @@
   function paintAdminBangumi(body, st, runs, libs, tracker) {
     const arch = st.archive || {};
     const archSrc = st.archiveSource || { source: 'zh_cn', customUrl: '', metaUrl: '' };
-    const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: 3, dayOfMonth: 1, timeOfDay: '06:00' };
+    const defaultDowForSrc = archSrc.source === 'official' ? 3 : 4;
+    const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: defaultDowForSrc, dayOfMonth: 1, timeOfDay: '06:00' };
     const tr = tracker || { enabled: false, hasToken: false, username: '', nickname: '', nsfwMode: 'skip', privateDefault: false, records: [] };
     const trRecords = Array.isArray(tr.records) ? tr.records : [];
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
@@ -3040,13 +3041,13 @@
     const schedState = editingSched ? {
       enabled: document.getElementById('bgm-arch-sched-enabled')?.checked ?? !!sched.enabled,
       frequency: document.getElementById('bgm-arch-sched-freq')?.value || sched.frequency || 'weekly',
-      dayOfWeek: Number(document.getElementById('bgm-arch-sched-dow')?.value ?? sched.dayOfWeek ?? 3),
+      dayOfWeek: Number(document.getElementById('bgm-arch-sched-dow')?.value ?? sched.dayOfWeek ?? defaultDowForSrc),
       dayOfMonth: Number(document.getElementById('bgm-arch-sched-dom')?.value ?? sched.dayOfMonth ?? 1),
       timeOfDay: document.getElementById('bgm-arch-sched-time')?.value || sched.timeOfDay || '06:00',
     } : {
       enabled: !!sched.enabled,
       frequency: sched.frequency || 'weekly',
-      dayOfWeek: Number(sched.dayOfWeek ?? 3),
+      dayOfWeek: Number(sched.dayOfWeek ?? defaultDowForSrc),
       dayOfMonth: Number(sched.dayOfMonth ?? 1),
       timeOfDay: sched.timeOfDay || '06:00',
     };
@@ -3160,7 +3161,9 @@
               <button type="submit" class="btn btn-sm btn-primary">保存定时</button>
             </div>
             <div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);line-height:1.5">
-              ${sched.enabled && sched.nextRunAt ? `下次计划检查：<strong>${fmtTime(sched.nextRunAt)}</strong> · ` : ''}上游每周三约 05:04 发布新快照（推荐设周三 06:00）；快照未更新自动跳过下载，导入新版后自动本地增量同步已匹配作品的未锁定元数据（不重下封面、不覆盖手动锁定字段）。
+              ${sched.enabled && sched.nextRunAt ? `下次计划检查：<strong>${fmtTime(sched.nextRunAt)}</strong> · ` : ''}${archSrc.source === 'official'
+                ? '官方原版每周三约 05:04 发布新快照（默认推荐周三 06:00）；'
+                : '上游每周三约 05:04 发布，中文增强镜像于周三上午完成增量翻译发布（默认推荐周四 06:00，切换数据源时若未自定义时间会自动同步对应默认日）；'}快照未更新自动跳过下载，导入新版后自动本地增量同步已匹配作品的未锁定元数据（不重下封面、不覆盖手动锁定字段）。
             </div>
           </form>
         </div>
@@ -3345,14 +3348,14 @@
           支持 Tampermonkey / Violentmonkey 直接弹窗安装与覆盖升级。
         </p>
         <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-          <button type="button" class="btn btn-primary btn-sm" id="bgm-us-install-key">一键安装油猴脚本（自动生成并轮换专属 Key）</button>
-          <button type="button" class="btn btn-sm" id="bgm-us-update-only">仅更新脚本（沿用已保存 Key）</button>
-          <a class="btn btn-sm" href="/admin/api/bangumi/userscript.user.js" target="_blank" rel="noopener noreferrer">直接打开脚本源码</a>
+          <a class="btn btn-primary btn-sm" id="bgm-us-install-script" href="/bgm/userscript/latest.user.js" target="_blank" rel="noopener noreferrer">① 安装 / 更新油猴脚本</a>
+          <button type="button" class="btn btn-sm" id="bgm-us-pair-key">② 一键生成并同步专属 Key 到油猴</button>
         </div>
         <div style="margin-top:10px;font-size:12px;color:var(--text-muted);line-height:1.65;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
-          <div><strong>① 密钥复用与轮换：</strong>首次点击「一键安装」会自动把服务器地址与专属 Key 持久化到油猴本地存储，并自动吊销旧的同名「Bangumi 油猴脚本」Key（不再堆积冗余密钥）；日后仅更新脚本样式/功能时点「仅更新脚本」，将直接沿用油猴内已保存的 Key。</div>
-          <div style="margin-top:4px"><strong>② 跨域权限提示说明：</strong>由于脚本运行在 <code>bgm.tv</code> 上、需要向你的 MangaAlpha 服务器（<code>${esc(location.hostname)}</code>）发起收录探测请求，新版脚本已在 <code>@connect</code> 中自动预授权当前主机；若更换了服务器地址或油猴仍弹出「跨域访问确认」，点击<strong>「始终允许该域名」</strong>即可（脚本仅连接你自己的 MangaAlpha 实例，不向任何第三方发送数据）。</div>
-          <div style="margin-top:4px">直达跳转格式：<code>${esc(location.origin)}/bgm/&lt;subjectId&gt;</code> · 自动探测接口：<code>/api/v1/bangumi/lookup?subject_id=&lt;id&gt;</code></div>
+          <div><strong>① 源码与密钥彻底分离：</strong>脚本本体永久不含任何密钥（并内置 <code>@updateURL</code> / <code>@downloadURL</code>，支持在油猴扩展中直接点击原生「检查更新」），后续升级脚本的 Diff 永远纯净、绝不清空已保存的 Key。</div>
+          <div style="margin-top:4px"><strong>② 首次或轮换 Key 同步：</strong>装完脚本后点一次「② 一键生成并同步专属 Key 到油猴」，会自动吊销旧的同名「Bangumi 油猴脚本」Key，并通过本机配对页把地址与新 Key 直接写入油猴本地存储（全程免手输、密钥不进服务端日志）。</div>
+          <div style="margin-top:4px"><strong>③ 跨域权限提示说明：</strong>脚本运行在 <code>bgm.tv</code> 上、需要向你的 MangaAlpha 服务器（<code>${esc(location.hostname)}</code>）发起收录探测与简中简介请求，已在 <code>@connect</code> 中自动预授权当前主机；若油猴弹出「跨域访问确认」，点击<strong>「始终允许该域名」</strong>即可。</div>
+          <div style="margin-top:4px">脚本更新地址：<code>${esc(location.origin)}/bgm/userscript/latest.user.js</code> · 直达跳转格式：<code>${esc(location.origin)}/bgm/&lt;subjectId&gt;</code></div>
         </div>
         <div id="bgm-us-status" style="margin-top:8px;font-size:12px;color:var(--text-muted)"></div>
       </div>
@@ -3749,43 +3752,33 @@
       };
     });
 
-    async function launchUserscriptInstall(withKey, btn) {
-      if (btn) btn.disabled = true;
-      const popup = window.open('about:blank', '_blank');
-      try {
-        const res = await api('/admin/api/bangumi/userscript/install-ticket', {
-          method: 'POST',
-          body: { withKey },
-        });
-        const absUrl = `${location.origin}${res.installUrl}`;
-        if (popup && !popup.closed) {
-          popup.location.href = absUrl;
-        } else {
-          window.location.href = absUrl;
+    const usPairKeyBtn = document.getElementById('bgm-us-pair-key');
+    if (usPairKeyBtn) {
+      usPairKeyBtn.onclick = async () => {
+        usPairKeyBtn.disabled = true;
+        const popup = window.open('about:blank', '_blank');
+        try {
+          const res = await api('/admin/api/bangumi/userscript/pair-key', { method: 'POST' });
+          const hash = `server=${encodeURIComponent(location.origin)}&key=${encodeURIComponent(res.key)}`;
+          const pairUrl = `${location.origin}${res.pairPath || '/bgm/userscript/pair'}#${hash}`;
+          if (popup && !popup.closed) {
+            popup.location.href = pairUrl;
+          } else {
+            window.location.href = pairUrl;
+          }
+          const stEl = document.getElementById('bgm-us-status');
+          if (stEl) {
+            const rotNote = res.rotatedOldKeys > 0 ? `（已自动吊销 ${res.rotatedOldKeys} 个旧油猴 Key）` : '';
+            stEl.innerHTML = `<span style="color:var(--success)">✅ 已生成新专属 Key（前缀 <code>${esc(res.keyPrefix || '')}</code>）${rotNote}并打开配对页自动写入油猴存储。若未自动完成，请先点左侧「① 安装 / 更新油猴脚本」。</span>`;
+          }
+          toast('已打开配对页同步专属 Key 到油猴');
+        } catch (err) {
+          if (popup && !popup.closed) popup.close();
+          toast(err.message || '生成油猴专属 Key 失败', 'error');
+        } finally {
+          usPairKeyBtn.disabled = false;
         }
-        const stEl = document.getElementById('bgm-us-status');
-        if (stEl) {
-          const rotNote = withKey && res.rotatedOldKeys > 0 ? `（已自动吊销 ${res.rotatedOldKeys} 个旧油猴 Key）` : '';
-          const modeText = withKey
-            ? `已生成新专属 Key（前缀 <code>${esc(res.keyPrefix || '')}</code>）${rotNote}并触发油猴安装页`
-            : '已触发油猴更新页（未新建或吊销 Key，沿用油猴内已保存配置）';
-          stEl.innerHTML = `<span style="color:var(--success)">✅ ${modeText}；临时安装链接 ${res.expiresInSeconds || 60} 秒内有效。若浏览器拦截了弹窗，请点此手动打开：<a href="${esc(res.installUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:underline">打开安装页 ↗</a></span>`;
-        }
-        toast(withKey ? '已触发油猴一键安装' : '已触发油猴脚本更新');
-      } catch (err) {
-        if (popup && !popup.closed) popup.close();
-        toast(err.message || '生成油猴安装链接失败', 'error');
-      } finally {
-        if (btn) btn.disabled = false;
-      }
-    }
-    const usInstallKeyBtn = document.getElementById('bgm-us-install-key');
-    if (usInstallKeyBtn) {
-      usInstallKeyBtn.onclick = () => launchUserscriptInstall(true, usInstallKeyBtn);
-    }
-    const usUpdateOnlyBtn = document.getElementById('bgm-us-update-only');
-    if (usUpdateOnlyBtn) {
-      usUpdateOnlyBtn.onclick = () => launchUserscriptInstall(false, usUpdateOnlyBtn);
+      };
     }
 
     document.getElementById('bgm-refresh-btn').onclick = () => renderAdminBangumi(body);
@@ -5496,7 +5489,16 @@
   window.addEventListener('message', (event) => {
     if (event.origin !== location.origin) return;
     const data = event.data;
-    if (!data || data.type !== 'MANGAALPHA_BGM_OAUTH_DONE') return;
+    if (!data) return;
+    if (data.type === 'MANGAALPHA_USERSCRIPT_PAIRED' && data.ok) {
+      toast('油猴脚本已自动接收并保存专属 Key');
+      const stEl = document.getElementById('bgm-us-status');
+      if (stEl) {
+        stEl.innerHTML = `<span style="color:var(--success)">✅ 油猴脚本已成功保存服务器地址与专属 Key，现在打开任意 Bangumi 条目页即可生效。</span>`;
+      }
+      return;
+    }
+    if (data.type !== 'MANGAALPHA_BGM_OAUTH_DONE') return;
     toast(data.message || (data.ok ? 'Bangumi OAuth 授权成功' : 'Bangumi OAuth 授权失败'), data.ok ? 'info' : 'error');
     const target = state.bgmOAuthRefreshTarget || document.getElementById('admin-tab-body');
     if (target && state.adminTab === 'bangumi') {

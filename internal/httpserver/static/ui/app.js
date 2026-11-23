@@ -1945,14 +1945,20 @@
 
       <div class="grid-2">
         <div class="card">
-          <h3>客户端接入地址（Mihon / Koharia / KOReader）</h3>
+          <h3>客户端接入地址（Koharia / Mihon / KOReader）</h3>
           <p style="color:var(--text-secondary);font-size:13px">使用管理员账号密码（HTTP Basic）或在「账号与 API Key」页签生成专属 API Key 登录（KOReader 仅需填用户名密码）：</p>
           <div style="display:grid;gap:8px;margin-top:10px">
-            <div style="font-size:12px;font-weight:600;color:var(--text-muted)">Mihon（Komga 扩展）/ Koharia</div>
+            <div style="font-size:12.5px;color:var(--text-secondary)">
+              <strong>Komga 客户端</strong>（推荐 <a href="https://github.com/Mister-album/Koharia" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Koharia ↗</a> Android 阅读器，或 <a href="https://mihon.app/" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Mihon ↗</a> Komga 扩展）
+            </div>
             ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u)}</div>`).join('')}
-            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-top:4px">KOReader（<code>opdsforcomic.koplugin</code> 推荐 · 直读 / 章节导航 / 双向同步进度）</div>
+            <div style="font-size:12.5px;color:var(--text-secondary);margin-top:4px">
+              <strong>KOReader 墨水屏</strong>（推荐插件 <a href="https://github.com/hugo1120/opdsforcomic.koplugin/releases" target="_blank" rel="noopener noreferrer" style="color:var(--accent)"><code>opdsforcomic.koplugin</code> ↗</a> · 点击直读 / 章节导航 / 零提前建索引 / 双向同步进度）
+            </div>
             ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u.replace(/\/+$/, ''))}/api/opds/v1.2</div>`).join('')}
-            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-top:4px">标准 Komga OPDS v1.2（兼容其他 OPDS 阅读客户端）</div>
+            <div style="font-size:12.5px;color:var(--text-secondary);margin-top:4px">
+              <strong>标准 Komga OPDS v1.2</strong>（兼容其他标准 OPDS 阅读客户端）
+            </div>
             ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u.replace(/\/+$/, ''))}/opds/v1.2/catalog</div>`).join('')}
           </div>
           <div style="margin-top:12px;font-size:12.5px;color:var(--text-muted)">
@@ -5513,6 +5519,27 @@
 
   // --- Router ---
 
+  function updateFooterVersion(auth) {
+    const el = document.getElementById('site-footer-version');
+    if (!el) return;
+    const raw = (auth && auth.authenticated && typeof auth.version === 'string') ? auth.version.trim() : '';
+    if (!raw) {
+      el.hidden = true;
+      el.textContent = '';
+      el.removeAttribute('href');
+      el.removeAttribute('title');
+      return;
+    }
+    const stableMatch = /^v\d+\.\d+\.\d+$/.test(raw);
+    const previewMatch = raw.match(/^(v\d+\.\d+\.\d+)-(?:local-)?preview\b/i);
+    el.textContent = previewMatch ? `${previewMatch[1]}-preview` : raw;
+    el.title = raw;
+    el.href = stableMatch
+      ? `https://github.com/xJogger/MangaAlpha/releases/tag/${encodeURIComponent(raw)}`
+      : 'https://github.com/xJogger/MangaAlpha/releases';
+    el.hidden = false;
+  }
+
   let routeSeq = 0;
   async function route() {
     const seq = ++routeSeq;
@@ -5523,6 +5550,7 @@
     } catch (_) {}
 
     if (seq !== routeSeq) return;
+    updateFooterVersion(state.auth);
     const p = location.pathname;
     if (!state.auth.claimed) {
       if (p !== '/setup') {

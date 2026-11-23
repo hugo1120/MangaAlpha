@@ -168,11 +168,11 @@ make build
 - `+` 或 `&` 连接的标题仅在完整标题吻合或各部分同属一部作品正式标题/别名时才参与自动匹配，合集不会误匹配单部作品，仍可手动搜索或填条目 ID 绑定。
 - **为什么个别作品点击 `bgm.tv` 链接提示“数据库中没有查询您所指定的条目”？** 这是 Bangumi 官网未登录访问限制，在浏览器登录 `bgm.tv` 账号后重新打开即可正常查看。
 
-### 连接 Mihon / Koharia / KOReader 与 AI Agent
-- **Mihon**：安装 Komga 扩展，填入 `http://<服务器IP>:25600` 与管理员账号密码。
-- **Koharia**：内置 Komga 支持，直接新增 Komga 服务器并填入服务地址与管理员账号密码（也支持后台生成的 API Key）。
-- **KOReader（墨水屏）**：
-  - 推荐搭配 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin) 插件，在 `OPDS catalog (Comic)` 中填入 `http://<服务器IP>:25600/api/opds/v1.2` 与账号密码，即可获得点击章节直读、章末自动切下一章、前后 5 章导航、零提前建索引与双向同步阅读进度体验；
+### 连接客户端（Koharia / Mihon / KOReader）与 AI Agent
+- **[Koharia](https://github.com/Mister-album/Koharia)（推荐 Android Komga 客户端）**：原生 Komga 支持，完整兼容本服务的搜索语法、收藏夹、阅读列表与 SSE 进度同步；新增 Komga 服务器填入 `http://<服务器IP>:25600` 与账号密码（或后台生成的 API Key）即可使用。
+- **[Mihon](https://mihon.app/)**：安装 Komga 扩展，填入 `http://<服务器IP>:25600` 与账号密码。
+- **[KOReader](https://koreader.rocks/)（墨水屏推荐）**：
+  - 强烈推荐安装漫画 OPDS 插件 **[`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin/releases)**，在 `OPDS catalog (Comic)` 中填入 `http://<服务器IP>:25600/api/opds/v1.2` 与账号密码，即可获得点击章节直读、章末自动切下一章、前后 5 章导航、零提前建索引与双向同步阅读进度体验；
   - 同时也提供标准 Komga OPDS v1.2 入口 `http://<服务器IP>:25600/opds/v1.2/catalog`（支持 OPDS-PSE 在线页流与 OpenSearch 搜索），兼容其他标准 OPDS 漫画客户端。
 - **AI Agent 治理**：携带 `Authorization: Bearer <API_KEY>` 请求 `GET /api/agent/v1/manifest` 即可发现全部管理能力，详见 [docs/AGENT_API.md](docs/AGENT_API.md)。
 
@@ -218,7 +218,8 @@ systemctl --user start fake-komga-115
 - **[Bangumi 番组计划](https://bgm.tv/) 与 [`bangumi/Archive`](https://github.com/bangumi/Archive)**：感谢 Sai 与全体番组计划维基编辑者多年积累的高质量中文 ACGN 资料库，以及官方持续开放的离线数据快照与 Open API。
 - **[OpenList](https://github.com/OpenListTeam/OpenList) 与 [`OpenListTeam/115-sdk-go`](https://github.com/OpenListTeam/115-sdk-go)**：提供了稳定易用的 115 开放平台 Go SDK、OAuth 授权工具以及优秀的 WebDAV 多存储聚合实践。
 - **[CloudDrive2](https://www.clouddrive2.com/)**：提供了高性能的云盘挂载与标准 WebDAV 服务支持，让多种网盘通过 WebDAV 流式接入漫画书库更加便捷。
-- **[Mihon](https://mihon.app/) 与 [Koharia](https://github.com/Mister-album/Koharia)**：优秀的移动端与跨平台漫画阅读客户端，推动了 Komga 生态的普及与打磨。
+- **[Mihon](https://mihon.app/) 与 [Koharia](https://github.com/Mister-album/Koharia)**：优秀的 Android 漫画阅读客户端（Koharia 原生支持 Komga 生态），推动了 Komga 客户端体验的普及与打磨。
+- **[KOReader](https://koreader.rocks/) 与 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin)**（[@hugo1120](https://github.com/hugo1120)）：为墨水屏设备带来了体验极佳的 OPDS 逐页流式漫画阅读、预取低内存解码与章节导航能力。
 - **Go 核心开源库**：感谢 [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite)（纯 Go 无 CGO SQLite 引擎）、[`nwaples/rardecode`](https://github.com/nwaples/rardecode)（纯 Go RAR4/RAR5 解码器）、[`go-chi/chi`](https://github.com/go-chi/chi) 与 Go 标准库及 `golang.org/x` 团队。
 
 <p align="center">

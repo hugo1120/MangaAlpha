@@ -12,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/xJogger/fake-komga-115/internal/buildinfo"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
@@ -345,12 +346,16 @@ func (s *Server) authStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	principal, authed := s.currentPrincipal(r)
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"claimed":       claimed,
 		"authenticated": authed,
 		"username":      principal.Username,
 		"method":        principal.Method,
-	})
+	}
+	if authed {
+		resp["version"] = buildinfo.Version
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) authSetupHandler(w http.ResponseWriter, r *http.Request) {

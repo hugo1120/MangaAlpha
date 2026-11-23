@@ -268,6 +268,13 @@ func TestV28OPDSDualEntrypointsForKOReaderAndKomga(t *testing.T) {
 	if rec := doReq(http.MethodGet, "/api/opds/v1.2", "", "", rawKey); rec.Code != http.StatusOK {
 		t.Fatalf("API key auth /api/opds/v1.2 expected 200, got %d", rec.Code)
 	}
+	// Auth status exposes version only when authenticated (no unauthenticated version fingerprint)
+	if unauthSt := doReq(http.MethodGet, "/admin/api/auth/status", "", "", ""); unauthSt.Code != http.StatusOK || strings.Contains(unauthSt.Body.String(), `"version"`) {
+		t.Fatalf("unauthenticated /admin/api/auth/status must not expose version: code=%d body=%s", unauthSt.Code, unauthSt.Body.String())
+	}
+	if authSt := doBasic("/admin/api/auth/status"); authSt.Code != http.StatusOK || !strings.Contains(authSt.Body.String(), `"version"`) {
+		t.Fatalf("authenticated /admin/api/auth/status expected version field: code=%d body=%s", authSt.Code, authSt.Body.String())
+	}
 
 	// =========================================================================
 	// Part B: Suwayomi OPDS v1.2 (/api/opds/v1.2) for opdsforcomic.koplugin

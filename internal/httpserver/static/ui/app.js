@@ -1945,10 +1945,15 @@
 
       <div class="grid-2">
         <div class="card">
-          <h3>Mihon / Komga 客户端接入地址</h3>
-          <p style="color:var(--text-secondary);font-size:13px">在 Mihon 的 Komga 扩展中填入以下任一局域网地址，并配置管理员账号密码（HTTP Basic）或在「账号与 API Key」页签生成专属 API Key：</p>
+          <h3>客户端接入地址（Mihon / Koharia / KOReader）</h3>
+          <p style="color:var(--text-secondary);font-size:13px">使用管理员账号密码（HTTP Basic）或在「账号与 API Key」页签生成专属 API Key 登录（KOReader 仅需填用户名密码）：</p>
           <div style="display:grid;gap:8px;margin-top:10px">
-            ${addrs.map((u) => `<div class="code-box">${esc(u)}</div>`).join('') || `<div class="code-box">${esc(st.adminUrl || location.origin)}</div>`}
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted)">Mihon（Komga 扩展）/ Koharia</div>
+            ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u)}</div>`).join('')}
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-top:4px">KOReader（<code>opdsforcomic.koplugin</code> 推荐 · 直读 / 章节导航 / 双向同步进度）</div>
+            ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u.replace(/\/+$/, ''))}/api/opds/v1.2</div>`).join('')}
+            <div style="font-size:12px;font-weight:600;color:var(--text-muted);margin-top:4px">标准 Komga OPDS v1.2（兼容其他 OPDS 阅读客户端）</div>
+            ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u.replace(/\/+$/, ''))}/opds/v1.2/catalog</div>`).join('')}
           </div>
           <div style="margin-top:12px;font-size:12.5px;color:var(--text-muted)">
             版本：<code>${esc(st.version)}</code> · 数据目录：<code>${esc(st.dataDir)}</code>

@@ -120,6 +120,9 @@ func (s *Server) komgaCapabilities(w http.ResponseWriter, _ *http.Request) {
 			"unionLibraries":         true,
 			"libraryPipelines":       true,
 			"bangumiJump":            true,
+			"opdsV1":                 true,
+			"opdsPse":                true,
+			"koreaderOpds":           true,
 		},
 	})
 }

@@ -237,7 +237,8 @@ func candidateAPIKeys(r *http.Request) []string {
 
 func isAPIRequestPath(p string) bool {
 	return p == "/api" || strings.HasPrefix(p, "/api/") ||
-		p == "/admin/api" || strings.HasPrefix(p, "/admin/api/")
+		p == "/admin/api" || strings.HasPrefix(p, "/admin/api/") ||
+		p == "/opds" || strings.HasPrefix(p, "/opds/")
 }
 
 func isStaticReaderAssetPath(p string) bool {

@@ -192,6 +192,12 @@ func (s *Server) routes() chi.Router {
 	// Agent-friendly management API (/api/agent/v1)
 	r.Route("/api/agent/v1", s.agentRoutes)
 
+	// OPDS v1.2 + OPDS-PSE dual entrypoints:
+	// 1. /api/opds/v1.2 (Suwayomi-style two-step metadata feed for KOReader opdsforcomic.koplugin)
+	// 2. /opds/v1.2     (Standard Komga OPDS v1.2 catalog)
+	r.Route("/api/opds/v1.2", s.suwayomiOPDSRoutes)
+	r.Route("/opds/v1.2", s.komgaOPDSRoutes)
+
 	// Komga v1 & v2 compatibility API
 	r.Route("/api/v1", s.komgaRoutes)
 	r.Get("/api/v2/users/me", s.komgaMe)

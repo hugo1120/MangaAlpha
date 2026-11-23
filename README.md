@@ -17,10 +17,10 @@
 
 **MangaAlpha**（原名 `fake-komga-115`）是一个 **100% 纯 Go（`CGO_ENABLED=0`）单文件自包含**的轻量级 Komga 兼容漫画书库与阅读服务端，也提供可独立运行的 Android App。
 
-它把 **115 网盘**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 统一汇入同一个书库（支持多源分层叠加联合库），内置 **响应式网页书架与阅读历史时间线**、**支持自动裁切白边的简体中文双页网页阅读器**、**默认带中文简介增强镜像的 Bangumi (`bgm.tv`) 双引擎刮削中心**、**跨平台更新检测** 与 **AI Agent 书库治理接口**，并完整兼容 **Mihon（Komga 扩展）** 与 **Koharia** 客户端。
+它把 **115 网盘**、**服务器本地 / SMB 挂载目录** 与 **WebDAV（CloudDrive2 / OpenList / NAS）** 统一汇入同一个书库（支持多源分层叠加联合库），内置 **响应式网页书架与阅读历史时间线**、**支持自动裁切白边的简体中文双页网页阅读器**、**默认带中文简介增强镜像的 Bangumi (`bgm.tv`) 双引擎刮削中心**、**跨平台更新检测** 与 **AI Agent 书库治理接口**，并完整兼容 **Mihon（Komga 扩展）**、**Koharia** 与 **KOReader（OPDS v1.2 + OPDS-PSE）** 客户端。
 
 ```text
-内置网页书架 (/) · 阅读历史 (/history) · 简体中文阅读器 (/reader/*) · Mihon / Koharia · AI Agent (/api/agent/v1)
+内置网页书架 (/) · 阅读历史 (/history) · 简体中文阅读器 (/reader/*) · Mihon / Koharia · KOReader OPDS · AI Agent (/api/agent/v1)
                        ↓ (Session Cookie / HTTP Basic Auth / Bearer & X-API-Key)
                                      MangaAlpha
                ├── 115 Open API ──────────────→ downurl + HTTP Range 分块按需流式解压
@@ -51,6 +51,7 @@
 - **收藏夹（`/collections`）与阅读列表（`/readlists`）**：完整持久化存储与 Komga REST CRUD，支持手动排序、作品/单卷页快捷加入并与 Koharia 双向同步。
 - **多版本切换与 Bangumi 油猴脚本**：支持按 Bangumi 排名排序与「合并相同 Bangumi ID」；作品页提供默认折叠的多版本切换面板，跨库卡片与详情页清晰标注书库与文件来源；内置 `/bgm/{subjectID}` 直达入口与后台一键下载的 Bangumi 油猴脚本（`.user.js`），浏览 `bgm.tv` 时自动探测本库收录状态并直达。
 - **深度兼容 Koharia 与 Mihon**：支持 `(<q>) OR tag:(<q>)` 联合检索、Komga 字段检索与 `relevance` 排序、90 天进度重置墓碑保护、轻量 Komga SSE 事件流（`/api/v1/sse/v1/events`）、`/api/v2/authors` 分页作者接口与 HTTP `gzip` 压缩，数十万册大库依然流畅同步。
+- **KOReader 墨水屏 OPDS v1.2 + OPDS-PSE 双入口在线页流**：原生适配 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin)（`/api/opds/v1.2`，支持零提前建索引、点击章节直读、章末自动切下一章、前后 5 章导航与双向同步进度），同时提供标准 Komga OPDS v1.2（`/opds/v1.2/catalog`）与 `?convert=jpeg` 按需转码。
 
 ### 3. 多存储源共存、分层联合库与自动化流水线
 
@@ -167,9 +168,12 @@ make build
 - `+` 或 `&` 连接的标题仅在完整标题吻合或各部分同属一部作品正式标题/别名时才参与自动匹配，合集不会误匹配单部作品，仍可手动搜索或填条目 ID 绑定。
 - **为什么个别作品点击 `bgm.tv` 链接提示“数据库中没有查询您所指定的条目”？** 这是 Bangumi 官网未登录访问限制，在浏览器登录 `bgm.tv` 账号后重新打开即可正常查看。
 
-### 连接 Mihon / Koharia 与 AI Agent
+### 连接 Mihon / Koharia / KOReader 与 AI Agent
 - **Mihon**：安装 Komga 扩展，填入 `http://<服务器IP>:25600` 与管理员账号密码。
 - **Koharia**：内置 Komga 支持，直接新增 Komga 服务器并填入服务地址与管理员账号密码（也支持后台生成的 API Key）。
+- **KOReader（墨水屏）**：
+  - 推荐搭配 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin) 插件，在 `OPDS catalog (Comic)` 中填入 `http://<服务器IP>:25600/api/opds/v1.2` 与账号密码，即可获得点击章节直读、章末自动切下一章、前后 5 章导航、零提前建索引与双向同步阅读进度体验；
+  - 同时也提供标准 Komga OPDS v1.2 入口 `http://<服务器IP>:25600/opds/v1.2/catalog`（支持 OPDS-PSE 在线页流与 OpenSearch 搜索），兼容其他标准 OPDS 漫画客户端。
 - **AI Agent 治理**：携带 `Authorization: Bearer <API_KEY>` 请求 `GET /api/agent/v1/manifest` 即可发现全部管理能力，详见 [docs/AGENT_API.md](docs/AGENT_API.md)。
 
 ---

@@ -325,6 +325,57 @@ export class SubpathUtil {
         "    shouldCropBorders: false,",
         "    shouldCropBorders: typeof window !== 'undefined' && window.innerWidth < 900,",
     )
+    replace_exact(
+        reader_consts,
+        "    shouldUseAutoWebtoonMode: true,",
+        "    shouldUseAutoWebtoonMode: false,",
+    )
+
+    # 8a0. Fix upstream multi-locale tag table misclassifying Chinese "xx漫画" genres (e.g. 青年漫画) as long-strip MANHUA
+    manga_consts = root / "src" / "features" / "manga" / "Manga.constants.ts"
+    replace_exact(
+        manga_consts,
+        """    [MangaType.MANHWA]: [
+        'Manhwa',
+        'מנהווה',
+        '만화',
+        '韩漫',""",
+        """    [MangaType.MANHWA]: [
+        'Manhwa',
+        'מנהווה',
+        '韩漫',""",
+    )
+    replace_exact(
+        manga_consts,
+        """    [MangaType.MANHUA]: [
+        'Manhua',
+        'מנהואה',
+        '만화',
+        '国漫',
+        'Tira llarga',
+        'Long Strip',
+        'Long strip',
+        'רצועה ארוכה',
+        '롱스트립',
+        '条漫',
+        'مانها',
+        'מנגה סינית (Manhua)',
+        '漫画',
+        'Маньхуа',""",
+        """    [MangaType.MANHUA]: [
+        'Manhua',
+        'מנהואה',
+        '国漫',
+        'Tira llarga',
+        'Long Strip',
+        'Long strip',
+        'רצועה ארוכה',
+        '롱스트립',
+        '条漫',
+        'مانها',
+        'מנגה סינית (Manhua)',
+        'Маньхуа',""",
+    )
 
     # 8a. Fill missing Simplified Chinese translation for upstream auto-crop setting
     zh_po = root / "src" / "i18n" / "locales" / "zh-Hans.po"

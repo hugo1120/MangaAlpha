@@ -19,10 +19,26 @@
     return Math.min(spec.max, Math.max(spec.min, n));
   }
 
-  function readLocalDisplayPrefs() {
+  function defaultDisplayPrefs() {
     const out = {};
     for (const [name, spec] of Object.entries(DISPLAY_PREFS)) {
-      out[name] = clampDisplayPref(spec, localStorage.getItem(`fk115_display.${name}`));
+      out[name] = spec.def;
+    }
+    return out;
+  }
+
+  function displayPrefStorageKey(userId, name) {
+    return `fk115_display.${userId}.${name}`;
+  }
+
+  function readLocalDisplayPrefs(userId) {
+    const out = defaultDisplayPrefs();
+    if (!userId) return out;
+    for (const [name, spec] of Object.entries(DISPLAY_PREFS)) {
+      try {
+        const raw = localStorage.getItem(displayPrefStorageKey(userId, name));
+        if (raw != null && raw !== '') out[name] = clampDisplayPref(spec, raw);
+      } catch (_) {}
     }
     return out;
   }
@@ -44,8 +60,8 @@
     },
     themeMode: localStorage.getItem(THEME_MODE_KEY) || 'auto',
     theme: 'dark',
-    displayPrefs: readLocalDisplayPrefs(),
-    displayPrefsLoaded: false,
+    displayPrefs: defaultDisplayPrefs(),
+    displayPrefsUserId: '',
     libraries: [],
     taxonomies: { loaded: false, genres: [], tags: [], publishers: [] },
     pollTimer: null,
@@ -60,37 +76,62 @@
     return Boolean(state.auth && state.auth.isAdmin);
   }
 
+  function resetDisplayPrefs() {
+    state.displayPrefs = defaultDisplayPrefs();
+    state.displayPrefsUserId = '';
+  }
+
   function displayPref(name) {
     const spec = DISPLAY_PREFS[name];
     return Math.min(spec.max, Math.max(spec.min, state.displayPrefs[name] || spec.def));
   }
 
   async function ensureDisplayPrefs() {
-    if (state.displayPrefsLoaded) return;
+    const uid = (state.auth && state.auth.userId) || '';
+    if (!uid) {
+      resetDisplayPrefs();
+      return;
+    }
+    if (state.displayPrefsUserId === uid) return;
+    state.displayPrefs = readLocalDisplayPrefs(uid);
     try {
-      const res = await api('/api/v1/client-settings/user/list');
+      const res = await api('/api/v1/client-settings/user/list', {
+        headers: { 'X-FK115-User-Id': uid },
+      });
+      if (((state.auth && state.auth.userId) || '') !== uid) return;
+      const next = defaultDisplayPrefs();
       for (const [name, spec] of Object.entries(DISPLAY_PREFS)) {
         const item = res && res[spec.key];
-        if (!item || item.value == null || item.value === '') continue;
-        const value = clampDisplayPref(spec, item.value);
-        state.displayPrefs[name] = value;
-        localStorage.setItem(`fk115_display.${name}`, String(value));
+        const storageKey = displayPrefStorageKey(uid, name);
+        if (item && item.value != null && item.value !== '') {
+          const value = clampDisplayPref(spec, item.value);
+          next[name] = value;
+          try { localStorage.setItem(storageKey, String(value)); } catch (_) {}
+        } else {
+          try { localStorage.removeItem(storageKey); } catch (_) {}
+        }
       }
-      state.displayPrefsLoaded = true;
+      state.displayPrefs = next;
+      state.displayPrefsUserId = uid;
     } catch (_) {
-      // A failed read must not block the shelf; localStorage values stay in use.
+      // A failed read must not block the shelf; per-user cached or default values stay in use.
     }
   }
 
   async function saveDisplayPref(name, raw) {
+    const uid = (state.auth && state.auth.userId) || '';
     const spec = DISPLAY_PREFS[name];
     const value = clampDisplayPref(spec, raw);
-    state.displayPrefs[name] = value;
-    localStorage.setItem(`fk115_display.${name}`, String(value));
     await api('/api/v1/client-settings/user', {
       method: 'PATCH',
       body: { [spec.key]: { value: String(value) } },
     });
+    if (((state.auth && state.auth.userId) || '') === uid) {
+      state.displayPrefs[name] = value;
+      if (uid) {
+        try { localStorage.setItem(displayPrefStorageKey(uid, name), String(value)); } catch (_) {}
+      }
+    }
     return value;
   }
 
@@ -99,12 +140,13 @@
     const options = values.slice();
     if (!options.includes(current)) options.push(current);
     options.sort((a, b) => a - b);
-    return `<label class="field" style="margin:0">
-      <span>${esc(label)}</span>
-      <select data-display-pref="${esc(name)}">
+    const id = `disp-pref-${name}`;
+    return `<div class="field" style="margin:0">
+      <label for="${esc(id)}">${esc(label)}</label>
+      <select id="${esc(id)}" data-display-pref="${esc(name)}">
         ${options.map((value) => `<option value="${value}" ${value === current ? 'selected' : ''}>${value} 项</option>`).join('')}
       </select>
-    </label>`;
+    </div>`;
   }
 
   function bindDisplayPrefControls(root) {
@@ -664,6 +706,7 @@
       state.libraries = [];
       state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
       state.updateStatus = null;
+      resetDisplayPrefs();
       navigate('/login', true);
     };
     document.getElementById('global-search-form').onsubmit = (e) => {
@@ -767,6 +810,7 @@
         };
         state.libraries = [];
         state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
+        resetDisplayPrefs();
         toast('管理员账号设置成功');
         navigate('/', true);
       } catch (err) {
@@ -828,6 +872,7 @@
         };
         state.libraries = [];
         state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
+        resetDisplayPrefs();
         navigate(safeRedirectTarget(redirect), true);
       } catch (err) {
         toast(err.message || '用户名或密码错误', 'error');
@@ -4290,10 +4335,6 @@
         <button type="submit" class="btn btn-primary">保存系统设置</button>
       </form>
 
-      <div style="margin-top:16px">
-        ${displayPrefCardHTML()}
-      </div>
-
       <div class="card">
         <div class="section-head" style="flex-wrap:wrap;gap:10px">
           <div>
@@ -4442,7 +4483,6 @@
         }
       };
     }
-    bindDisplayPrefControls(body);
     const diagRefreshBtn = document.getElementById('diag-refresh-btn');
     if (diagRefreshBtn) {
       diagRefreshBtn.onclick = () => renderAdminSettings(body);
@@ -6738,6 +6778,7 @@
     }
 
     await ensureDisplayPrefs();
+    if (seq !== routeSeq) return;
 
     if (p === '/' || p === '') {
       await renderHome();

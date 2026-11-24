@@ -3,7 +3,22 @@ package database
 import (
 	"strings"
 	"unicode"
+
+	"github.com/xJogger/fake-komga-115/internal/cjk"
 )
+
+// searchLikeValue folds a user-typed term the same way the stored *_key columns
+// were folded and wraps it for a LIKE scan. Traditional/Simplified/Shinjitai
+// spellings of the same name therefore compare equal: a folder stored as
+// 灌籃高手 is found by typing 灌篮高手 and vice versa.
+func searchLikeValue(raw string) string {
+	return "%" + escapeLike(cjk.SearchKey(raw)) + "%"
+}
+
+// searchExactValue folds a term for an equality comparison against a *_key column.
+func searchExactValue(raw string) string {
+	return cjk.SearchKey(raw)
+}
 
 // searchExpr represents a parsed Komga / Koharia search expression.
 type searchExpr interface {
@@ -337,17 +352,17 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 		if val == "" {
 			return ""
 		}
-		like := "%" + escapeLike(val) + "%"
+		like := searchLikeValue(val)
 		switch node.field {
 		case "tag", "series_tag", "book_tag":
 			*args = append(*args, like)
-			return `EXISTS (SELECT 1 FROM series_tags st WHERE st.series_id=s.id AND st.tag LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `EXISTS (SELECT 1 FROM series_tags st WHERE st.series_id=s.id AND st.search_key LIKE ? ESCAPE '\')`
 		case "genre":
 			*args = append(*args, like)
-			return `EXISTS (SELECT 1 FROM series_genres sg WHERE sg.series_id=s.id AND sg.genre LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `EXISTS (SELECT 1 FROM series_genres sg WHERE sg.series_id=s.id AND sg.search_key LIKE ? ESCAPE '\')`
 		case "publisher":
 			*args = append(*args, like)
-			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.publisher LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.publisher_key LIKE ? ESCAPE '\')`
 		case "language":
 			*args = append(*args, val)
 			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.language=? COLLATE NOCASE)`
@@ -356,16 +371,16 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.status=?)`
 		case "author":
 			*args = append(*args, like)
-			return `EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.name LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.search_key LIKE ? ESCAPE '\')`
 		case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
 			*args = append(*args, like, node.field)
-			return `EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.name LIKE ? ESCAPE '\' COLLATE NOCASE AND sa.role=? COLLATE NOCASE)`
+			return `EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.search_key LIKE ? ESCAPE '\' AND sa.role=? COLLATE NOCASE)`
 		case "title":
 			*args = append(*args, like, like, like)
-			return `(s.name LIKE ? ESCAPE '\' COLLATE NOCASE OR EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND (sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE)))`
+			return `(s.search_key LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND (sm.title_key LIKE ? ESCAPE '\' OR sm.alternate_key LIKE ? ESCAPE '\')))`
 		default:
 			*args = append(*args, like, like, like)
-			return `(s.name LIKE ? ESCAPE '\' COLLATE NOCASE OR EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND (sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE)))`
+			return `(s.search_key LIKE ? ESCAPE '\' OR EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND (sm.title_key LIKE ? ESCAPE '\' OR sm.alternate_key LIKE ? ESCAPE '\')))`
 		}
 	}
 	return ""
@@ -420,26 +435,26 @@ func renderBookSearchExpr(expr searchExpr, args *[]any) string {
 		if val == "" {
 			return ""
 		}
-		like := "%" + escapeLike(val) + "%"
+		like := searchLikeValue(val)
 		switch node.field {
 		case "tag", "series_tag", "book_tag":
 			*args = append(*args, like)
-			return `b.series_id IN (SELECT st.series_id FROM series_tags st WHERE st.tag LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `b.series_id IN (SELECT st.series_id FROM series_tags st WHERE st.search_key LIKE ? ESCAPE '\')`
 		case "genre":
 			*args = append(*args, like)
-			return `b.series_id IN (SELECT sg.series_id FROM series_genres sg WHERE sg.genre LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `b.series_id IN (SELECT sg.series_id FROM series_genres sg WHERE sg.search_key LIKE ? ESCAPE '\')`
 		case "publisher":
 			*args = append(*args, like)
-			return `b.series_id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.publisher LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `b.series_id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.publisher_key LIKE ? ESCAPE '\')`
 		case "author":
 			*args = append(*args, like)
-			return `b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE)`
+			return `b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.search_key LIKE ? ESCAPE '\')`
 		case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
 			*args = append(*args, like, node.field)
-			return `b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE AND sa.role=? COLLATE NOCASE)`
+			return `b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.search_key LIKE ? ESCAPE '\' AND sa.role=? COLLATE NOCASE)`
 		default:
 			*args = append(*args, like, like, like, like)
-			return `(b.name LIKE ? ESCAPE '\' COLLATE NOCASE OR b.series_id IN (SELECT s2.id FROM series s2 WHERE s2.name LIKE ? ESCAPE '\' COLLATE NOCASE) OR b.series_id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE))`
+			return `(b.search_key LIKE ? ESCAPE '\' OR b.series_id IN (SELECT s2.id FROM series s2 WHERE s2.search_key LIKE ? ESCAPE '\') OR b.series_id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.title_key LIKE ? ESCAPE '\' OR sm.alternate_key LIKE ? ESCAPE '\'))`
 		}
 	}
 	return ""
@@ -531,17 +546,17 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 		if val == "" {
 			return "", false
 		}
-		like := "%" + escapeLike(val) + "%"
+		like := searchLikeValue(val)
 		switch node.field {
 		case "tag", "series_tag", "book_tag":
 			*args = append(*args, like)
-			return `SELECT DISTINCT st.series_id AS series_id FROM series_tags st WHERE st.tag LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+			return `SELECT DISTINCT st.series_id AS series_id FROM series_tags st WHERE st.search_key LIKE ? ESCAPE '\'`, true
 		case "genre":
 			*args = append(*args, like)
-			return `SELECT DISTINCT sg.series_id AS series_id FROM series_genres sg WHERE sg.genre LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+			return `SELECT DISTINCT sg.series_id AS series_id FROM series_genres sg WHERE sg.search_key LIKE ? ESCAPE '\'`, true
 		case "publisher":
 			*args = append(*args, like)
-			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.publisher LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.publisher_key LIKE ? ESCAPE '\'`, true
 		case "language":
 			*args = append(*args, val)
 			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.language=? COLLATE NOCASE`, true
@@ -550,10 +565,10 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.status=?`, true
 		case "author":
 			*args = append(*args, like)
-			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`, true
+			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.search_key LIKE ? ESCAPE '\'`, true
 		case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
 			*args = append(*args, like, node.field)
-			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE AND sa.role=? COLLATE NOCASE`, true
+			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.search_key LIKE ? ESCAPE '\' AND sa.role=? COLLATE NOCASE`, true
 		default:
 			libWhereS := ""
 			if len(libs) > 0 {
@@ -563,9 +578,9 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 				libWhereS = "s2.library_id IN " + Placeholders(len(libs)) + " AND "
 			}
 			*args = append(*args, like)
-			b1 := `SELECT s2.id AS series_id FROM series s2 WHERE ` + libWhereS + `s2.name LIKE ? ESCAPE '\' COLLATE NOCASE`
+			b1 := `SELECT s2.id AS series_id FROM series s2 WHERE ` + libWhereS + `s2.search_key LIKE ? ESCAPE '\'`
 			*args = append(*args, like, like)
-			b2 := `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE`
+			b2 := `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.title_key LIKE ? ESCAPE '\' OR sm.alternate_key LIKE ? ESCAPE '\'`
 			return b1 + " UNION " + b2, true
 		}
 	}
@@ -620,12 +635,12 @@ func collectBookOrParts(expr searchExpr, libs []string, args *[]any) ([]string, 
 			}
 			return nil, []string{"SELECT series_id FROM (" + seriesSQL + ")"}, true
 		default:
-			like := "%" + escapeLike(val) + "%"
+			like := searchLikeValue(val)
 			for _, id := range libs {
 				*args = append(*args, id)
 			}
 			*args = append(*args, like)
-			bookPart := `SELECT b2.rowid AS book_rowid FROM books b2 WHERE b2.library_id IN ` + Placeholders(len(libs)) + ` AND b2.name LIKE ? ESCAPE '\' COLLATE NOCASE`
+			bookPart := `SELECT b2.rowid AS book_rowid FROM books b2 WHERE b2.library_id IN ` + Placeholders(len(libs)) + ` AND b2.search_key LIKE ? ESCAPE '\'`
 			seriesSQL, ok := renderSeriesCandidateSet(node, libs, args)
 			if !ok || seriesSQL == "" {
 				return []string{bookPart}, nil, true

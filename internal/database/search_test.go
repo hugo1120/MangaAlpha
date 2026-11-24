@@ -266,3 +266,109 @@ func TestSearchParserKohariaAndFields(t *testing.T) {
 		}
 	}
 }
+
+func TestSearchFoldsTraditionalSimplified(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cjk-search.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if err := store.UpsertLibrary(ctx, Library{ID: "lib", Name: "Main", RootCID: "root", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	insertCatalogSeries(t, store, "lib", "trad", "灌籃高手", []catalogBookTime{
+		{created: "2024-01-01T00:00:00Z", modified: "2024-01-01T00:00:00Z"},
+	})
+	insertCatalogSeries(t, store, "lib", "simp", "灌篮高手 全国大赛", []catalogBookTime{
+		{created: "2024-01-02T00:00:00Z", modified: "2024-01-02T00:00:00Z"},
+	})
+	source, err := store.SeriesByID(ctx, "trad")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyScrapedMetadata(ctx, source, ScrapedMetadata{
+		SubjectID: 2001,
+		Title:     "灌籃高手",
+		TitleSort: "灌籃高手",
+		Publisher: "東立出版社",
+		Genres:    []string{"少年"},
+		Tags:      []string{"籃球", "熱血"},
+		Authors:   []Author{{Name: "井上雄彥", Role: "writer"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name  string
+		query SeriesQuery
+		want  int64
+	}{
+		{"simplified query hits traditional name", SeriesQuery{Search: "灌篮高手", Sort: "relevance,asc", Size: 20}, 2},
+		{"traditional query hits simplified/traditional names", SeriesQuery{Search: "灌籃高手", Sort: "relevance,asc", Size: 20}, 2},
+		{"tag", SeriesQuery{Search: "tag:篮球", Size: 20}, 1},
+		{"tag traditional", SeriesQuery{Search: "tag:熱血", Size: 20}, 1},
+		{"publisher", SeriesQuery{Search: "publisher:东立出版社", Size: 20}, 1},
+		{"author", SeriesQuery{Search: "author:井上雄彦", Size: 20}, 1},
+		{"tag filter", SeriesQuery{Tags: []string{"篮球"}, Size: 20}, 1},
+		{"publisher filter", SeriesQuery{Publishers: []string{"东立出版社"}, Size: 20}, 1},
+		{"author filter", SeriesQuery{Authors: []string{"井上雄彦"}, Size: 20}, 1},
+	}
+	for _, test := range tests {
+		items, total, err := store.SeriesPage(ctx, test.query)
+		if err != nil {
+			t.Fatalf("%s: %v", test.name, err)
+		}
+		if total != test.want {
+			t.Fatalf("%s: total=%d want=%d items=%v", test.name, total, test.want, items)
+		}
+	}
+
+	items, _, err := store.SeriesPage(ctx, SeriesQuery{Search: "灌篮高手", Sort: "relevance,asc", Size: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) < 2 || items[0].ID != "trad" {
+		t.Fatalf("relevance should put the exact folded key first, got %v", items)
+	}
+
+	books, bookTotal, err := store.BooksPage(ctx, BookQuery{Search: "灌篮高手", Size: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bookTotal != 2 || len(books) != 2 {
+		t.Fatalf("book search total=%d len=%d books=%v", bookTotal, len(books), books)
+	}
+	if _, total, err := store.BooksPage(ctx, BookQuery{Tags: []string{"篮球"}, Size: 20}); err != nil || total != 1 {
+		t.Fatalf("book tag filter total=%d err=%v", total, err)
+	}
+}
+
+func TestEnsureSearchKeysBackfillsExistingRows(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "cjk-backfill.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.UpsertLibrary(context.Background(), Library{ID: "lib", Name: "Main", RootCID: "root", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,search_key,relative_path,created_at,updated_at,seen_scan_id)
+VALUES('legacy','lib','cid','灌籃高手','','灌籃高手','2024-01-01T00:00:00Z','2024-01-01T00:00:00Z','scan')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`DELETE FROM settings WHERE key=?`, searchKeysVersionKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSearchKeys(store.DB()); err != nil {
+		t.Fatal(err)
+	}
+	var key string
+	if err := store.DB().QueryRow(`SELECT search_key FROM series WHERE id='legacy'`).Scan(&key); err != nil {
+		t.Fatal(err)
+	}
+	if key != "灌篮高手" {
+		t.Fatalf("backfilled key=%q, want 灌篮高手", key)
+	}
+}

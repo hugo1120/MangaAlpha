@@ -23,10 +23,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 )
 
-func TestCJKTableAlignmentAndVariants(t *testing.T) {
-	if len([]rune(tradRunes)) != len([]rune(simpRunes)) {
-		t.Fatalf("tradRunes (%d) != simpRunes (%d)", len([]rune(tradRunes)), len([]rune(simpRunes)))
-	}
+func TestCJKVariantConversion(t *testing.T) {
 	got := ToSimplified("妳的一週間 禪院 臺灣 姊妹 菓子 亂鬪 貓耳 姫様 隣の怪物")
 	want := "你的一周间 禅院 台湾 姐妹 果子 乱斗 猫耳 姬样 邻の怪物"
 	if got != want {

@@ -1,0 +1,332 @@
+// Package cjk normalizes CJK text so that Traditional Chinese, Simplified
+// Chinese, Japanese Shinjitai and fullwidth ASCII spellings of the same name
+// collapse onto a single comparable key.
+//
+// It is shared by the Bangumi scraper (title/author matching) and the SQLite
+// catalog (title/author/tag/publisher search) so both layers agree on what
+// "the same character" means. Keeping one implementation avoids the historical
+// bug where the scrape path folded 繁→简 but the search path did not.
+package cjk
+
+import (
+	"strings"
+	"unicode"
+)
+
+const (
+	tradRunes = "両乗亂亞仏伝來侖侶俠倆倉個們値倫偉側偵傑傘備傭傳債傷傾僅僑僞僥價儀億儈儉償優儲兇兌兒兩冊凍凜処凱別則剛剝剣剮剱創劃劄劇劉劊劍劑労勁動務勝勞勢勳勵勸勻區協単卻厭厲參叠叢吳呂呪員問啓啞啟喚喪喬單喲嗆嗎嘆嘔嘗嘩嘯噓噴噸嚨嚴囑団囪図國圍園圓圖團執堅堯報場堿塁塊塗塢塵塹墊増墜墳墾壇壓壘壞壟壩壯売壺壽変夠夢夥夾奧奪奮妝娛婁婦媽嬌嬰嬸孫學孿実宮實審寫寬寵寶対専專尋對導屆屍屜屢層屬岡島峽崗嶄嶺嶼嶽巋巒帥師帯帰帳帶幀幟幫幹幾庁広庫廁廂廃廄廈廚廟廠廢廣廬廳廻弐張強弾彈彌彎彙彜彥後徑従從徹応恥悅悩悪悶惡惱愛慘慚慣慫慮慶憂憊憐憑憚憤憫憲憶懇應懲懶懷懸懼懾戀戦戰戲戶払扡抜択拝挾掃掄掙揀揚換揮揺損搖搗搶摟摯摳摻撃撈撐撓撚撣撥撫撲撻撿擁擄擇擊擋擔據擠擡擯擰擱擲擴擺擻擾攆攏攔攙攜攝攢攣攤攪攬敗敵數斂斃斉斬斷時晉晝晩暈暢暦暫曆曉曠曬書會東桜條棄棗棟棧検楊楓業極榮構槍様槳樁樂樓樞樣権樸樹橋機橢橫檔檢檸檻櫃櫥櫻欄權欽歎歐歡歩歲歳歴歸殘殲殺殼毀毆毎氈気氣氫決沒沖沢況洩洶浜涙涼淚淨淩淪淵淺渙減測渾湊湧湯満準溝溫滄滅滌滬滲滾滿漁漚漢漣漬漲漸漿潑潔潛潤潰澀澆澇澗澤澱濁濃濕濘濟濤濫濰濱濺濾瀉瀕瀝瀬瀾灑灘灣灤災為烏烴焼煉煙煥煩熒熱熾燈燒燙營燦燭燴燼爍爐爛爺爾牆牽犢犧狀狹狽猙猟猶獄獅獎獣獨獰獲獵獸獺獻現琺瑣瑤瑩瑪環瓊産甯畝畢畫異當疇疊痙瘋瘍瘓瘡瘧療癟癡癢癬癰癱発發皚皺盜盞盡監盤盧睜瞞矚矯矽硯碩碼磚礎礙礦礫礬祿禍禦禮禱稅稈稭種稱穂積穎穢穩窪窮窯窺竄竅竈竊竜競筆筍箋節範築篩簍簡簽簾籃籌籠籬籮籲粋粵糞糧糾紀約紅紉紋納紐純紗紙級紛紡紮細紳紹終組絆経結絕絞絡絢給絨統絲絶絹綁綏經続綜綠綢維綱網綴綸綻綽綿緊緑緒緘線緝緞締緣編緩緬緯練緻縄縛縣縧縫縮縱縷總績繃織繕繞繡繩繪繭繳繹繼續纏纓纖纜缽罰罵罷羅羨義習翹翺聖聞聯聰聲聳聴聶職聽聾肅脅脈脫脳脹腎腦腫腳腸膚膠膩膽膿臉臍臘臨臯與興舉舊舗艙艦艱芸茲荊荘莊莖莢華萊萬葉葦葷蒼蓋蓮蔔蔣蔥蔭蕩蕪蕭薊薔薦薩薬藍藝藥藹蘆蘇蘊蘋蘭蘿處虛虜虧蛻蝕蝦螞螢蟄蟬蟲蟻蠅蠍蠟蠱蠶蠻衆術衛裏補裝裡複褲襖襪襯襲覇見規覓視覧親覺覽觀觸訂訃計訊訓訖記訛訝訟訣訪設許訳訴診証詐評詛詞詠詢詣試詩詫詭話該詳誅誇認誕誘語誠誡誣誤誦誨說読誰課誼調諄談請諒論諜諧諱諷諸諺諾謀謂謄謅謊謎謗謙講謝謠謡謬謹謾證譏識譚譜譯議譴護譽讀變讒讓讕豈豊豎豐豔豬貓貝貞負貢貧貨販貪貫責貯貳貴貶買貸費貼貿賀賂賃賄資賈賊賒賓賜賞賠賢賣賤賦質賬賭賴賺購賽贅贈贊贍贓贖贛趕趙趨踐踴蹤躊躍軀車軋軌軍軒軟転軸較載輔輕輛輝輥輩輪輯輸輻輾輿轄轅轉轍轎轟辦辭辮辯農辺逓這連進遅遊運過達違遙遜遞遠遲遷選遺遼邁還邊邏郵鄉鄒鄖鄧鄭鄰鄲酔醜醞醫醬釀釁釈釋釘針釣釩釺鈉鈍鈎鈔鈕鈞鈣鈴鈾鉀鉄鉑鉗鉚鉛鉸鉻銀銅銑銘銜銥銳銷銻鋁鋅鋇鋒鋤鋪鋳鋸鋼錄錐錘錠錢錦錨錫錬錯録錳鍁鍊鍋鍍鍘鍛鍬鍵鍺鍾鎂鎊鎖鎬鎮鎳鏈鏟鏡鏽鐐鐘鐮鐳鐵鑄鑒鑰鑲鑷鑼鑽鑿長門閃閉開閏閑間閘閡閣閥閨閩閱閹閻闆闊闌闖闘關闡陝陣陰陳陸険陽隊階隕際險隴隷隸隻雑雖雙雛雜雞離難雲電霧靂靈靜鞏韋韌韓韻響頁頂頃項順須頌預頑頒頓頗領頤頭頰頸頹頻頼顆題額顔願類顧顫顯顱顴風飄飛飯飲飼飽飾餃餅養餌餒餓餘餡館餾饅饋饑饒饞馬馭馮馳馴駁駐駒駕駛駝駭駱駿騁騎騒験騙騰騷騾驅驕驗驚驟驢髒體髪鬥鬧魚魯鮑鮮鯉鰓鱗鳥鳳鳴鴉鴕鴛鴦鴨鴻鴿鵑鵝鵬鵲鶴鷗鷹鹵鹹鹼鹽麗麥麼麽黃黒黙點黨黴鼈齊齋齒齡齢齧齲龍龐龔龜"
+	simpRunes = "两乘乱亚佛传来仑侣侠俩仓个们值伦伟侧侦杰伞备佣传债伤倾仅侨伪侥价仪亿侩俭偿优储凶兑儿两册冻凛处凯别则刚剥剑剐剑创划札剧刘刽剑剂劳劲动务胜劳势勋励劝匀区协单却厌厉参迭丛吴吕咒员问启哑启唤丧乔单哟呛吗叹呕尝哗啸嘘喷吨咙严嘱团囱图国围园圆图团执坚尧报场碱垒块涂坞尘堑垫增坠坟垦坛压垒坏垄坝壮卖壶寿变够梦伙夹奥夺奋妆娱娄妇妈娇婴婶孙学孪实宫实审写宽宠宝对专专寻对导届尸屉屡层属冈岛峡岗崭岭屿岳岿峦帅师带归帐带帧帜帮干几厅广库厕厢废厩厦厨庙厂废广庐厅回贰张强弹弹弥弯汇彝彦后径从从彻应耻悦恼恶闷恶恼爱惨惭惯怂虑庆忧惫怜凭惮愤悯宪忆恳应惩懒怀悬惧慑恋战战戏户拂扦拔择拜挟扫抡挣拣扬换挥摇损摇捣抢搂挚抠掺击捞撑挠捻掸拨抚扑挞捡拥掳择击挡担据挤抬摈拧搁掷扩摆擞扰撵拢拦搀携摄攒挛摊搅揽败敌数敛毙齐斩断时晋昼晚晕畅历暂历晓旷晒书会东樱条弃枣栋栈检杨枫业极荣构枪样桨桩乐楼枢样权朴树桥机椭横档检柠槛柜橱樱栏权钦叹欧欢步岁岁历归残歼杀壳毁殴每毡气气氢决没冲泽况泄汹滨泪凉泪净凌沦渊浅涣减测浑凑涌汤满准沟温沧灭涤沪渗滚满渔沤汉涟渍涨渐浆泼洁潜润溃涩浇涝涧泽淀浊浓湿泞济涛滥潍滨溅滤泻濒沥濑澜洒滩湾滦灾为乌烃烧炼烟焕烦荧热炽灯烧烫营灿烛烩烬烁炉烂爷尔墙牵犊牺状狭狈狰猎犹狱狮奖兽独狞获猎兽獭献现珐琐瑶莹玛环琼产宁亩毕画异当畴叠痉疯疡痪疮疟疗瘪痴痒癣痈瘫发发皑皱盗盏尽监盘卢睁瞒瞩矫硅砚硕码砖础碍矿砾矾禄祸御礼祷税秆秸种称穗积颖秽稳洼穷窑窥窜窍灶窃龙竞笔笋笺节范筑筛篓简签帘篮筹笼篱箩吁粹粤粪粮纠纪约红纫纹纳纽纯纱纸级纷纺扎细绅绍终组绊经结绝绞络绚给绒统丝绝绢绑绥经续综绿绸维纲网缀纶绽绰绵紧绿绪缄线缉缎缔缘编缓缅纬练致绳缚县绦缝缩纵缕总绩绷织缮绕绣绳绘茧缴绎继续缠缨纤缆钵罚骂罢罗羡义习翘翱圣闻联聪声耸听聂职听聋肃胁脉脱脑胀肾脑肿脚肠肤胶腻胆脓脸脐腊临皋与兴举旧铺舱舰艰艺兹荆庄庄茎荚华莱万叶苇荤苍盖莲卜蒋葱荫荡芜萧蓟蔷荐萨药蓝艺药蔼芦苏蕴苹兰萝处虚虏亏蜕蚀虾蚂萤蛰蝉虫蚁蝇蝎蜡蛊蚕蛮众术卫里补装里复裤袄袜衬习霸见规觅视览亲觉览观触订讣计讯训讫记讹讶讼诀访设许译诉诊证诈评诅词咏询诣试诗诧诡话该详诛夸认诞诱语诚诫诬误诵诲说读谁课谊调谆谈请谅论谍谐讳讽诸谚诺谋谓誊诌谎谜谤谦讲谢谣谣谬谨谩证讥识谭谱译议谴护誉读变谗让谰岂丰竖丰艳猪猫贝贞负贡贫货贩贪贯责贮贰贵贬买贷费贴贸贺赂赁贿资贾贼赊宾赐赏赔贤卖贱赋质账赌赖赚购赛赘赠赞赡赃赎赣赶赵趋践踊踪踌跃躯车轧轨军轩软转轴较载辅轻辆辉辊辈轮辑输辐辗舆辖辕转辙轿轰办辞辫辩农边递这连进迟游运过达违遥逊递远迟迁选遗辽迈还边逻邮乡邹郧邓郑邻郸醉丑酝医酱酿衅释释钉针钓钒钎钠钝钩钞钮钧钙铃铀钾铁铂钳铆铅铰铬银铜铣铭衔铱锐销锑铝锌钡锋锄铺铸锯钢录锥锤锭钱锦锚锡炼错录锰锨链锅镀铡锻锹键锗钟镁镑索镐镇镍链铲镜绣镣钟镰镭铁铸鉴钥镶镊锣钻凿长门闪闭开闰闲间闸阂阁阀闺闽阅阉阎板阔阑闯斗关阐陕阵阴陈陆险阳队阶陨际险陇隶隶只杂虽双雏杂鸡离难云电雾雳灵静巩韦韧韩韵响页顶顷项顺须颂预顽颁顿颇领颐头颊颈颓频赖颗题额颜愿类顾颤显颅颧风飘飞饭饮饲饱饰饺饼养饵馁饿余馅馆馏馒馈饥饶馋马驭冯驰驯驳驻驹驾驶驮骇骆骏骋骑骚验骗腾骚骡驱骄验惊骤驴脏体发斗闹鱼鲁鲍鲜鲤鳃鳞鸟凤鸣鸦鸵鸳鸯鸭鸿鸽鹃鹅鹏鹊鹤鸥鹰卤咸硷盐丽麦么么黄黑默点党霉鳖齐斋齿龄龄啮龋龙庞龚龟"
+)
+
+// extraTradSimpPairs carries variant characters, Joyou/Shinjitai spellings and
+// kana equivalences that the positional tradRunes/simpRunes table cannot
+// express. A single unmapped rune used to zero the whole match key, so the
+// characters that routinely appear in scan folder names are listed explicitly.
+var extraTradSimpPairs = [][2]rune{
+	// Missing from the positional table; these used to break otherwise perfect
+	// title matches on real folders (note: U+FA11 is the CJK compatibility
+	// ideograph for 崎 that Windows share names frequently contain).
+	{'\uFA11', '崎'}, {'嵜', '崎'}, {'辻', '辻'}, {'畑', '畑'}, {'畠', '畠'},
+	{'垰', '垰'}, {'峠', '峠'}, {'榊', '榊'}, {'栃', '栃'}, {'燿', '耀'}, {'槇', '槙'},
+
+	// Historical pair table, kept verbatim so existing scrape results do not
+	// change.
+	{'妳', '你'}, {'週', '周'}, {'禪', '禅'}, {'臺', '台'}, {'檯', '台'}, {'姊', '姐'},
+	{'菓', '果'}, {'鬪', '斗'}, {'鬭', '斗'}, {'鬬', '斗'}, {'塚', '冢'}, {'峯', '峰'},
+	{'羣', '群'}, {'衆', '众'}, {'裏', '里'}, {'裡', '里'}, {'迴', '回'}, {'甦', '苏'},
+	{'麪', '面'}, {'麵', '面'}, {'舘', '馆'}, {'舖', '铺'}, {'呪', '咒'}, {'遙', '遥'},
+	{'凜', '凛'}, {'瀨', '濑'}, {'瀧', '泷'}, {'澤', '泽'}, {'汙', '污'}, {'沈', '沉'},
+	{'牀', '床'}, {'牴', '抵'}, {'獪', '狯'}, {'獼', '猕'}, {'籤', '签'}, {'簷', '檐'},
+	{'捨', '舍'}, {'燄', '焰'}, {'粧', '妆'}, {'嫻', '娴'}, {'孃', '娘'}, {'巔', '巅'},
+	{'巖', '岩'}, {'廐', '厩'}, {'徵', '征'}, {'慾', '欲'}, {'拋', '抛'}, {'掛', '挂'},
+	{'採', '采'}, {'摺', '折'}, {'敘', '叙'}, {'昇', '升'}, {'曖', '暧'}, {'柵', '栅'},
+	{'氷', '冰'}, {'淒', '凄'}, {'爲', '为'}, {'獃', '呆'}, {'盃', '杯'}, {'眞', '真'},
+	{'砲', '炮'}, {'硃', '朱'}, {'碁', '棋'}, {'祕', '秘'}, {'禿', '秃'}, {'窻', '窗'},
+	{'糉', '粽'}, {'糺', '纠'}, {'紘', '纮'}, {'紓', '纾'}, {'紜', '纭'}, {'紕', '纰'},
+	{'紈', '纨'}, {'紺', '绀'}, {'絀', '绌'}, {'絃', '弦'}, {'絳', '绛'}, {'綃', '绡'},
+	{'綉', '绣'}, {'綑', '捆'}, {'綣', '绻'}, {'綫', '线'}, {'綬', '绶'}, {'綰', '绾'},
+	{'綵', '彩'}, {'綺', '绮'}, {'緋', '绯'}, {'緖', '绪'}, {'緗', '缃'}, {'緙', '缂'},
+	{'綾', '绫'}, {'緲', '缈'}, {'緡', '缗'}, {'緹', '缇'}, {'縈', '萦'}, {'縉', '缙'},
+	{'縊', '缢'}, {'縋', '缒'}, {'縐', '皱'}, {'縑', '缣'}, {'縝', '缜'}, {'縂', '总'},
+	{'縞', '缟'}, {'縟', '缛'}, {'縲', '缧'}, {'縵', '缦'}, {'縹', '缥'}, {'繆', '缪'},
+	{'繒', '缯'}, {'繚', '缭'}, {'繫', '系'}, {'繋', '系'}, {'繍', '绣'}, {'繮', '缰'},
+	{'繰', '缫'}, {'繽', '缤'}, {'繾', '缱'}, {'纈', '缬'}, {'纍', '累'}, {'纔', '才'},
+	{'罎', '坛'}, {'翫', '玩'}, {'翦', '剪'}, {'脣', '唇'}, {'臙', '胭'}, {'臟', '脏'},
+	{'臥', '卧'}, {'艷', '艳'}, {'菴', '庵'}, {'蔕', '蒂'}, {'蕰', '蕴'}, {'藴', '蕴'},
+	{'號', '号'}, {'蝟', '猬'}, {'蝨', '虱'}, {'衞', '卫'}, {'衝', '冲'}, {'褸', '褛'},
+	{'羈', '羁'}, {'託', '托'}, {'註', '注'}, {'誌', '志'}, {'説', '说'}, {'諮', '咨'},
+	{'譁', '哗'}, {'譟', '噪'}, {'讌', '宴'}, {'讎', '仇'}, {'讚', '赞'}, {'谿', '溪'},
+	{'貍', '狸'}, {'跡', '迹'}, {'蹟', '迹'}, {'躰', '体'}, {'輓', '挽'}, {'迺', '乃'},
+	{'逕', '径'}, {'遡', '溯'}, {'遯', '遁'}, {'遶', '绕'}, {'邨', '村'}, {'醖', '酝'},
+	{'釐', '厘'}, {'鉤', '钩'}, {'鉢', '钵'}, {'銕', '铁'}, {'錶', '表'}, {'鍼', '针'},
+	{'鎗', '枪'}, {'鎚', '锤'}, {'鑑', '鉴'}, {'閒', '闲'}, {'閲', '阅'}, {'闇', '暗'},
+	{'闢', '辟'}, {'陞', '升'}, {'隄', '堤'}, {'隨', '随'}, {'隱', '隐'}, {'雋', '隽'},
+	{'霑', '沾'}, {'霪', '淫'}, {'靄', '霭'}, {'靦', '腼'}, {'鞦', '秋'}, {'韁', '缰'},
+	{'韆', '千'}, {'颻', '摇'}, {'飆', '飙'}, {'飈', '飙'}, {'飜', '翻'}, {'飢', '饥'},
+	{'餚', '肴'}, {'餬', '糊'}, {'騌', '鬃'}, {'鬆', '松'}, {'鬍', '胡'}, {'鬚', '须'},
+	{'鬢', '鬓'}, {'鬨', '哄'}, {'鬱', '郁'}, {'鰐', '鳄'}, {'鱷', '鳄'}, {'鰕', '虾'},
+	{'鱉', '鳖'}, {'鷄', '鸡'}, {'麴', '曲'}, {'鼕', '冬'}, {'齣', '出'}, {'齩', '咬'},
+	{'竈', '灶'}, {'嬢', '娘'}, {'姫', '姬'}, {'戯', '戏'}, {'戻', '戾'}, {'拠', '据'},
+	{'拡', '扩'}, {'捜', '搜'}, {'掲', '揭'}, {'摂', '摄'}, {'撹', '搅'}, {'収', '收'},
+	{'暁', '晓'}, {'曽', '曾'}, {'栄', '荣'}, {'桟', '栈'}, {'楽', '乐'}, {'歓', '欢'},
+	{'歯', '齿'}, {'殻', '壳'}, {'渇', '渴'}, {'渋', '涩'}, {'渓', '溪'}, {'滝', '泷'},
+	{'畳', '叠'}, {'砕', '碎'}, {'確', '确'}, {'稲', '稻'}, {'穏', '稳'}, {'粛', '肃'},
+	{'絵', '绘'}, {'継', '继'}, {'総', '总'}, {'縁', '缘'}, {'縦', '纵'}, {'繊', '纤'},
+	{'臓', '脏'}, {'艶', '艳'}, {'蔵', '藏'}, {'薫', '薰'}, {'蛍', '萤'}, {'観', '观'},
+	{'謁', '谒'}, {'譲', '让'}, {'賛', '赞'}, {'軽', '轻'}, {'輪', '轮'}, {'郷', '乡'},
+	{'醸', '酿'}, {'鉱', '矿'}, {'銃', '铳'}, {'銭', '钱'}, {'鋭', '锐'}, {'鎮', '镇'},
+	{'関', '关'}, {'陥', '陷'}, {'隠', '隐'}, {'隣', '邻'}, {'霊', '灵'}, {'顕', '显'},
+	{'駅', '驿'}, {'駆', '驱'}, {'髄', '髓'}, {'鶏', '鸡'}, {'無', '无'}, {'姉', '姐'},
+	{'僕', '仆'}, {'姦', '奸'}, {'墮', '堕'}, {'製', '制'}, {'態', '态'}, {'搾', '榨'},
+	{'巻', '卷'}, {'捲', '卷'}, {'倶', '俱'}, {'戸', '户'}, {'復', '复'}, {'兎', '兔'},
+	{'徳', '德'}, {'亜', '亚'}, {'係', '系'}, {'仮', '假'}, {'児', '儿'}, {'內', '内'},
+	{'嶋', '岛'}, {'嶌', '岛'}, {'恵', '惠'}, {'巣', '巢'}, {'査', '查'}, {'壊', '坏'},
+	{'壱', '壹'}, {'嵐', '岚'}, {'呑', '吞'}, {'舎', '舍'}, {'円', '圆'}, {'亀', '龟'},
+	{'飴', '饴'}, {'詰', '诘'}, {'覚', '觉'}, {'棲', '栖'}, {'討', '讨'}, {'偽', '伪'},
+	{'塩', '盐'}, {'讐', '雠'}, {'営', '营'}, {'挿', '插'}, {'將', '将'}, {'爭', '争'},
+	{'鳩', '鸠'}, {'汚', '污'}, {'癒', '愈'}, {'鳶', '鸢'}, {'嗶', '哔'}, {'済', '济'},
+	{'窓', '窗'}, {'醤', '酱'}, {'駄', '驮'}, {'馱', '驮'}, {'贄', '贽'}, {'呉', '吴'},
+	{'朧', '胧'}, {'渉', '涉'}, {'鮎', '鲇'}, {'冨', '富'}, {'擬', '拟'}, {'鶯', '莺'},
+	{'嚕', '噜'}, {'圏', '圈'}, {'並', '并'}, {'殭', '僵'}, {'財', '财'}, {'標', '标'},
+	{'鷺', '鹭'}, {'寧', '宁'}, {'鎌', '镰'}, {'焔', '焰'}, {'囁', '嗫'}, {'懐', '怀'},
+	{'髮', '发'}, {'斎', '斋'}, {'県', '县'}, {'苺', '莓'}, {'歷', '历'}, {'曇', '昙'},
+	{'薗', '园'}, {'篤', '笃'}, {'鯖', '鲭'}, {'鮭', '鲑'}, {'適', '适'}, {'傢', '家'},
+	{'聡', '聪'}, {'梱', '捆'}, {'寛', '宽'}, {'躙', '躏'}, {'圧', '压'}, {'鵜', '鹈'},
+	{'滸', '浒'}, {'鯨', '鲸'}, {'梟', '枭'}, {'妬', '妒'}, {'薺', '荠'}, {'囲', '围'},
+	{'檜', '桧'}, {'慄', '栗'}, {'謳', '讴'}, {'浄', '净'}, {'厳', '严'}, {'樺', '桦'},
+	{'鎧', '铠'}, {'籟', '籁'}, {'穫', '获'}, {'鴇', '鸨'}, {'蕎', '荞'}, {'剋', '克'},
+	{'饗', '飨'}, {'鯛', '鲷'}, {'効', '效'}, {'眾', '众'}, {'懺', '忏'}, {'渦', '涡'},
+	{'鶇', '鸫'}, {'顎', '颚'}, {'穣', '穰'}, {'篭', '笼'}, {'藪', '薮'}, {'鯊', '鲨'},
+	{'儺', '傩'}, {'颯', '飒'}, {'魎', '魉'}, {'褻', '亵'}, {'髙', '高'}, {'寢', '寝'},
+	{'驤', '骧'}, {'諫', '谏'}, {'疎', '疏'}, {'鷲', '鹫'}, {'価', '价'}, {'犠', '牺'},
+	{'顏', '颜'}, {'癮', '瘾'}, {'劔', '剑'}, {'徴', '征'}, {'剤', '剂'}, {'鯵', '鲹'},
+	{'鶫', '鸫'}, {'蝸', '蜗'}, {'漥', '洼'}, {'魘', '魇'}, {'儘', '尽'}, {'鐶', '环'},
+	{'挙', '举'}, {'奨', '奖'}, {'鸚', '鹦'}, {'幣', '币'}, {'璽', '玺'}, {'軻', '轲'},
+	{'產', '产'}, {'窩', '窝'}, {'郞', '郎'}, {'儂', '侬'}, {'鮪', '鲔'}, {'鰻', '鳗'},
+	{'慟', '恸'}, {'壷', '壶'}, {'弍', '贰'}, {'噛', '啮'}, {'嚙', '啮'}, {'壌', '壤'},
+	{'剎', '刹'}, {'穀', '谷'}, {'諂', '谄'}, {'蹺', '跷'}, {'詔', '诏'}, {'脇', '胁'},
+	{'縴', '纤'}, {'鏘', '锵'}, {'囉', '啰'}, {'恆', '恒'}, {'顛', '颠'}, {'瓏', '珑'},
+	{'佔', '占'}, {'蔦', '茑'}, {'鱈', '鳕'}, {'囂', '嚣'}, {'娯', '娱'}, {'謐', '谧'},
+	{'麺', '面'}, {'驀', '蓦'}, {'諏', '诹'}, {'殤', '殇'}, {'禰', '祢'}, {'褌', '裈'},
+	{'簒', '篡'}, {'鉉', '铉'}, {'欒', '栾'}, {'燻', '熏'}, {'弒', '弑'}, {'鱒', '鳟'},
+	{'僱', '雇'}, {'邉', '边'}, {'瀟', '潇'}, {'檳', '槟'}, {'靚', '靓'}, {'髏', '髅'},
+	{'贏', '赢'}, {'衹', '只'}, {'祇', '只'}, {'殞', '殒'}, {'愾', '忾'}, {'瞭', '了'},
+	{'韃', '鞑'}, {'嚮', '向'}, {'嗚', '呜'}, {'饂', '饦'}, {'飩', '饨'}, {'涜', '渎'},
+	{'藺', '蔺'}, {'蒔', '莳'}, {'竪', '竖'}, {'掻', '搔'}, {'紆', '纡'}, {'囀', '啭'},
+	{'佈', '布'}, {'頬', '颊'}, {'勧', '劝'}, {'軼', '轶'}, {'讃', '赞'}, {'蠣', '蛎'},
+	{'嵜', '崎'}, {'﨑', '崎'}, {'訶', '诃'}, {'譎', '谲'}, {'亰', '京'}, {'滯', '滞'},
+	{'銬', '铐'}, {'鰍', '鳅'}, {'餵', '喂'}, {'儷', '俪'}, {'矇', '蒙'}, {'噁', '恶'},
+	{'唸', '念'}, {'匯', '汇'}, {'盪', '荡'}, {'臏', '膑'}, {'諦', '谛'}, {'嚇', '吓'},
+	{'尙', '尚'}, {'鴎', '鸥'}, {'錧', '馆'}, {'籐', '藤'}, {'詼', '诙'}, {'櫓', '橹'},
+	{'儕', '侪'}, {'濛', '蒙'}, {'婭', '娅'}, {'鸞', '鸾'}, {'鯢', '鲵'}, {'驛', '驿'},
+	{'鈿', '钿'}, {'囯', '国'}, {'軆', '体'}, {'塚', '冢'}, {'蘆', '芦'}, {'賴', '赖'},
+	{'擊', '击'}, {'戀', '恋'}, {'絕', '绝'}, {'遺', '遗'}, {'傳', '传'}, {'愛', '爱'},
+	{'陸', '陆'}, {'壞', '坏'}, {'溫', '温'}, {'脫', '脱'}, {'褲', '裤'}, {'鐵', '铁'},
+	{'戰', '战'},
+}
+
+// tradToSimpMap is the flattened lookup built from the positional table and
+// extraTradSimpPairs at init time.
+var tradToSimpMap map[rune]rune
+
+func init() {
+	t := []rune(tradRunes)
+	s := []rune(simpRunes)
+	tradToSimpMap = make(map[rune]rune, len(t)+len(extraTradSimpPairs))
+	for i := 0; i < len(t) && i < len(s); i++ {
+		if t[i] != s[i] {
+			tradToSimpMap[t[i]] = s[i]
+		}
+	}
+	for _, pair := range extraTradSimpPairs {
+		if pair[0] != pair[1] {
+			tradToSimpMap[pair[0]] = pair[1]
+		}
+	}
+}
+
+// foldRune applies fullwidth and Traditional/Shinjitai folding to a single
+// rune. Kana noise (long vowel mark, small kana, hiragana/katakana duplicates)
+// is handled by kanaFold so the folding table stays about Chinese variants.
+func foldRune(r rune) rune {
+	if r >= 0xFF01 && r <= 0xFF5E {
+		r -= 0xFEE0
+	}
+	if mapped, ok := tradToSimpMap[r]; ok {
+		return mapped
+	}
+	return r
+}
+
+// kanaFold collapses the kana spellings that flip between scan releases:
+// ー (prolonged sound mark) is dropped, small kana map to their full form, and
+// hiragana/katakana duplicates share one target.
+func kanaFold(r rune) (rune, bool) {
+	switch r {
+	case '\u30FC', '\u301C':
+		return 0, true // drop
+	case '\u3041', '\u30A1':
+		return '\u3042', true
+	case '\u3043', '\u30A3':
+		return '\u3044', true
+	case '\u3045', '\u30A5':
+		return '\u3046', true
+	case '\u3047', '\u30A7':
+		return '\u3048', true
+	case '\u3049', '\u30A9':
+		return '\u304A', true
+	case '\u3063', '\u30C3':
+		return '\u3064', true
+	case '\u3083', '\u30E3':
+		return '\u3084', true
+	case '\u3085', '\u30E5':
+		return '\u3086', true
+	case '\u3087', '\u30E7':
+		return '\u3088', true
+	case '\u3094', '\u30F4':
+		return '\u3046', true
+	case '\u3090':
+		return '\u3044', true
+	case '\u3091':
+		return '\u3048', true
+	case '\u3092':
+		return '\u304A', true
+	case '\u30F2':
+		return '\u30AA', true
+	}
+	return r, false
+}
+
+// ToSimplified converts Traditional Chinese and common Japanese Shinjitai runes
+// to Simplified Chinese, converts fullwidth ASCII characters to halfwidth, and
+// expands the Japanese iteration mark 々 onto the ideograph it repeats so that
+// 日々 and 日日 produce the same key.
+func ToSimplified(input string) string {
+	if input == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(input))
+	var last rune
+	for _, r := range input {
+		if r == '\u3000' {
+			b.WriteByte(' ')
+			last = ' '
+			continue
+		}
+		if r == '\u3005' {
+			if unicode.Is(unicode.Han, last) {
+				b.WriteRune(last)
+			}
+			continue
+		}
+		r = foldRune(r)
+		b.WriteRune(r)
+		last = r
+	}
+	return b.String()
+}
+
+// foldKanaString collapses kana spellings only for matching/search keys. It is
+// deliberately kept out of ToSimplified, which feeds display titles: dropping
+// ー there would turn 葬送のフリーレン into 葬送のフリレン.
+func foldKanaString(input string) string {
+	var b strings.Builder
+	b.Grow(len(input))
+	for _, r := range input {
+		if folded, handled := kanaFold(r); handled {
+			if folded == 0 {
+				continue
+			}
+			r = folded
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// SimplifyRune normalizes a single rune. Unmapped runes are returned unchanged.
+func SimplifyRune(r rune) rune {
+	if folded, drop := kanaFold(r); drop {
+		if folded == 0 {
+			return 0
+		}
+		r = folded
+	}
+	return foldRune(r)
+}
+
+// NormalizeMatchKey produces a compact, case-folded, punctuation-stripped key
+// suitable for exact dictionary/SQLite matching across Traditional/Simplified/Japanese variants.
+func NormalizeMatchKey(input string) string {
+	simp := foldKanaString(ToSimplified(strings.TrimSpace(input)))
+	if simp == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(simp))
+	for _, r := range simp {
+		r = unicode.ToLower(r)
+		if unicode.IsLetter(r) || unicode.IsNumber(r) {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// SearchKey is the key stored in SQLite search columns. It differs from
+// NormalizeMatchKey in that it keeps spaces and most punctuation, so that a
+// LIKE '%key%' prefix/suffix search still behaves like searching the original
+// human-readable title, while Traditional/Simplified/fullwidth spellings are
+// already folded together.
+//
+// The folding is idempotent: SearchKey(SearchKey(x)) == SearchKey(x), which is
+// what lets the query side build a key with the same function the ingest side
+// stored.
+func SearchKey(input string) string {
+	simp := foldKanaString(ToSimplified(strings.TrimSpace(input)))
+	if simp == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(simp))
+	pendingSpace := false
+	for _, r := range simp {
+		r = unicode.ToLower(r)
+		switch {
+		case unicode.IsSpace(r):
+			pendingSpace = b.Len() > 0
+			continue
+		case r == '"' || r == '\'' || r == '‘' || r == '’' || r == '“' || r == '”':
+			// Quotes would break the LIKE escape path; they carry no search value.
+			continue
+		case r == '\x00':
+			continue
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteRune(r)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+var crossTitleReplacer = strings.NewReplacer("×", "x", "✕", "x", "╳", "x")
+
+// CrossTitleKey folds the common cross separators ×✕╳ onto a literal x before
+// normalizing, so "CLOUD×COMPASS" and "CLOUDxCOMPASS" produce the same key.
+func CrossTitleKey(title string) string {
+	if !strings.ContainsAny(title, "×✕╳") {
+		return ""
+	}
+	return NormalizeMatchKey(crossTitleReplacer.Replace(title))
+}
+
+// ExactTitleKey is NormalizeMatchKey with cross-separator folding applied.
+func ExactTitleKey(title string) string {
+	if key := CrossTitleKey(title); key != "" {
+		return key
+	}
+	return NormalizeMatchKey(title)
+}

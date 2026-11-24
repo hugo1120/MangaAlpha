@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/xJogger/fake-komga-115/internal/cjk"
 	"github.com/xJogger/fake-komga-115/internal/id"
 	"github.com/xJogger/fake-komga-115/internal/natsort"
 )
@@ -913,16 +914,16 @@ WHERE ub.library_id=?`, unionLibraryID)
 	}
 
 	const insertSeriesPrefix = `INSERT INTO series(
- id,library_id,cid,name,relative_path,one_shot,file_modified_at,
+ id,library_id,cid,name,search_key,relative_path,one_shot,file_modified_at,
  books_count,latest_book_modified_at,latest_book_created_at,sort_modified_at,sort_created_at,
  created_at,updated_at,seen_scan_id
 ) VALUES `
-	const insertSeriesTuple = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'union')`
+	const insertSeriesTuple = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'union')`
 	const insertBookPrefix = `INSERT INTO books(
- id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
+ id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
 ) VALUES `
-	const insertBookTuple = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'union')`
+	const insertBookTuple = `(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'union')`
 	const insertBookSQL = insertBookPrefix + insertBookTuple
 	const insertSeriesSrcPrefix = `INSERT INTO union_series_sources(union_series_id,priority,source_series_id,source_library_id) VALUES `
 	const insertSeriesSrcTuple = `(?,?,?,?)`
@@ -947,7 +948,7 @@ WHERE ub.library_id=?`, unionLibraryID)
 			return err
 		}
 		defer batchSStmt.Close()
-		sArgs := make([]any, 0, unionSeriesBatchRows*14)
+		sArgs := make([]any, 0, unionSeriesBatchRows*15)
 		for i := 0; i < len(bundles); {
 			end := i + unionSeriesBatchRows
 			if end > len(bundles) {
@@ -957,7 +958,7 @@ WHERE ub.library_id=?`, unionLibraryID)
 			for _, b := range bundles[i:end] {
 				ms := b.Series
 				sArgs = append(sArgs,
-					ms.ID, unionLibraryID, ms.CID, ms.Name, ms.RelativePath,
+					ms.ID, unionLibraryID, ms.CID, ms.Name, cjk.SearchKey(ms.Name), ms.RelativePath,
 					ms.OneShot, ms.FileModifiedAt,
 					ms.BooksCount, ms.LatestBookModifiedAt, ms.LatestBookCreatedAt,
 					ms.SortModifiedAt, ms.SortCreatedAt,
@@ -987,7 +988,7 @@ WHERE ub.library_id=?`, unionLibraryID)
 				return err
 			}
 			defer batchBStmt.Close()
-			bArgs := make([]any, 0, unionBookBatchRows*14)
+			bArgs := make([]any, 0, unionBookBatchRows*15)
 			for i := 0; i < len(chunkBooks); {
 				end := i + unionBookBatchRows
 				if end > len(chunkBooks) {
@@ -998,7 +999,7 @@ WHERE ub.library_id=?`, unionLibraryID)
 					mb := br.Book
 					bArgs = append(bArgs,
 						mb.ID, br.SeriesID, unionLibraryID, mb.FileID, br.ParentCID, mb.Name,
-						mb.Size, mb.PickCode, mb.SHA1, mb.FileCreatedAt, mb.FileModifiedAt,
+						cjk.SearchKey(mb.Name), mb.Size, mb.PickCode, mb.SHA1, mb.FileCreatedAt, mb.FileModifiedAt,
 						mb.NumberSort, now, now,
 					)
 					for _, src := range mb.Sources {
@@ -1202,7 +1203,7 @@ WHERE ub.library_id=?`, unionLibraryID)
 		if len(seriesToUpdate) > 0 {
 			stmtUpdS, err := tx.PrepareContext(ctx, `
 UPDATE series SET
- cid=?,name=?,relative_path=?,one_shot=?,file_modified_at=?,
+ cid=?,name=?,search_key=?,relative_path=?,one_shot=?,file_modified_at=?,
  books_count=?,latest_book_modified_at=?,latest_book_created_at=?,
  sort_modified_at=?,sort_created_at=?,updated_at=?
 WHERE id=?`)
@@ -1211,7 +1212,7 @@ WHERE id=?`)
 			}
 			for _, ms := range seriesToUpdate {
 				if _, err := stmtUpdS.ExecContext(ctx,
-					ms.CID, ms.Name, ms.RelativePath, ms.OneShot, ms.FileModifiedAt,
+					ms.CID, ms.Name, cjk.SearchKey(ms.Name), ms.RelativePath, ms.OneShot, ms.FileModifiedAt,
 					ms.BooksCount, ms.LatestBookModifiedAt, ms.LatestBookCreatedAt,
 					ms.SortModifiedAt, ms.SortCreatedAt, ms.UpdatedAt, ms.ID,
 				); err != nil {
@@ -1231,7 +1232,7 @@ WHERE id=?`)
 				mb := br.Book
 				if _, err := stmtInsB.ExecContext(ctx,
 					mb.ID, br.SeriesID, unionLibraryID, mb.FileID, br.ParentCID, mb.Name,
-					mb.Size, mb.PickCode, mb.SHA1, mb.FileCreatedAt, mb.FileModifiedAt,
+					cjk.SearchKey(mb.Name), mb.Size, mb.PickCode, mb.SHA1, mb.FileCreatedAt, mb.FileModifiedAt,
 					mb.NumberSort, now, now,
 				); err != nil {
 					stmtInsB.Close()
@@ -1244,7 +1245,7 @@ WHERE id=?`)
 		if len(booksToUpdate) > 0 {
 			stmtUpdB, err := tx.PrepareContext(ctx, `
 UPDATE books SET
- series_id=?,file_id=?,parent_cid=?,name=?,size=?,pick_code=?,sha1=?,
+ series_id=?,file_id=?,parent_cid=?,name=?,search_key=?,size=?,pick_code=?,sha1=?,
  file_created_at=?,file_modified_at=?,number_sort=?,updated_at=?
 WHERE id=?`)
 			if err != nil {
@@ -1253,7 +1254,7 @@ WHERE id=?`)
 			for _, br := range booksToUpdate {
 				mb := br.Book
 				if _, err := stmtUpdB.ExecContext(ctx,
-					br.SeriesID, mb.FileID, br.ParentCID, mb.Name, mb.Size, mb.PickCode, mb.SHA1,
+					br.SeriesID, mb.FileID, br.ParentCID, mb.Name, cjk.SearchKey(mb.Name), mb.Size, mb.PickCode, mb.SHA1,
 					mb.FileCreatedAt, mb.FileModifiedAt, mb.NumberSort, now, mb.ID,
 				); err != nil {
 					stmtUpdB.Close()
@@ -1459,7 +1460,7 @@ INSERT INTO series_metadata(
  release_date,release_date_lock,genres_json,genres_lock,
  tags_json,tags_lock,authors_json,authors_lock,
  alternate_titles_json,alternate_titles_lock,links_json,links_lock,
- sharing_labels_json,sharing_labels_lock,is_nsfw,nsfw_lock,updated_at
+ sharing_labels_json,sharing_labels_lock,title_key,publisher_key,alternate_key,is_nsfw,nsfw_lock,updated_at
 )
 SELECT
  p.union_series_id,sm.bgm_subject_id,sm.scrape_status,sm.scrape_confidence,sm.scrape_synced_at,
@@ -1472,6 +1473,7 @@ SELECT
  sm.tags_json,sm.tags_lock,sm.authors_json,sm.authors_lock,
  sm.alternate_titles_json,sm.alternate_titles_lock,sm.links_json,sm.links_lock,
  sm.sharing_labels_json,sm.sharing_labels_lock,
+ sm.title_key,sm.publisher_key,sm.alternate_key,
  CASE WHEN EXISTS (
    SELECT 1 FROM union_series_sources uss
    JOIN series_metadata ssm ON ssm.series_id=uss.source_series_id
@@ -1484,24 +1486,24 @@ ORDER BY p.union_series_id`, now); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO series_genres(series_id,genre)
-SELECT p.union_series_id,g.genre
+INSERT OR IGNORE INTO series_genres(series_id,genre,search_key)
+SELECT p.union_series_id,g.genre,g.search_key
 FROM temp._fk115_union_meta_pick p
 JOIN series_genres g ON g.series_id=p.source_series_id
 ORDER BY p.union_series_id`); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO series_tags(series_id,tag)
-SELECT p.union_series_id,t.tag
+INSERT OR IGNORE INTO series_tags(series_id,tag,search_key)
+SELECT p.union_series_id,t.tag,t.search_key
 FROM temp._fk115_union_meta_pick p
 JOIN series_tags t ON t.series_id=p.source_series_id
 ORDER BY p.union_series_id`); err != nil {
 		return 0, err
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO series_authors(series_id,name,role)
-SELECT p.union_series_id,a.name,a.role
+INSERT OR IGNORE INTO series_authors(series_id,name,role,search_key)
+SELECT p.union_series_id,a.name,a.role,a.search_key
 FROM temp._fk115_union_meta_pick p
 JOIN series_authors a ON a.series_id=p.source_series_id
 ORDER BY p.union_series_id`); err != nil {

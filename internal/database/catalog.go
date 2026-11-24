@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/xJogger/fake-komga-115/internal/cjk"
 )
 
 const (
@@ -14,6 +16,23 @@ const (
 	progressTombstoneRetention        = 90 * 24 * time.Hour
 	sqlInChunkSize                    = 400
 )
+
+// foldedFilterValues turns display values (東立, 东立) into the same folded
+// key so exact taxonomy filters match either spelling.
+func foldedFilterValues(items []string) []string {
+	cleaned := cleanStringSlice(items)
+	out := make([]string, 0, len(cleaned))
+	seen := make(map[string]bool, len(cleaned))
+	for _, item := range cleaned {
+		key := cjk.SearchKey(item)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	return out
+}
 
 type SeriesQuery struct {
 	Search        string
@@ -149,28 +168,29 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 		searchPrimary, searchTies = primary, ties
 	case strings.HasPrefix(sortValue, "relevance") && strings.TrimSpace(q.Search) != "":
 		phrase := extractPrimarySearchPhrase(q.Search)
-		if phrase != "" {
-			prefix := escapeLike(phrase) + "%"
-			contains := "%" + escapeLike(phrase) + "%"
+		key := cjk.SearchKey(phrase)
+		if phrase != "" && key != "" {
+			prefix := escapeLike(key) + "%"
+			contains := "%" + escapeLike(key) + "%"
 			primary = `CASE
- WHEN COALESCE(NULLIF((SELECT sm.title FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) = ? COLLATE NOCASE THEN 0
- WHEN s.name = ? COLLATE NOCASE THEN 1
- WHEN COALESCE(NULLIF((SELECT sm.title FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) LIKE ? ESCAPE '\' COLLATE NOCASE THEN 2
- WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 3
- WHEN COALESCE(NULLIF((SELECT sm.title FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) LIKE ? ESCAPE '\' COLLATE NOCASE THEN 4
- WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 5
+ WHEN COALESCE(NULLIF((SELECT sm.title_key FROM series_metadata sm WHERE sm.series_id=s.id),''), s.search_key) = ? THEN 0
+ WHEN s.search_key = ? THEN 1
+ WHEN COALESCE(NULLIF((SELECT sm.title_key FROM series_metadata sm WHERE sm.series_id=s.id),''), s.search_key) LIKE ? ESCAPE '\' THEN 2
+ WHEN s.search_key LIKE ? ESCAPE '\' THEN 3
+ WHEN COALESCE(NULLIF((SELECT sm.title_key FROM series_metadata sm WHERE sm.series_id=s.id),''), s.search_key) LIKE ? ESCAPE '\' THEN 4
+ WHEN s.search_key LIKE ? ESCAPE '\' THEN 5
  ELSE 6 END`
 			ties = ` ASC, COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE ASC, s.id ASC`
 			searchPrimary = `CASE
- WHEN COALESCE(NULLIF(sm.title,''), s.name) = ? COLLATE NOCASE THEN 0
- WHEN s.name = ? COLLATE NOCASE THEN 1
- WHEN COALESCE(NULLIF(sm.title,''), s.name) LIKE ? ESCAPE '\' COLLATE NOCASE THEN 2
- WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 3
- WHEN COALESCE(NULLIF(sm.title,''), s.name) LIKE ? ESCAPE '\' COLLATE NOCASE THEN 4
- WHEN s.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 5
+ WHEN COALESCE(NULLIF(sm.title_key,''), s.search_key) = ? THEN 0
+ WHEN s.search_key = ? THEN 1
+ WHEN COALESCE(NULLIF(sm.title_key,''), s.search_key) LIKE ? ESCAPE '\' THEN 2
+ WHEN s.search_key LIKE ? ESCAPE '\' THEN 3
+ WHEN COALESCE(NULLIF(sm.title_key,''), s.search_key) LIKE ? ESCAPE '\' THEN 4
+ WHEN s.search_key LIKE ? ESCAPE '\' THEN 5
  ELSE 6 END`
 			searchTies = ` ASC, COALESCE(NULLIF(sm.title_sort,''), s.name) COLLATE NOCASE ASC, s.id ASC`
-			orderArgs = append(orderArgs, phrase, phrase, prefix, prefix, contains, contains)
+			orderArgs = append(orderArgs, key, key, prefix, prefix, contains, contains)
 		}
 	case strings.HasPrefix(sortValue, "lastmodifieddate"):
 		primary = `s.sort_modified_at`
@@ -340,36 +360,48 @@ func selectiveSeriesDriver(q SeriesQuery, userID string) (string, []any) {
 		return `SELECT DISTINCT cs.series_id FROM collection_series cs JOIN collections c ON c.id=cs.collection_id WHERE c.user_id=? AND cs.collection_id IN ` + Placeholders(len(ids)), args
 	}
 	if len(q.Publishers) > 0 {
-		pubs := cleanStringSlice(q.Publishers)
+		pubs := foldedFilterValues(q.Publishers)
+		if len(pubs) == 0 {
+			return `SELECT DISTINCT sm.series_id FROM series_metadata sm WHERE 0`, nil
+		}
 		args := make([]any, len(pubs))
 		for i, p := range pubs {
 			args[i] = p
 		}
-		return `SELECT DISTINCT sm.series_id FROM series_metadata sm WHERE sm.publisher COLLATE NOCASE IN ` + Placeholders(len(pubs)), args
+		return `SELECT DISTINCT sm.series_id FROM series_metadata sm WHERE sm.publisher_key IN ` + Placeholders(len(pubs)), args
 	}
 	if len(q.Authors) > 0 {
-		authors := cleanStringSlice(q.Authors)
+		authors := foldedFilterValues(q.Authors)
+		if len(authors) == 0 {
+			return `SELECT DISTINCT sa.series_id FROM series_authors sa WHERE 0`, nil
+		}
 		args := make([]any, len(authors))
 		for i, a := range authors {
 			args[i] = a
 		}
-		return `SELECT DISTINCT sa.series_id FROM series_authors sa WHERE sa.name COLLATE NOCASE IN ` + Placeholders(len(authors)), args
+		return `SELECT DISTINCT sa.series_id FROM series_authors sa WHERE sa.search_key IN ` + Placeholders(len(authors)), args
 	}
 	if len(q.Tags) > 0 {
-		tags := cleanStringSlice(q.Tags)
+		tags := foldedFilterValues(q.Tags)
+		if len(tags) == 0 {
+			return `SELECT DISTINCT st.series_id FROM series_tags st WHERE 0`, nil
+		}
 		args := make([]any, len(tags))
 		for i, t := range tags {
 			args[i] = t
 		}
-		return `SELECT DISTINCT st.series_id FROM series_tags st WHERE st.tag COLLATE NOCASE IN ` + Placeholders(len(tags)), args
+		return `SELECT DISTINCT st.series_id FROM series_tags st WHERE st.search_key IN ` + Placeholders(len(tags)), args
 	}
 	if len(q.Genres) > 0 {
-		genres := cleanStringSlice(q.Genres)
+		genres := foldedFilterValues(q.Genres)
+		if len(genres) == 0 {
+			return `SELECT DISTINCT sg.series_id FROM series_genres sg WHERE 0`, nil
+		}
 		args := make([]any, len(genres))
 		for i, g := range genres {
 			args[i] = g
 		}
-		return `SELECT DISTINCT sg.series_id FROM series_genres sg WHERE sg.genre COLLATE NOCASE IN ` + Placeholders(len(genres)), args
+		return `SELECT DISTINCT sg.series_id FROM series_genres sg WHERE sg.search_key IN ` + Placeholders(len(genres)), args
 	}
 	return "", nil
 }
@@ -1164,35 +1196,51 @@ func buildSeriesFilters(q SeriesQuery, enabledLibs []string, userID string) (str
 		}
 	}
 	if len(q.Genres) > 0 {
-		genres := cleanStringSlice(q.Genres)
-		clauses = append(clauses,
-			`s.id IN (SELECT sg.series_id FROM series_genres sg WHERE sg.genre COLLATE NOCASE IN `+Placeholders(len(genres))+`)`)
-		for _, g := range genres {
-			args = append(args, g)
+		genres := foldedFilterValues(q.Genres)
+		if len(genres) == 0 {
+			clauses = append(clauses, "0")
+		} else {
+			clauses = append(clauses,
+				`s.id IN (SELECT sg.series_id FROM series_genres sg WHERE sg.search_key IN `+Placeholders(len(genres))+`)`)
+			for _, g := range genres {
+				args = append(args, g)
+			}
 		}
 	}
 	if len(q.Tags) > 0 {
-		tags := cleanStringSlice(q.Tags)
-		clauses = append(clauses,
-			`s.id IN (SELECT st.series_id FROM series_tags st WHERE st.tag COLLATE NOCASE IN `+Placeholders(len(tags))+`)`)
-		for _, t := range tags {
-			args = append(args, t)
+		tags := foldedFilterValues(q.Tags)
+		if len(tags) == 0 {
+			clauses = append(clauses, "0")
+		} else {
+			clauses = append(clauses,
+				`s.id IN (SELECT st.series_id FROM series_tags st WHERE st.search_key IN `+Placeholders(len(tags))+`)`)
+			for _, t := range tags {
+				args = append(args, t)
+			}
 		}
 	}
 	if len(q.Publishers) > 0 {
-		pubs := cleanStringSlice(q.Publishers)
-		clauses = append(clauses,
-			`s.id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.publisher COLLATE NOCASE IN `+Placeholders(len(pubs))+`)`)
-		for _, p := range pubs {
-			args = append(args, p)
+		pubs := foldedFilterValues(q.Publishers)
+		if len(pubs) == 0 {
+			clauses = append(clauses, "0")
+		} else {
+			clauses = append(clauses,
+				`s.id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.publisher_key IN `+Placeholders(len(pubs))+`)`)
+			for _, p := range pubs {
+				args = append(args, p)
+			}
 		}
 	}
 	if len(q.Authors) > 0 {
-		authors := cleanStringSlice(q.Authors)
-		clauses = append(clauses,
-			`s.id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.name COLLATE NOCASE IN `+Placeholders(len(authors))+`)`)
-		for _, a := range authors {
-			args = append(args, a)
+		authors := foldedFilterValues(q.Authors)
+		if len(authors) == 0 {
+			clauses = append(clauses, "0")
+		} else {
+			clauses = append(clauses,
+				`s.id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.search_key IN `+Placeholders(len(authors))+`)`)
+			for _, a := range authors {
+				args = append(args, a)
+			}
 		}
 	}
 	if len(q.Languages) > 0 {
@@ -1339,19 +1387,27 @@ func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool, userI
 		args = append(args, *q.OneShot)
 	}
 	if len(q.Tags) > 0 {
-		tags := cleanStringSlice(q.Tags)
-		clauses = append(clauses,
-			`b.series_id IN (SELECT st.series_id FROM series_tags st WHERE st.tag COLLATE NOCASE IN `+Placeholders(len(tags))+`)`)
-		for _, t := range tags {
-			args = append(args, t)
+		tags := foldedFilterValues(q.Tags)
+		if len(tags) == 0 {
+			clauses = append(clauses, "0")
+		} else {
+			clauses = append(clauses,
+				`b.series_id IN (SELECT st.series_id FROM series_tags st WHERE st.search_key IN `+Placeholders(len(tags))+`)`)
+			for _, t := range tags {
+				args = append(args, t)
+			}
 		}
 	}
 	if len(q.Authors) > 0 {
-		authors := cleanStringSlice(q.Authors)
-		clauses = append(clauses,
-			`b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.name COLLATE NOCASE IN `+Placeholders(len(authors))+`)`)
-		for _, a := range authors {
-			args = append(args, a)
+		authors := foldedFilterValues(q.Authors)
+		if len(authors) == 0 {
+			clauses = append(clauses, "0")
+		} else {
+			clauses = append(clauses,
+				`b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.search_key IN `+Placeholders(len(authors))+`)`)
+			for _, a := range authors {
+				args = append(args, a)
+			}
 		}
 	}
 	if conditions, condArgs := readStatusConditions(q.ReadStatus, "book", userID); len(conditions) > 0 {

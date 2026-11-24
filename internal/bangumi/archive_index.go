@@ -37,7 +37,7 @@ const (
 	SettingArchiveSource        = "bangumi_archive_source"
 	SettingArchiveCustomMetaURL = "bangumi_archive_custom_url"
 	archiveUserAgent            = "xJogger/fake-komga-115/2.5 (https://github.com/xJogger/MangaAlpha)"
-	currentTermsSchemaVersion   = "3"
+	currentTermsSchemaVersion   = "4"
 )
 
 type ArchiveSourceConfig struct {
@@ -1074,7 +1074,9 @@ FROM bgm_subjects WHERE id IN `+database.Placeholders(len(idArgs)), idArgs...)
 		if err != nil {
 			return nil, err
 		}
-		cand.Confidence = ScoreCandidate(parsed, cand, targetIsOneShot)
+		score, breakdown := ScoreCandidateDetailed(parsed, cand, targetIsOneShot)
+		cand.Confidence = score
+		cand.Breakdown = &breakdown
 		if cand.Confidence > 0 {
 			candidates = append(candidates, cand)
 		}

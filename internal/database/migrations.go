@@ -77,6 +77,9 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensureSeriesRollups(db); err != nil {
 		return err
 	}
+	if err := ensureSearchFTSTables(db); err != nil {
+		return err
+	}
 	return createShelfRevisions(db)
 }
 

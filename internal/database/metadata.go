@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+
+	"github.com/xJogger/fake-komga-115/internal/cjk"
 )
 
 type ScrapedMetadata struct {
@@ -839,8 +841,22 @@ func (s *Store) queryAuthorsTop(
 		clauses = append(clauses, `s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`)
 	}
 	if search != "" {
-		clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
-		args = append(args, "%"+escapeLike(search)+"%")
+		folded := cjk.SearchKey(search)
+		if folded == "" {
+			return []Author{}, nil
+		}
+		if phrase := cjk.FTSQueryPhrase(search); phrase != "" {
+			if s.ensureSearchFTSFresh(ctx, "s") {
+				clauses = append(clauses, `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)) AND cjk_contains(sa.name, ?)`)
+				args = append(args, "authors_fts : "+phrase, folded)
+			} else {
+				clauses = append(clauses, `cjk_contains(sa.name, ?)`)
+				args = append(args, folded)
+			}
+		} else {
+			clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
+			args = append(args, "%"+escapeLike(search)+"%")
+		}
 	}
 	if role != "" {
 		clauses = append(clauses, `sa.role=? COLLATE NOCASE`)
@@ -916,8 +932,22 @@ func (s *Store) AuthorsPage(ctx context.Context, q AuthorQuery) ([]Author, int64
 		}
 	}
 	if search := strings.TrimSpace(q.Search); search != "" {
-		clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
-		args = append(args, "%"+escapeLike(search)+"%")
+		folded := cjk.SearchKey(search)
+		if folded == "" {
+			return []Author{}, 0, nil
+		}
+		if phrase := cjk.FTSQueryPhrase(search); phrase != "" {
+			if s.ensureSearchFTSFresh(ctx, "s") {
+				clauses = append(clauses, `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)) AND cjk_contains(sa.name, ?)`)
+				args = append(args, "authors_fts : "+phrase, folded)
+			} else {
+				clauses = append(clauses, `cjk_contains(sa.name, ?)`)
+				args = append(args, folded)
+			}
+		} else {
+			clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
+			args = append(args, "%"+escapeLike(search)+"%")
+		}
 	}
 	if role := strings.TrimSpace(q.Role); role != "" {
 		clauses = append(clauses, `sa.role=? COLLATE NOCASE`)

@@ -3,6 +3,8 @@ package database
 import (
 	"strings"
 	"unicode"
+
+	"github.com/xJogger/fake-komga-115/internal/cjk"
 )
 
 // searchExpr represents a parsed Komga / Koharia search expression.
@@ -288,26 +290,25 @@ func extractPrimarySearchPhrase(raw string) string {
 }
 
 // buildSeriesSearchSQL builds a parameterized SQL condition for series table alias "s".
-func buildSeriesSearchSQL(raw string) (string, []any) {
+func buildSeriesSearchSQL(raw string, useFTS bool) (string, []any) {
 	expr := parseSearchQuery(raw)
 	if expr == nil {
 		return "", nil
 	}
-	// Fast path for Koharia's exact "(q) OR tag:(q)" pattern (possibly multi-word inside parens).
 	var args []any
-	sql := renderSeriesSearchExpr(expr, &args)
+	sql := renderSeriesSearchExpr(expr, useFTS, &args)
 	if sql == "" {
 		return "", nil
 	}
 	return "(" + sql + ")", args
 }
 
-func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
+func renderSeriesSearchExpr(expr searchExpr, useFTS bool, args *[]any) string {
 	switch node := expr.(type) {
 	case searchOr:
 		parts := make([]string, 0, len(node.items))
 		for _, item := range node.items {
-			if sub := renderSeriesSearchExpr(item, args); sub != "" {
+			if sub := renderSeriesSearchExpr(item, useFTS, args); sub != "" {
 				parts = append(parts, sub)
 			}
 		}
@@ -318,7 +319,7 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 	case searchAnd:
 		parts := make([]string, 0, len(node.items))
 		for _, item := range node.items {
-			if sub := renderSeriesSearchExpr(item, args); sub != "" {
+			if sub := renderSeriesSearchExpr(item, useFTS, args); sub != "" {
 				parts = append(parts, sub)
 			}
 		}
@@ -327,9 +328,13 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 		}
 		return "(" + strings.Join(parts, " AND ") + ")"
 	case searchNot:
-		sub := renderSeriesSearchExpr(node.inner, args)
+		sub := renderSeriesSearchExpr(node.inner, useFTS, args)
 		if sub == "" {
 			return ""
+		}
+		if sub == "0" {
+			// Negating an empty/stripped operand (e.g. "NOT ー") must never expand to TRUE.
+			return "0"
 		}
 		return "(NOT " + sub + ")"
 	case searchTerm:
@@ -337,6 +342,43 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 		if val == "" {
 			return ""
 		}
+		switch node.field {
+		case "language":
+			*args = append(*args, val)
+			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.language=? COLLATE NOCASE)`
+		case "status":
+			*args = append(*args, strings.ToUpper(val))
+			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.status=?)`
+		}
+		folded := cjk.SearchKey(val)
+		if folded == "" {
+			// Stripped punctuation/quotes/ー must never fail open.
+			return "0"
+		}
+		phrase := cjk.FTSQueryPhrase(val)
+		if useFTS && phrase != "" {
+			switch node.field {
+			case "tag", "series_tag", "book_tag":
+				*args = append(*args, "tags_fts : "+phrase)
+				return `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "genre":
+				*args = append(*args, "genres_fts : "+phrase)
+				return `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "publisher":
+				*args = append(*args, "publisher_fts : "+phrase)
+				return `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "author":
+				*args = append(*args, "authors_fts : "+phrase)
+				return `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
+				*args = append(*args, "authors_fts : "+phrase, node.field, folded)
+				return `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)) AND EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.role=? COLLATE NOCASE AND cjk_contains(sa.name, ?))`
+			default:
+				*args = append(*args, "{name_fts title_fts alt_fts} : "+phrase)
+				return `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			}
+		}
+		// Fallback when FTS5 is warming up or the query is pure symbol (e.g. "☆").
 		like := "%" + escapeLike(val) + "%"
 		switch node.field {
 		case "tag", "series_tag", "book_tag":
@@ -348,21 +390,12 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 		case "publisher":
 			*args = append(*args, like)
 			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.publisher LIKE ? ESCAPE '\' COLLATE NOCASE)`
-		case "language":
-			*args = append(*args, val)
-			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.language=? COLLATE NOCASE)`
-		case "status":
-			*args = append(*args, strings.ToUpper(val))
-			return `EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND sm.status=?)`
 		case "author":
 			*args = append(*args, like)
 			return `EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.name LIKE ? ESCAPE '\' COLLATE NOCASE)`
 		case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
 			*args = append(*args, like, node.field)
 			return `EXISTS (SELECT 1 FROM series_authors sa WHERE sa.series_id=s.id AND sa.name LIKE ? ESCAPE '\' COLLATE NOCASE AND sa.role=? COLLATE NOCASE)`
-		case "title":
-			*args = append(*args, like, like, like)
-			return `(s.name LIKE ? ESCAPE '\' COLLATE NOCASE OR EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND (sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE)))`
 		default:
 			*args = append(*args, like, like, like)
 			return `(s.name LIKE ? ESCAPE '\' COLLATE NOCASE OR EXISTS (SELECT 1 FROM series_metadata sm WHERE sm.series_id=s.id AND (sm.title LIKE ? ESCAPE '\' COLLATE NOCASE OR sm.alternate_titles_json LIKE ? ESCAPE '\' COLLATE NOCASE)))`
@@ -372,25 +405,25 @@ func renderSeriesSearchExpr(expr searchExpr, args *[]any) string {
 }
 
 // buildBookSearchSQL builds a parameterized SQL condition for books table alias "b".
-func buildBookSearchSQL(raw string) (string, []any) {
+func buildBookSearchSQL(raw string, useSeriesFTS, useBooksFTS bool) (string, []any) {
 	expr := parseSearchQuery(raw)
 	if expr == nil {
 		return "", nil
 	}
 	var args []any
-	sql := renderBookSearchExpr(expr, &args)
+	sql := renderBookSearchExpr(expr, useSeriesFTS, useBooksFTS, &args)
 	if sql == "" {
 		return "", nil
 	}
 	return "(" + sql + ")", args
 }
 
-func renderBookSearchExpr(expr searchExpr, args *[]any) string {
+func renderBookSearchExpr(expr searchExpr, useSeriesFTS, useBooksFTS bool, args *[]any) string {
 	switch node := expr.(type) {
 	case searchOr:
 		parts := make([]string, 0, len(node.items))
 		for _, item := range node.items {
-			if sub := renderBookSearchExpr(item, args); sub != "" {
+			if sub := renderBookSearchExpr(item, useSeriesFTS, useBooksFTS, args); sub != "" {
 				parts = append(parts, sub)
 			}
 		}
@@ -401,7 +434,7 @@ func renderBookSearchExpr(expr searchExpr, args *[]any) string {
 	case searchAnd:
 		parts := make([]string, 0, len(node.items))
 		for _, item := range node.items {
-			if sub := renderBookSearchExpr(item, args); sub != "" {
+			if sub := renderBookSearchExpr(item, useSeriesFTS, useBooksFTS, args); sub != "" {
 				parts = append(parts, sub)
 			}
 		}
@@ -410,15 +443,49 @@ func renderBookSearchExpr(expr searchExpr, args *[]any) string {
 		}
 		return "(" + strings.Join(parts, " AND ") + ")"
 	case searchNot:
-		sub := renderBookSearchExpr(node.inner, args)
+		sub := renderBookSearchExpr(node.inner, useSeriesFTS, useBooksFTS, args)
 		if sub == "" {
 			return ""
+		}
+		if sub == "0" {
+			return "0"
 		}
 		return "(NOT " + sub + ")"
 	case searchTerm:
 		val := strings.TrimSpace(node.value)
 		if val == "" {
 			return ""
+		}
+		folded := cjk.SearchKey(val)
+		if folded == "" {
+			return "0"
+		}
+		phrase := cjk.FTSQueryPhrase(val)
+		if useSeriesFTS && phrase != "" {
+			switch node.field {
+			case "tag", "series_tag", "book_tag":
+				*args = append(*args, "tags_fts : "+phrase)
+				return `b.series_id IN (SELECT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "genre":
+				*args = append(*args, "genres_fts : "+phrase)
+				return `b.series_id IN (SELECT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "publisher":
+				*args = append(*args, "publisher_fts : "+phrase)
+				return `b.series_id IN (SELECT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "author":
+				*args = append(*args, "authors_fts : "+phrase)
+				return `b.series_id IN (SELECT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid))`
+			case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
+				*args = append(*args, "authors_fts : "+phrase, node.field, folded)
+				return `b.series_id IN (SELECT DISTINCT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid JOIN series_authors sa ON sa.series_id=sf.id WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid) AND sa.role=? COLLATE NOCASE AND cjk_contains(sa.name, ?))`
+			default:
+				if useBooksFTS {
+					*args = append(*args, "name_fts : "+phrase, "{name_fts title_fts alt_fts} : "+phrase)
+					return `(b.rowid IN (SELECT bf.rowid FROM books_search_fts bf WHERE bf.books_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='b' AND _sd.row_id=bf.rowid)) OR b.series_id IN (SELECT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)))`
+				}
+				*args = append(*args, folded, "{name_fts title_fts alt_fts} : "+phrase)
+				return `(cjk_contains(b.name, ?) OR b.series_id IN (SELECT sf.id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)))`
+			}
 		}
 		like := "%" + escapeLike(val) + "%"
 		switch node.field {
@@ -445,16 +512,16 @@ func renderBookSearchExpr(expr searchExpr, args *[]any) string {
 	return ""
 }
 
-// buildSeriesSearchCandidateSQL builds a covering-index-backed set query returning
-// matching `series_id` values so SeriesPage can drive from the matched candidate set
-// in a single pass instead of scanning all series + probing metadata/tags twice.
-func buildSeriesSearchCandidateSQL(raw string, libs []string) (string, []any, bool) {
+// buildSeriesSearchCandidateSQL builds an FTS5-backed (or covering-index fallback)
+// set query returning matching `series_id` values so SeriesPage drives from the
+// matched candidate set in a single pass.
+func buildSeriesSearchCandidateSQL(raw string, libs []string, useFTS bool) (string, []any, bool) {
 	expr := parseSearchQuery(raw)
 	if expr == nil {
 		return "", nil, false
 	}
 	var args []any
-	sqlText, ok := renderSeriesCandidateSet(expr, libs, &args)
+	sqlText, ok := renderSeriesCandidateSet(expr, libs, useFTS, &args)
 	if !ok || sqlText == "" {
 		return "", nil, false
 	}
@@ -472,12 +539,12 @@ func wrapSeriesCandidateLibs(sqlText string, libs []string, args *[]any) string 
 	return `SELECT _sr.series_id AS series_id FROM (` + sqlText + `) _sr CROSS JOIN series _slib ON _slib.id=_sr.series_id WHERE _slib.library_id IN ` + Placeholders(len(libs))
 }
 
-func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (string, bool) {
+func renderSeriesCandidateSet(expr searchExpr, libs []string, useFTS bool, args *[]any) (string, bool) {
 	switch node := expr.(type) {
 	case searchOr:
 		parts := make([]string, 0, len(node.items))
 		for _, item := range node.items {
-			sub, ok := renderSeriesCandidateSet(item, libs, args)
+			sub, ok := renderSeriesCandidateSet(item, libs, useFTS, args)
 			if !ok {
 				return "", false
 			}
@@ -497,7 +564,7 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 		var pos, neg []string
 		for _, item := range node.items {
 			if notNode, isNot := item.(searchNot); isNot {
-				sub, ok := renderSeriesCandidateSet(notNode.inner, libs, args)
+				sub, ok := renderSeriesCandidateSet(notNode.inner, libs, useFTS, args)
 				if !ok {
 					return "", false
 				}
@@ -506,7 +573,7 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 				}
 				continue
 			}
-			sub, ok := renderSeriesCandidateSet(item, libs, args)
+			sub, ok := renderSeriesCandidateSet(item, libs, useFTS, args)
 			if !ok {
 				return "", false
 			}
@@ -531,6 +598,42 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 		if val == "" {
 			return "", false
 		}
+		switch node.field {
+		case "language":
+			*args = append(*args, val)
+			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.language=? COLLATE NOCASE`, true
+		case "status":
+			*args = append(*args, strings.ToUpper(val))
+			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.status=?`, true
+		}
+		folded := cjk.SearchKey(val)
+		if folded == "" {
+			return `SELECT id AS series_id FROM series WHERE 0`, true
+		}
+		phrase := cjk.FTSQueryPhrase(val)
+		if useFTS && phrase != "" {
+			switch node.field {
+			case "tag", "series_tag", "book_tag":
+				*args = append(*args, "tags_fts : "+phrase)
+				return `SELECT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)`, true
+			case "genre":
+				*args = append(*args, "genres_fts : "+phrase)
+				return `SELECT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)`, true
+			case "publisher":
+				*args = append(*args, "publisher_fts : "+phrase)
+				return `SELECT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)`, true
+			case "author":
+				*args = append(*args, "authors_fts : "+phrase)
+				return `SELECT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)`, true
+			case "writer", "penciller", "inker", "colorist", "letterer", "cover", "editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
+				*args = append(*args, "authors_fts : "+phrase, node.field, folded)
+				return `SELECT DISTINCT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid JOIN series_authors sa ON sa.series_id=sf.id WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid) AND sa.role=? COLLATE NOCASE AND cjk_contains(sa.name, ?)`, true
+			default:
+				*args = append(*args, "{name_fts title_fts alt_fts} : "+phrase)
+				return `SELECT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)`, true
+			}
+		}
+
 		like := "%" + escapeLike(val) + "%"
 		switch node.field {
 		case "tag", "series_tag", "book_tag":
@@ -542,12 +645,6 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 		case "publisher":
 			*args = append(*args, like)
 			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.publisher LIKE ? ESCAPE '\' COLLATE NOCASE`, true
-		case "language":
-			*args = append(*args, val)
-			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.language=? COLLATE NOCASE`, true
-		case "status":
-			*args = append(*args, strings.ToUpper(val))
-			return `SELECT sm.series_id AS series_id FROM series_metadata sm WHERE sm.status=?`, true
 		case "author":
 			*args = append(*args, like)
 			return `SELECT DISTINCT sa.series_id AS series_id FROM series_authors sa WHERE sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`, true
@@ -572,10 +669,9 @@ func renderSeriesCandidateSet(expr searchExpr, libs []string, args *[]any) (stri
 	return "", false
 }
 
-// buildBookSearchCandidateSQL builds a covering-index-backed set query returning
-// matching `book_rowid` (8-byte SQLite integer rowid) values using idx_books_library_name
-// and idx_books_series_number without touching the books table during candidate collection.
-func buildBookSearchCandidateSQL(raw string, libs []string) (string, []any, bool) {
+// buildBookSearchCandidateSQL builds an FTS5-backed (or covering-index fallback)
+// set query returning matching `book_rowid` values.
+func buildBookSearchCandidateSQL(raw string, libs []string, useSeriesFTS, useBooksFTS bool) (string, []any, bool) {
 	if len(libs) == 0 {
 		return "", nil, false
 	}
@@ -584,19 +680,24 @@ func buildBookSearchCandidateSQL(raw string, libs []string) (string, []any, bool
 		return "", nil, false
 	}
 	var args []any
-	sqlText, ok := renderBookCandidateSet(expr, libs, &args)
+	sqlText, ok := renderBookCandidateSet(expr, libs, useSeriesFTS, useBooksFTS, &args)
 	if !ok || sqlText == "" {
 		return "", nil, false
 	}
 	return sqlText, args, true
 }
 
-func collectBookOrParts(expr searchExpr, libs []string, args *[]any) ([]string, []string, bool) {
+type sqlFragment struct {
+	sql  string
+	args []any
+}
+
+func collectBookOrParts(expr searchExpr, libs []string, useSeriesFTS, useBooksFTS bool) ([]sqlFragment, []sqlFragment, bool) {
 	switch node := expr.(type) {
 	case searchOr:
-		var bookParts, seriesParts []string
+		var bookParts, seriesParts []sqlFragment
 		for _, item := range node.items {
-			bp, sp, ok := collectBookOrParts(item, libs, args)
+			bp, sp, ok := collectBookOrParts(item, libs, useSeriesFTS, useBooksFTS)
 			if !ok {
 				return nil, nil, false
 			}
@@ -614,46 +715,72 @@ func collectBookOrParts(expr searchExpr, libs []string, args *[]any) ([]string, 
 		case "tag", "series_tag", "book_tag", "genre", "publisher", "language", "status",
 			"author", "writer", "penciller", "inker", "colorist", "letterer", "cover",
 			"editor", "translator", "artist", "illustrator", "conceptor", "narrator", "contributor":
-			seriesSQL, ok := renderSeriesCandidateSet(node, libs, args)
+			var sArgs []any
+			seriesSQL, ok := renderSeriesCandidateSet(node, libs, useSeriesFTS, &sArgs)
 			if !ok || seriesSQL == "" {
 				return nil, nil, false
 			}
-			return nil, []string{"SELECT series_id FROM (" + seriesSQL + ")"}, true
+			return nil, []sqlFragment{{sql: "SELECT series_id FROM (" + seriesSQL + ")", args: sArgs}}, true
 		default:
-			like := "%" + escapeLike(val) + "%"
-			for _, id := range libs {
-				*args = append(*args, id)
+			folded := cjk.SearchKey(val)
+			if folded == "" {
+				return []sqlFragment{{sql: `SELECT rowid AS book_rowid FROM books WHERE 0`}}, nil, true
 			}
-			*args = append(*args, like)
-			bookPart := `SELECT b2.rowid AS book_rowid FROM books b2 WHERE b2.library_id IN ` + Placeholders(len(libs)) + ` AND b2.name LIKE ? ESCAPE '\' COLLATE NOCASE`
-			seriesSQL, ok := renderSeriesCandidateSet(node, libs, args)
+			phrase := cjk.FTSQueryPhrase(val)
+			var bArgs []any
+			var bookSQL string
+			if useBooksFTS && phrase != "" {
+				bArgs = append(bArgs, "name_fts : "+phrase)
+				for _, id := range libs {
+					bArgs = append(bArgs, id)
+				}
+				bookSQL = `SELECT b2.rowid AS book_rowid FROM books_search_fts bf CROSS JOIN books b2 ON b2.rowid=bf.rowid WHERE bf.books_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='b' AND _sd.row_id=bf.rowid) AND b2.library_id IN ` + Placeholders(len(libs))
+			} else {
+				like := "%" + escapeLike(val) + "%"
+				for _, id := range libs {
+					bArgs = append(bArgs, id)
+				}
+				bArgs = append(bArgs, like)
+				bookSQL = `SELECT b2.rowid AS book_rowid FROM books b2 WHERE b2.library_id IN ` + Placeholders(len(libs)) + ` AND b2.name LIKE ? ESCAPE '\' COLLATE NOCASE`
+			}
+			var sArgs []any
+			seriesSQL, ok := renderSeriesCandidateSet(node, libs, useSeriesFTS, &sArgs)
 			if !ok || seriesSQL == "" {
-				return []string{bookPart}, nil, true
+				return []sqlFragment{{sql: bookSQL, args: bArgs}}, nil, true
 			}
-			return []string{bookPart}, []string{"SELECT series_id FROM (" + seriesSQL + ")"}, true
+			return []sqlFragment{{sql: bookSQL, args: bArgs}},
+				[]sqlFragment{{sql: "SELECT series_id FROM (" + seriesSQL + ")", args: sArgs}}, true
 		}
 
 	default:
-		sub, ok := renderBookCandidateSet(expr, libs, args)
+		var subArgs []any
+		sub, ok := renderBookCandidateSet(expr, libs, useSeriesFTS, useBooksFTS, &subArgs)
 		if !ok || sub == "" {
 			return nil, nil, false
 		}
-		return []string{"SELECT book_rowid FROM (" + sub + ")"}, nil, true
+		return []sqlFragment{{sql: "SELECT book_rowid FROM (" + sub + ")", args: subArgs}}, nil, true
 	}
 }
 
-func renderBookCandidateSet(expr searchExpr, libs []string, args *[]any) (string, bool) {
+func renderBookCandidateSet(expr searchExpr, libs []string, useSeriesFTS, useBooksFTS bool, args *[]any) (string, bool) {
 	switch node := expr.(type) {
 	case searchOr, searchTerm:
-		bookParts, seriesParts, ok := collectBookOrParts(expr, libs, args)
+		bookFrags, seriesFrags, ok := collectBookOrParts(expr, libs, useSeriesFTS, useBooksFTS)
 		if !ok {
 			return "", false
 		}
-		if len(seriesParts) > 0 {
-			sCombined := seriesParts[0]
-			if len(seriesParts) > 1 {
-				sCombined = strings.Join(seriesParts, " UNION ")
+		bookParts := make([]string, 0, len(bookFrags)+1)
+		for _, f := range bookFrags {
+			bookParts = append(bookParts, f.sql)
+			*args = append(*args, f.args...)
+		}
+		if len(seriesFrags) > 0 {
+			sSQLs := make([]string, len(seriesFrags))
+			for i, f := range seriesFrags {
+				sSQLs[i] = f.sql
+				*args = append(*args, f.args...)
 			}
+			sCombined := strings.Join(sSQLs, " UNION ")
 			sFiltered := wrapSeriesCandidateLibs(sCombined, libs, args)
 			seriesBranch := `SELECT b3.rowid AS book_rowid FROM (` + sFiltered + `) _ms CROSS JOIN books b3 ON b3.series_id=_ms.series_id`
 			bookParts = append(bookParts, seriesBranch)
@@ -670,7 +797,7 @@ func renderBookCandidateSet(expr searchExpr, libs []string, args *[]any) (string
 		var pos, neg []string
 		for _, item := range node.items {
 			if notNode, isNot := item.(searchNot); isNot {
-				sub, ok := renderBookCandidateSet(notNode.inner, libs, args)
+				sub, ok := renderBookCandidateSet(notNode.inner, libs, useSeriesFTS, useBooksFTS, args)
 				if !ok {
 					return "", false
 				}
@@ -679,7 +806,7 @@ func renderBookCandidateSet(expr searchExpr, libs []string, args *[]any) (string
 				}
 				continue
 			}
-			sub, ok := renderBookCandidateSet(item, libs, args)
+			sub, ok := renderBookCandidateSet(item, libs, useSeriesFTS, useBooksFTS, args)
 			if !ok {
 				return "", false
 			}
@@ -700,4 +827,62 @@ func renderBookCandidateSet(expr searchExpr, libs []string, args *[]any) (string
 		return "", false
 	}
 	return "", false
+}
+
+// buildFoldedTaxonomySeriesSubquery returns a SQL subquery yielding matching
+// `series_id` values for exact CJK-folded taxonomy filters (tags, genres,
+// publishers, authors). When series FTS5 is ready, it narrows via the inverted
+// index first and verifies exact folded equality with cjk_key().
+func buildFoldedTaxonomySeriesSubquery(
+	tableAlias, tableName, colName, ftsCol string,
+	rawValues []string,
+	useFTS bool,
+) (string, []any) {
+	cleaned := cleanStringSlice(rawValues)
+	if len(cleaned) == 0 {
+		return "", nil
+	}
+	folded := make([]string, 0, len(cleaned))
+	seenFolded := make(map[string]bool, len(cleaned))
+	phrases := make([]string, 0, len(cleaned))
+	allHavePhrase := true
+	for _, v := range cleaned {
+		key := cjk.SearchKey(v)
+		if key == "" {
+			continue
+		}
+		if !seenFolded[key] {
+			seenFolded[key] = true
+			folded = append(folded, key)
+		}
+		p := cjk.FTSQueryPhrase(v)
+		if p == "" {
+			allHavePhrase = false
+		} else {
+			phrases = append(phrases, p)
+		}
+	}
+	if len(folded) == 0 {
+		return `SELECT id AS series_id FROM series WHERE 0`, nil
+	}
+	if useFTS && allHavePhrase && len(phrases) > 0 {
+		matchExpr := ftsCol + " : (" + strings.Join(phrases, " OR ") + ")"
+		args := make([]any, 0, 1+len(folded))
+		args = append(args, matchExpr)
+		for _, k := range folded {
+			args = append(args, k)
+		}
+		sql := `SELECT DISTINCT sf.id AS series_id FROM series_search_fts f CROSS JOIN series sf ON sf.rowid=f.rowid JOIN ` +
+			tableName + ` ` + tableAlias + ` ON ` + tableAlias + `.series_id=sf.id WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid) AND cjk_key(` +
+			tableAlias + `.` + colName + `) IN ` + Placeholders(len(folded))
+		return sql, args
+	}
+	// Fallback when FTS5 is warming up or a filter value is pure symbols.
+	args := make([]any, len(cleaned))
+	for i, v := range cleaned {
+		args[i] = v
+	}
+	sql := `SELECT DISTINCT ` + tableAlias + `.series_id AS series_id FROM ` +
+		tableName + ` ` + tableAlias + ` WHERE ` + tableAlias + `.` + colName + ` COLLATE NOCASE IN ` + Placeholders(len(cleaned))
+	return sql, args
 }

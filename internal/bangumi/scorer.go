@@ -38,6 +38,22 @@ type SubjectCandidate struct {
 	Authors         []database.Author         `json:"authors"`
 	AlternateTitles []database.AlternateTitle `json:"alternateTitles"`
 	Confidence      float64                   `json:"confidence"`
+	Breakdown       *ScoreBreakdown           `json:"breakdown,omitempty"`
+}
+
+// ScoreBreakdown explains why a candidate received its confidence so an
+// auto-match failure can be diagnosed from the UI instead of a single toast.
+type ScoreBreakdown struct {
+	TitleScore        float64 `json:"titleScore"`
+	PlatformDelta     float64 `json:"platformDelta"`
+	SeriesBonus       float64 `json:"seriesBonus"`
+	EditionDelta      float64 `json:"editionDelta"`
+	AuthorDelta       float64 `json:"authorDelta"`
+	ScanlatorPenalty  float64 `json:"scanlatorPenalty"`
+	ShortTitlePenalty float64 `json:"shortTitlePenalty"`
+	PopularityBonus   float64 `json:"popularityBonus"`
+	ExactTitle        bool    `json:"exactTitle"`
+	Final             float64 `json:"final"`
 }
 
 func CoverEndpointURL(subjectID int64) string {
@@ -90,18 +106,29 @@ func PlatformCodeFromString(label string) int {
 // ScoreCandidate evaluates how well a Bangumi SubjectCandidate matches a ParsedQuery.
 // Returns a confidence score in [0, 1].
 func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bool) float64 {
+	score, _ := ScoreCandidateDetailed(query, cand, targetIsOneShot)
+	return score
+}
+
+// ScoreCandidateDetailed is ScoreCandidate plus the per-component breakdown
+// exposed to the auto-match diagnostics panel.
+func ScoreCandidateDetailed(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bool) (float64, ScoreBreakdown) {
+	var b ScoreBreakdown
 	var bestTitleScore float64
 	var matchedIdx int
 	var matchedQueryKey, matchedQueryRaw string
+	var exactTitle bool
 	if len(query.compoundTitles) > 0 {
-		bestTitleScore, matchedQueryRaw = compoundTitleScore(query.compoundTitles, cand)
+		bestTitleScore, matchedQueryRaw, exactTitle = compoundTitleScore(query.compoundTitles, cand)
 		matchedQueryKey = exactTitleKey(matchedQueryRaw)
 	} else {
-		bestTitleScore, matchedIdx, matchedQueryKey, matchedQueryRaw = ordinaryTitleScore(query, cand)
+		bestTitleScore, matchedIdx, matchedQueryKey, matchedQueryRaw, exactTitle = ordinaryTitleScore(query, cand)
 	}
 	if bestTitleScore < 0.35 {
-		return 0
+		return 0, b
 	}
+	b.TitleScore = round3(bestTitleScore)
+	b.ExactTitle = exactTitle
 
 	score := bestTitleScore
 
@@ -111,24 +138,31 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 	case PlatformComic:
 		if query.IsNovelHint {
 			score -= 0.18
+			b.PlatformDelta = -0.18
 		} else {
 			score += 0.08
+			b.PlatformDelta = 0.08
 		}
 	case 0:
 		score += 0.02
+		b.PlatformDelta = 0.02
 	case PlatformNovel:
 		if query.IsNovelHint {
 			score += 0.08
+			b.PlatformDelta = 0.08
 		} else {
 			score -= 0.22
+			b.PlatformDelta = -0.22
 		}
 	case PlatformIllustration, 1005, 1006:
 		score -= 0.18
+		b.PlatformDelta = -0.18
 	}
 
 	// Series vs One-Shot weighting
 	if !targetIsOneShot && cand.IsSeries {
 		score += 0.06
+		b.SeriesBonus = 0.06
 	}
 
 	// Edition hint alignment (e.g. "完全版" in folder name matches "完全版" in Bangumi title)
@@ -137,6 +171,7 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		for _, ed := range query.EditionHints {
 			if strings.Contains(combinedTitle, ed) {
 				score += 0.04
+				b.EditionDelta = 0.04
 				break
 			}
 		}
@@ -145,6 +180,7 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		for _, suffix := range []string{"完全版", "爱藏版", "新装版", "文库版", "画集", "公式", "外传", "选集", "公式ガイド"} {
 			if strings.Contains(combinedTitle, suffix) {
 				score -= 0.05
+				b.EditionDelta = -0.05
 				break
 			}
 		}
@@ -172,32 +208,46 @@ func ScoreCandidate(query ParsedQuery, cand SubjectCandidate, targetIsOneShot bo
 		}
 		if authorMatched {
 			score += 0.14
+			b.AuthorDelta = 0.14
 		} else if distinctAuthorCount > 0 && bestTitleScore < 0.86 {
 			score -= 0.08
+			b.AuthorDelta = -0.08
 		}
 	}
 
 	// Guard against scanlator-credit homonym (e.g. [恶之华] in another manga's folder)
 	if ambiguousScanlators[strings.ToLower(ToSimplified(strings.TrimSpace(matchedQueryRaw)))] && matchedIdx > 0 && !authorMatched {
 		score -= 0.35
+		b.ScanlatorPenalty = -0.35
 	}
 
-	// Short single-character titles require stricter exactness
-	if matchedQueryKey != "" && len([]rune(matchedQueryKey)) <= 1 && bestTitleScore < 0.90 {
+	// Short single-character titles require stricter exactness, but a genuinely
+	// exact match must not be punished just for being short.
+	if !exactTitle && matchedQueryKey != "" && len([]rune(matchedQueryKey)) <= 1 && bestTitleScore < 0.90 {
 		score -= 0.25
+		b.ShortTitlePenalty = -0.25
 	}
 
 	// Subtle popularity tie-breaker (0 to +0.02)
 	if cand.Rank > 0 && cand.Rank < 10000 {
-		score += 0.02 * (1.0 - float64(cand.Rank)/10000.0)
+		bonus := 0.02 * (1.0 - float64(cand.Rank)/10000.0)
+		score += bonus
+		b.PopularityBonus = round3(bonus)
 	} else if cand.Score != nil && *cand.Score > 0 {
 		score += 0.005
+		b.PopularityBonus = 0.005
 	}
 
-	return math.Round(min(0.99, max(0, score))*1000) / 1000
+	score = round3(min(0.99, max(0, score)))
+	b.Final = score
+	return score, b
 }
 
-func compoundTitleScore(groups []compoundTitle, cand SubjectCandidate) (best float64, whole string) {
+func round3(value float64) float64 {
+	return math.Round(value*1000) / 1000
+}
+
+func compoundTitleScore(groups []compoundTitle, cand SubjectCandidate) (best float64, whole string, matchedExact bool) {
 	exact := map[string]float64{}
 	add := func(title string, score float64) {
 		if key := exactTitleKey(title); key != "" {
@@ -226,18 +276,20 @@ func compoundTitleScore(groups []compoundTitle, cand SubjectCandidate) (best flo
 			best, whole = score, g.whole
 		}
 	}
-	return best, whole
+	return best, whole, best > 0
 }
 
-func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScore float64, matchedIdx int, matchedQueryKey, matchedQueryRaw string) {
+func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScore float64, matchedIdx int, matchedQueryKey, matchedQueryRaw string, matchedExact bool) {
 	var candKeys []string
 	primaryKeys := map[string]bool{}
+	fullKeys := map[string]bool{}
 	addKey := func(raw string, primary bool) {
 		k := NormalizeMatchKey(raw)
 		if k == "" {
 			return
 		}
 		candKeys = appendUniqueText(candKeys, k)
+		fullKeys[k] = true
 		if primary {
 			primaryKeys[k] = true
 		}
@@ -255,6 +307,7 @@ func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScor
 		}
 		if withX := crossTitleKey(simp); withX != "" && withX != k {
 			candKeys = appendUniqueText(candKeys, withX)
+			fullKeys[withX] = true
 			if primary {
 				primaryKeys[withX] = true
 			}
@@ -266,7 +319,7 @@ func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScor
 		addKey(alt.Title, false)
 	}
 	if len(candKeys) == 0 {
-		return 0, 0, "", ""
+		return 0, 0, "", "", false
 	}
 
 	for idx, qRaw := range query.Candidates {
@@ -289,11 +342,12 @@ func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScor
 					matchedIdx = idx
 					matchedQueryKey = qk
 					matchedQueryRaw = qRaw
+					matchedExact = key == ck && fullKeys[ck]
 				}
 			}
 		}
 	}
-	return bestTitleScore, matchedIdx, matchedQueryKey, matchedQueryRaw
+	return bestTitleScore, matchedIdx, matchedQueryKey, matchedQueryRaw, matchedExact
 }
 
 func authorsMatch(queryAuthor, candAuthor string) bool {

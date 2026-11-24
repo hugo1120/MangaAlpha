@@ -17,6 +17,26 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
+func TestExactShortTitleIsNotPenalized(t *testing.T) {
+	q := ParseSeriesName("嘘")
+	for _, platform := range []int{PlatformComic, 0} {
+		cand := SubjectCandidate{Name: "嘘", NameCN: "嘘", Platform: platform, IsSeries: true}
+		score, breakdown := ScoreCandidateDetailed(q, cand, false)
+		if score < AutoMatchMinConfidence {
+			t.Fatalf("platform %d exact single-rune title scored %.3f", platform, score)
+		}
+		if breakdown.ShortTitlePenalty != 0 || !breakdown.ExactTitle {
+			t.Fatalf("exact single-rune title was penalized: %+v", breakdown)
+		}
+	}
+	// Edition stripping must NOT promote a near-miss short title ("嘘外传") into an exact match for "嘘".
+	spinoff := SubjectCandidate{Name: "嘘外传", NameCN: "嘘外传", Platform: PlatformComic, IsSeries: true}
+	score, breakdown := ScoreCandidateDetailed(q, spinoff, false)
+	if breakdown.ExactTitle || breakdown.ShortTitlePenalty == 0 || score >= AutoMatchMinConfidence {
+		t.Fatalf("edition-stripped short-title near miss should be penalized: score=%.3f breakdown=%+v", score, breakdown)
+	}
+}
+
 func TestShortTitleAndNovelCategory(t *testing.T) {
 	for _, name := range []string{"H2 [田中凛][小学馆]", "86 [田中凛][小学馆]", "Rev [田中凛][小学馆]"} {
 		want := strings.Fields(name)[0]

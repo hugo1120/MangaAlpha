@@ -1074,7 +1074,9 @@ FROM bgm_subjects WHERE id IN `+database.Placeholders(len(idArgs)), idArgs...)
 		if err != nil {
 			return nil, err
 		}
-		cand.Confidence = ScoreCandidate(parsed, cand, targetIsOneShot)
+		score, breakdown := ScoreCandidateDetailed(parsed, cand, targetIsOneShot)
+		cand.Confidence = score
+		cand.Breakdown = &breakdown
 		if cand.Confidence > 0 {
 			candidates = append(candidates, cand)
 		}

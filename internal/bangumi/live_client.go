@@ -155,7 +155,9 @@ func (c *LiveClient) Search(
 			continue
 		}
 		cand := mapAPISubject(item, nil)
-		cand.Confidence = ScoreCandidate(parsed, cand, targetIsOneShot)
+		score, breakdown := ScoreCandidateDetailed(parsed, cand, targetIsOneShot)
+		cand.Confidence = score
+		cand.Breakdown = &breakdown
 		if len(parsed.compoundTitles) > 0 && cand.Confidence == 0 {
 			continue
 		}

@@ -1694,6 +1694,28 @@
 
   // --- Bangumi Match Modal ---
 
+  function bgmSignedDelta(value) {
+    const n = Number(value || 0);
+    return `${n > 0 ? '+' : ''}${n.toFixed(2)}`;
+  }
+
+  function bgmScoreBreakdownHTML(candidate) {
+    const b = candidate && candidate.breakdown;
+    if (!b) return '';
+    const parts = [
+      `标题 ${Number(b.titleScore || 0).toFixed(2)}${b.exactTitle ? '（完全一致）' : ''}`,
+      `平台 ${bgmSignedDelta(b.platformDelta)}`,
+      `系列 ${bgmSignedDelta(b.seriesBonus)}`,
+      `版本 ${bgmSignedDelta(b.editionDelta)}`,
+      `作者 ${bgmSignedDelta(b.authorDelta)}`,
+    ];
+    if (Number(b.scanlatorPenalty || 0) !== 0) parts.push(`扫图组 ${bgmSignedDelta(b.scanlatorPenalty)}`);
+    if (Number(b.shortTitlePenalty || 0) !== 0) parts.push(`短标题 ${bgmSignedDelta(b.shortTitlePenalty)}`);
+    parts.push(`人气 ${bgmSignedDelta(b.popularityBonus)}`);
+    parts.push(`合计 ${Number(b.final || 0).toFixed(2)}`);
+    return `<details style="margin-top:5px;font-size:12px;color:var(--text-muted)"><summary style="cursor:pointer">评分明细</summary><div style="margin-top:3px">${esc(parts.join(' · '))}</div></details>`;
+  }
+
   function openBangumiMatchModal(seriesID, detail) {
     const rawMeta = detail.rawMeta || {};
     openModal({
@@ -1715,27 +1737,26 @@
         const box = document.getElementById('bgm-candidates-box');
         const hint = document.getElementById('bgm-parsed-hint');
         const defaultHint = hint.textContent;
+        const openRouteSeq = routeSeq;
         let searchID = 0;
-        const doSearch = async (qVal) => {
-          const id = ++searchID;
-          box.innerHTML = `<div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div>`;
-          try {
-            const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/candidates?q=${encodeURIComponent(qVal)}`);
-            if (id !== searchID || !box.isConnected) return;
-            const parsed = res.parsed || {};
-            hint.textContent = parsed.candidates && parsed.candidates.length > 0
-              ? `清洗候选词：${parsed.candidates.join(' / ')}${parsed.authors && parsed.authors.length ? ` · 识别作者：${parsed.authors.join('、')}` : ''}${parsed.publisher ? ` · 版本/出版社：${parsed.publisher}` : ''}`
-              : defaultHint;
-            hint.title = hint.textContent;
-            const cands = res.candidates || [];
-            if (cands.length === 0) {
-              box.innerHTML = `<div class="empty-box">未找到匹配的 Bangumi 书籍条目，请尝试缩短关键词或直接输入 Bangumi Subject ID。</div>`;
-              return;
-            }
-            box.innerHTML = cands.map((c) => {
-              const imgURL = `/admin/api/bangumi/subjects/${encodeURIComponent(c.id)}/cover${c.coverUrl ? `?u=${encodeURIComponent(c.coverUrl)}` : ''}`;
-              const authorsTxt = (c.authors || []).map((a) => a.name).join(' / ');
-              return `
+        let mutating = false;
+        const autoBtn = document.getElementById('bgm-auto-btn');
+        const clearBtn = document.getElementById('bgm-clear-btn');
+        const setMutating = (busy) => {
+          mutating = busy;
+          if (autoBtn) autoBtn.disabled = busy;
+          if (clearBtn) clearBtn.disabled = busy;
+          box.querySelectorAll('button[data-bind-bgm]').forEach((b) => { b.disabled = busy; });
+        };
+        const renderCandidates = (cands, noteHTML = '') => {
+          if (cands.length === 0) {
+            box.innerHTML = noteHTML + `<div class="empty-box">未找到匹配的 Bangumi 书籍条目，请尝试缩短关键词或直接输入 Bangumi Subject ID。</div>`;
+            return;
+          }
+          box.innerHTML = noteHTML + cands.map((c) => {
+            const imgURL = `/admin/api/bangumi/subjects/${encodeURIComponent(c.id)}/cover${c.coverUrl ? `?u=${encodeURIComponent(c.coverUrl)}` : ''}`;
+            const authorsTxt = (c.authors || []).map((a) => a.name).join(' / ');
+            return `
                 <div class="bgm-candidate">
                   <img loading="lazy" src="${esc(imgURL)}" alt="">
                   <div style="flex:1;min-width:0">
@@ -1753,34 +1774,52 @@
                       ${c.releaseDate ? `发售：${esc(c.releaseDate)}` : ''}
                     </div>
                     ${c.summary ? `<div style="font-size:12px;color:var(--text-muted);margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(c.summary)}</div>` : ''}
+                    ${bgmScoreBreakdownHTML(c)}
                   </div>
                   <div class="bgm-candidate-actions">
                     <button type="button" class="btn btn-primary btn-sm" data-bind-bgm="${c.id}">选用此条目</button>
                     <a href="https://bgm.tv/subject/${c.id}" target="_blank" rel="noopener noreferrer" class="btn btn-sm">查看 ↗</a>
                   </div>
                 </div>`;
-            }).join('');
+          }).join('');
 
-            box.querySelectorAll('button[data-bind-bgm]').forEach((btn) => {
-              btn.onclick = async () => {
-                const subjectId = Number(btn.getAttribute('data-bind-bgm'));
-                btn.disabled = true;
-                try {
-                  await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/bind`, {
-                    method: 'POST',
-                    body: { subjectId },
-                  });
-                  state.coverVer = Date.now();
-                  state.taxonomies.loaded = false;
-                  toast(`已绑定 Bangumi #${subjectId}`);
+          box.querySelectorAll('button[data-bind-bgm]').forEach((btn) => {
+            btn.disabled = mutating;
+            btn.onclick = async () => {
+              if (mutating) return;
+              const subjectId = Number(btn.getAttribute('data-bind-bgm'));
+              setMutating(true);
+              try {
+                await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/bind`, {
+                  method: 'POST',
+                  body: { subjectId },
+                });
+                state.coverVer = Date.now();
+                state.taxonomies.loaded = false;
+                toast(`已绑定 Bangumi #${subjectId}`);
+                if (box.isConnected && openRouteSeq === routeSeq) {
                   closeModal();
                   renderSeriesDetail(seriesID);
-                } catch (err) {
-                  toast(err.message, 'error');
-                  btn.disabled = false;
                 }
-              };
-            });
+              } catch (err) {
+                toast(err.message, 'error');
+                if (box.isConnected) setMutating(false);
+              }
+            };
+          });
+        };
+        const doSearch = async (qVal) => {
+          const id = ++searchID;
+          box.innerHTML = `<div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div>`;
+          try {
+            const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/candidates?q=${encodeURIComponent(qVal)}`);
+            if (id !== searchID || !box.isConnected) return;
+            const parsed = res.parsed || {};
+            hint.textContent = parsed.candidates && parsed.candidates.length > 0
+              ? `清洗候选词：${parsed.candidates.join(' / ')}${parsed.authors && parsed.authors.length ? ` · 识别作者：${parsed.authors.join('、')}` : ''}${parsed.publisher ? ` · 版本/出版社：${parsed.publisher}` : ''}`
+              : defaultHint;
+            hint.title = hint.textContent;
+            renderCandidates(res.candidates || []);
           } catch (err) {
             if (id !== searchID || !box.isConnected) return;
             box.innerHTML = `<div class="empty-box" style="color:var(--danger)">${esc(err.message)}</div>`;
@@ -1793,31 +1832,57 @@
           e.preventDefault();
           doSearch(searchInput.value.trim());
         });
-        document.getElementById('bgm-auto-btn').onclick = async () => {
+        autoBtn.onclick = async () => {
+          if (mutating) return;
+          const id = ++searchID;
+          setMutating(true);
           try {
             const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/auto`, { method: 'POST', body: {} });
-            state.coverVer = Date.now();
-            state.taxonomies.loaded = false;
             if (res.matched) {
+              state.coverVer = Date.now();
+              state.taxonomies.loaded = false;
               toast('自动匹配成功！');
-              closeModal();
-              renderSeriesDetail(seriesID);
-            } else {
-              toast('自动匹配置信度不足，请从候选列表中手动选择', 'error');
+              if (box.isConnected && openRouteSeq === routeSeq) {
+                closeModal();
+                renderSeriesDetail(seriesID);
+              }
+              return;
             }
-          } catch (err) { toast(err.message, 'error'); }
+            if (id !== searchID || !box.isConnected) return;
+            const cands = res.candidates || [];
+            const threshold = Number(res.threshold || 0.72);
+            if (cands.length > 0) {
+              const best = Math.round(Number(cands[0].confidence || 0) * 100);
+              const note = `<div class="empty-box" style="margin-bottom:10px;color:var(--text-secondary)">自动匹配未通过：最高 ${best}% 低于阈值 ${Math.round(threshold * 100)}%。下面是评分最高的 ${cands.length} 个候选，展开“评分明细”可以看到每一项加减分。</div>`;
+              renderCandidates(cands, note);
+              toast('自动匹配置信度不足，已列出评分最高的候选', 'error');
+            } else {
+              box.innerHTML = `<div class="empty-box" style="color:var(--danger)">自动匹配没有找到任何候选：可能是标题清洗后为空，或 Bangumi 本地索引与在线搜索都没有命中。</div>`;
+              toast('自动匹配没有找到候选', 'error');
+            }
+          } catch (err) {
+            if (id === searchID) toast(err.message, 'error');
+          } finally {
+            if (box.isConnected) setMutating(false);
+          }
         };
-        const clearBtn = document.getElementById('bgm-clear-btn');
         if (clearBtn) {
           clearBtn.onclick = async () => {
+            if (mutating) return;
             if (!confirm('确认解除 Bangumi 绑定并恢复原始目录标题与首卷封面？')) return;
+            setMutating(true);
             try {
               await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/bind`, { method: 'DELETE' });
               state.coverVer = Date.now();
               toast('已解除 Bangumi 绑定');
-              closeModal();
-              renderSeriesDetail(seriesID);
-            } catch (err) { toast(err.message, 'error'); }
+              if (box.isConnected && openRouteSeq === routeSeq) {
+                closeModal();
+                renderSeriesDetail(seriesID);
+              }
+            } catch (err) {
+              toast(err.message, 'error');
+              if (box.isConnected) setMutating(false);
+            }
           };
         }
         doSearch('');

@@ -456,13 +456,22 @@ func (s *Service) AutoScrapeOne(
 	ctx context.Context,
 	series database.Series,
 ) (matched bool, meta database.SeriesMetadata, err error) {
+	matched, meta, _, err = s.AutoScrapeOneDetailed(ctx, series)
+	return matched, meta, err
+}
+
+// AutoScrapeOneDetailed is AutoScrapeOne that also returns the top evaluated
+// candidates (with score breakdowns) so a failed auto-match can explain itself.
+func (s *Service) AutoScrapeOneDetailed(
+	ctx context.Context,
+	series database.Series,
+) (matched bool, meta database.SeriesMetadata, candidates []SubjectCandidate, err error) {
 	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
 	terms := parsed.lookupTitles()
-	var candidates []SubjectCandidate
 	if s.archive.Ready() {
 		candidates, err = s.archive.Search(ctx, parsed, series.OneShot, 10)
 		if err != nil {
-			return false, database.SeriesMetadata{}, err
+			return false, database.SeriesMetadata{}, nil, err
 		}
 	} else if len(terms) > 0 {
 		maxTries := min(2, len(terms))
@@ -470,7 +479,7 @@ func (s *Service) AutoScrapeOne(
 			res, sErr := s.live.Search(ctx, terms[i], parsed, series.OneShot, 10)
 			if sErr != nil {
 				if i == 0 {
-					return false, database.SeriesMetadata{}, sErr
+					return false, database.SeriesMetadata{}, nil, sErr
 				}
 				break
 			}
@@ -489,10 +498,10 @@ func (s *Service) AutoScrapeOne(
 		}
 		inferredNSFW := InferPathNSFW(series.Name, series.RelativePath)
 		if mErr := s.store.MarkSeriesScrapeStatusWithNSFW(ctx, series, database.ScrapeStatusUnmatched, bestConf, inferredNSFW); mErr != nil {
-			return false, database.SeriesMetadata{}, mErr
+			return false, database.SeriesMetadata{}, nil, mErr
 		}
 		cur, _ := s.store.SeriesMetadataByID(ctx, series)
-		return false, cur, nil
+		return false, cur, topCandidates(candidates, 3), nil
 	}
 	best := candidates[0]
 	// When matching via online search (which lacks full infobox persons), enrich via SubjectByID if needed.
@@ -505,9 +514,16 @@ func (s *Service) AutoScrapeOne(
 	scraped := ToScrapedMetadataWithQuery(series.Name, parsed, best)
 	meta, err = s.store.ApplyScrapedMetadata(ctx, series, scraped)
 	if err != nil {
-		return false, database.SeriesMetadata{}, err
+		return false, database.SeriesMetadata{}, nil, err
 	}
-	return true, meta, nil
+	return true, meta, topCandidates(candidates, 3), nil
+}
+
+func topCandidates(candidates []SubjectCandidate, limit int) []SubjectCandidate {
+	if len(candidates) > limit {
+		return candidates[:limit]
+	}
+	return candidates
 }
 
 func (s *Service) StartBatch(

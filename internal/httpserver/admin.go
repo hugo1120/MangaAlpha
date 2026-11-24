@@ -1714,15 +1714,20 @@ func (s *Server) autoMatchSeriesBangumi(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return
 	}
-	matched, meta, err := s.bangumi.AutoScrapeOne(r.Context(), series)
+	matched, meta, candidates, err := s.bangumi.AutoScrapeOneDetailed(r.Context(), series)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "BANGUMI_SCRAPE_FAILED", err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"matched":  matched,
 		"metadata": meta,
-	})
+	}
+	if !matched && len(candidates) > 0 {
+		payload["candidates"] = candidates
+		payload["threshold"] = bangumi.AutoMatchMinConfidence
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (s *Server) clearSeriesBangumi(w http.ResponseWriter, r *http.Request) {

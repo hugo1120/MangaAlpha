@@ -445,6 +445,9 @@ func (m *Manager) scan115(ctx context.Context, item job, stage bool) (counters, 
 	if item.library.RootCID == "0" || strings.TrimSpace(rootName) == "" {
 		rootName = item.library.Name
 	}
+	visitedCID := map[string]bool{
+		item.library.RootCID: true,
+	}
 	queue := []queueDir{{
 		CID:          item.library.RootCID,
 		Name:         rootName,
@@ -462,12 +465,27 @@ func (m *Manager) scan115(ctx context.Context, item job, stage bool) (counters, 
 		if err != nil {
 			return counts, fmt.Errorf("list %s: %w", current.RelativePath, err)
 		}
+		if current.CID == item.library.RootCID && len(files) == 0 {
+			var existingBooks int64
+			_ = m.store.DB().QueryRowContext(ctx, `SELECT count(*) FROM books WHERE library_id=?`, item.library.ID).Scan(&existingBooks)
+			if existingBooks > 0 {
+				return counts, fmt.Errorf("115 library root appears empty (0 entries) while %d books exist in database; refusing to wipe catalog (check 115 account auth or directory status)", existingBooks)
+			}
+		}
 		counts.directories++
 		var comics []oneonefive.File
 		for _, file := range files {
 			if file.IsDir {
+				childCID := strings.TrimSpace(file.ID)
+				if childCID == "" {
+					return counts, fmt.Errorf("list %s: directory %q returned empty cid", current.RelativePath, file.Name)
+				}
+				if visitedCID[childCID] {
+					continue
+				}
+				visitedCID[childCID] = true
 				queue = append(queue, queueDir{
-					CID:          file.ID,
+					CID:          childCID,
 					Name:         file.Name,
 					RelativePath: path.Join(current.RelativePath, file.Name),
 					ModifiedAt:   file.ModifiedAt,

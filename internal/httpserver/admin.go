@@ -22,6 +22,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/id"
 	"github.com/xJogger/fake-komga-115/internal/localfs"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
+	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/pipeline"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
@@ -324,6 +325,37 @@ func (s *Server) refreshAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, info)
 }
 
+type folder115Item struct {
+	ID       string `json:"id"`
+	FileID   string `json:"fileId"`
+	ParentID string `json:"parentId"`
+	Name     string `json:"name"`
+	PickCode string `json:"pickCode"`
+	IsDir    bool   `json:"isDir"`
+}
+
+func filter115Folders(files []oneonefive.File) []folder115Item {
+	folders := make([]folder115Item, 0)
+	for _, file := range files {
+		if !file.IsDir {
+			continue
+		}
+		fid := strings.TrimSpace(file.ID)
+		if fid == "" {
+			continue
+		}
+		folders = append(folders, folder115Item{
+			ID:       fid,
+			FileID:   fid,
+			ParentID: file.ParentID,
+			Name:     file.Name,
+			PickCode: file.PickCode,
+			IsDir:    true,
+		})
+	}
+	return folders
+}
+
 func (s *Server) list115Folders(w http.ResponseWriter, r *http.Request) {
 	cid := strings.TrimSpace(r.URL.Query().Get("cid"))
 	if cid == "" {
@@ -334,13 +366,7 @@ func (s *Server) list115Folders(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "ONEONEFIVE_LIST_FAILED", err.Error())
 		return
 	}
-	folders := make([]any, 0)
-	for _, file := range files {
-		if file.IsDir {
-			folders = append(folders, file)
-		}
-	}
-	writeJSON(w, 200, map[string]any{"cid": cid, "folders": folders})
+	writeJSON(w, 200, map[string]any{"cid": cid, "folders": filter115Folders(files)})
 }
 
 func (s *Server) listLocalFolders(w http.ResponseWriter, r *http.Request) {

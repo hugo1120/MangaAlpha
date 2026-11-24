@@ -192,23 +192,46 @@ func (c *Client) ListDirectory(ctx context.Context, cid string) ([]File, error) 
 	if err != nil {
 		return nil, err
 	}
-	const pageSize int64 = 1150
-	var out []File
-	for offset := int64(0); ; offset += pageSize {
+	return collectDirectoryPages(ctx, cid, func(ctx context.Context, cid string, limit, offset int64) (*sdk.GetFilesResp, error) {
 		if err := c.wait(ctx); err != nil {
 			return nil, err
 		}
-		response, err := client.GetFiles(ctx, &sdk.GetFilesReq{
+		return client.GetFiles(ctx, &sdk.GetFilesReq{
 			CID:     cid,
-			Limit:   pageSize,
+			Limit:   limit,
 			Offset:  offset,
 			ASC:     true,
 			O:       "file_name",
 			ShowDir: true,
 			Cur:     1,
 		})
+	})
+}
+
+func collectDirectoryPages(
+	ctx context.Context,
+	cid string,
+	fetch func(ctx context.Context, cid string, limit, offset int64) (*sdk.GetFilesResp, error),
+) ([]File, error) {
+	const pageSize int64 = 1150
+	var out []File
+	var expectedCount int64
+	for offset := int64(0); ; {
+		response, err := fetch(ctx, cid, pageSize, offset)
 		if err != nil {
 			return nil, err
+		}
+		if response == nil {
+			return nil, fmt.Errorf("115 directory listing for %s returned nil response", cid)
+		}
+		if response.Count > expectedCount {
+			expectedCount = response.Count
+		}
+		if len(response.Data) == 0 {
+			if expectedCount > 0 && int64(len(out)) < expectedCount {
+				return nil, fmt.Errorf("115 directory listing for %s stopped early (%d/%d entries)", cid, len(out), expectedCount)
+			}
+			break
 		}
 		for _, item := range response.Data {
 			out = append(out, File{
@@ -224,7 +247,12 @@ func (c *Client) ListDirectory(ctx context.Context, cid string) ([]File, error) 
 				Incomplete: item.Fta != "" && item.Fta != "1",
 			})
 		}
-		if int64(len(out)) >= response.Count || len(response.Data) == 0 {
+		offset += int64(len(response.Data))
+		if expectedCount > 0 {
+			if int64(len(out)) >= expectedCount {
+				break
+			}
+		} else if int64(len(response.Data)) < pageSize {
 			break
 		}
 	}

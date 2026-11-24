@@ -2936,10 +2936,15 @@
       document.getElementById('nl-webdav-box').style.display = v === 'webdav' ? '' : 'none';
       document.getElementById('nl-union-box').style.display = v === 'union' ? '' : 'none';
       document.getElementById('nl-oneshot-wrap').style.display = v === 'union' ? 'none' : '';
-      document.getElementById('nl-browser-drawer').style.display = 'none';
+      const drawer = document.getElementById('nl-browser-drawer');
+      if (drawer) {
+        drawer._browseSeq = (Number(drawer._browseSeq) || 0) + 1;
+        drawer.style.display = 'none';
+        drawer.innerHTML = '';
+      }
     };
 
-    document.getElementById('nl-browse-115').onclick = () => browse115Drawer('0', ['0']);
+    document.getElementById('nl-browse-115').onclick = () => browse115Drawer('0', [{ cid: '0', name: '115 根目录' }]);
     const localPath = document.getElementById('nl-local-path');
     const browseLocal = document.getElementById('nl-browse-local');
     if (navigator.userAgent.includes('FK115Android/')) {
@@ -3369,46 +3374,102 @@
   async function browse115Drawer(cid, stack) {
     const drawer = document.getElementById('nl-browser-drawer');
     if (!drawer) return;
+    const reqSeq = (drawer._browseSeq = (Number(drawer._browseSeq) || 0) + 1);
+    const targetCID = String(cid || '').trim() || '0';
+    const trail = Array.isArray(stack) && stack.length > 0
+      ? stack.map((item) => (typeof item === 'string' ? { cid: item || '0', name: item === '0' ? '115 根目录' : item } : item))
+      : [{ cid: targetCID, name: targetCID === '0' ? '115 根目录' : targetCID }];
     drawer.style.display = '';
     drawer.innerHTML = `<div class="folder-browser">正在读取 115 目录…</div>`;
     try {
-      const res = await api(`/admin/api/115/folders?cid=${encodeURIComponent(cid)}`);
-      const folders = res.folders || [];
+      const res = await api(`/admin/api/115/folders?cid=${encodeURIComponent(targetCID)}`);
+      if (reqSeq !== drawer._browseSeq || drawer.isConnected === false) return;
+      const currentCID = String((res && res.cid) || targetCID).trim() || '0';
+      const currentNode = trail[trail.length - 1] || { cid: currentCID, name: currentCID === '0' ? '115 根目录' : currentCID };
+      const breadcrumb = trail.map((n) => n.name || n.cid).join(' / ');
+      const folders = (res && Array.isArray(res.folders)) ? res.folders : [];
       drawer.innerHTML = `
         <div class="folder-browser">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px 8px;padding:4px 8px;border-bottom:1px solid var(--border)">
-            <span style="font-size:12px;color:var(--text-muted);word-break:break-all">当前 CID: ${esc(cid)}</span>
-            ${stack.length > 1 ? `<button type="button" class="btn btn-sm" id="b115-up">返回上级</button>` : ''}
+            <span style="font-size:12px;color:var(--text-muted);word-break:break-all;min-width:0">${esc(breadcrumb)} <code style="font-size:11.5px">(CID: ${esc(currentCID)})</code></span>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              ${trail.length > 1 ? `<button type="button" class="btn btn-sm" id="b115-up">返回上级</button>` : ''}
+              <button type="button" class="btn btn-sm btn-primary" id="b115-pick-cur">选用当前目录</button>
+            </div>
           </div>
-          ${folders.map((f) => `
-            <div class="folder-item">
-              <span data-b115-open="${esc(f.fileId)}" style="flex:1">📁 ${esc(f.name)} <small style="color:var(--text-muted)">(${esc(f.fileId)})</small></span>
-              <button type="button" class="btn btn-sm btn-primary" data-b115-pick="${esc(f.fileId)}" data-b115-name="${esc(f.name)}">选用</button>
-            </div>`).join('') || `<div style="padding:12px;color:var(--text-muted)">此目录下没有子文件夹</div>`}
+          ${folders.map((f) => {
+            const fid = String((f && (f.id || f.fileId)) || '').trim();
+            if (!fid) return '';
+            return `
+              <div class="folder-item">
+                <span data-b115-open="${esc(fid)}" data-b115-name="${esc(f.name)}" style="flex:1;cursor:pointer">📁 ${esc(f.name)} <small style="color:var(--text-muted)">(${esc(fid)})</small></span>
+                <button type="button" class="btn btn-sm" data-b115-pick="${esc(fid)}" data-b115-name="${esc(f.name)}">选用</button>
+              </div>`;
+          }).join('') || `<div style="padding:12px;color:var(--text-muted)">此目录下没有子文件夹</div>`}
         </div>`;
       const up = document.getElementById('b115-up');
-      if (up) up.onclick = () => { stack.pop(); browse115Drawer(stack[stack.length - 1], stack); };
+      if (up) {
+        up.onclick = () => {
+          const prevTrail = trail.slice(0, -1);
+          const prev = prevTrail[prevTrail.length - 1] || { cid: '0', name: '115 根目录' };
+          return browse115Drawer(prev.cid, prevTrail);
+        };
+      }
+      const pickCur = document.getElementById('b115-pick-cur');
+      if (pickCur) {
+        pickCur.onclick = () => {
+          document.getElementById('nl-cid').value = currentCID;
+          const nameInput = document.getElementById('nl-name');
+          if (nameInput && !nameInput.value.trim() && currentCID !== '0' && currentNode.name) {
+            nameInput.value = currentNode.name;
+          }
+          drawer.style.display = 'none';
+        };
+      }
       drawer.querySelectorAll('[data-b115-open]').forEach((el) => {
-        el.onclick = () => { const next = el.getAttribute('data-b115-open'); stack.push(next); browse115Drawer(next, stack); };
+        el.onclick = () => {
+          const next = String(el.getAttribute('data-b115-open') || '').trim();
+          if (!next) return;
+          const nextName = el.getAttribute('data-b115-name') || next;
+          return browse115Drawer(next, trail.concat({ cid: next, name: nextName }));
+        };
       });
       drawer.querySelectorAll('[data-b115-pick]').forEach((btn) => {
         btn.onclick = () => {
-          document.getElementById('nl-cid').value = btn.getAttribute('data-b115-pick');
+          const picked = String(btn.getAttribute('data-b115-pick') || '').trim();
+          if (!picked) return;
+          document.getElementById('nl-cid').value = picked;
           const nameInput = document.getElementById('nl-name');
-          if (!nameInput.value.trim()) nameInput.value = btn.getAttribute('data-b115-name');
+          if (nameInput && !nameInput.value.trim()) nameInput.value = btn.getAttribute('data-b115-name') || '';
           drawer.style.display = 'none';
         };
       });
-    } catch (err) { drawer.innerHTML = `<div class="folder-browser" style="color:var(--danger);padding:10px">${esc(err.message)}</div>`; }
+    } catch (err) {
+      if (reqSeq !== drawer._browseSeq || drawer.isConnected === false) return;
+      drawer.innerHTML = `<div class="folder-browser" style="padding:10px;display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="color:var(--danger)">${esc(err.message)}</span>
+        ${trail.length > 1 ? `<button type="button" class="btn btn-sm" id="b115-err-up">返回上级</button>` : ''}
+      </div>`;
+      const errUp = document.getElementById('b115-err-up');
+      if (errUp) {
+        errUp.onclick = () => {
+          const prevTrail = trail.slice(0, -1);
+          const prev = prevTrail[prevTrail.length - 1] || { cid: '0', name: '115 根目录' };
+          return browse115Drawer(prev.cid, prevTrail);
+        };
+      }
+    }
   }
 
   async function browseLocalDrawer(dirPath) {
     const drawer = document.getElementById('nl-browser-drawer');
     if (!drawer) return;
+    const reqSeq = (drawer._browseSeq = (Number(drawer._browseSeq) || 0) + 1);
     drawer.style.display = '';
     drawer.innerHTML = `<div class="folder-browser">正在读取本地目录…</div>`;
     try {
       const res = await api(`/admin/api/local/folders?path=${encodeURIComponent(dirPath)}`);
+      if (reqSeq !== drawer._browseSeq || drawer.isConnected === false) return;
       const folders = res.folders || [];
       drawer.innerHTML = `
         <div class="folder-browser">
@@ -3442,16 +3503,21 @@
           drawer.style.display = 'none';
         };
       });
-    } catch (err) { drawer.innerHTML = `<div class="folder-browser" style="color:var(--danger);padding:10px">${esc(err.message)}</div>`; }
+    } catch (err) {
+      if (reqSeq !== drawer._browseSeq || drawer.isConnected === false) return;
+      drawer.innerHTML = `<div class="folder-browser" style="color:var(--danger);padding:10px">${esc(err.message)}</div>`;
+    }
   }
 
   async function browseWebDAVDrawer(accountID, remotePath) {
     const drawer = document.getElementById('nl-browser-drawer');
     if (!drawer) return;
+    const reqSeq = (drawer._browseSeq = (Number(drawer._browseSeq) || 0) + 1);
     drawer.style.display = '';
     drawer.innerHTML = `<div class="folder-browser">正在通过 PROPFIND 读取远程目录…</div>`;
     try {
       const res = await api(`/admin/api/webdav-accounts/${encodeURIComponent(accountID)}/folders?path=${encodeURIComponent(remotePath)}`);
+      if (reqSeq !== drawer._browseSeq || drawer.isConnected === false) return;
       // The WebDAV API returns paths relative to the DAV base, under relPath.
       // Never turn a missing child path into a selection of the root.
       const folders = (res.folders || []).filter((folder) =>
@@ -3488,7 +3554,10 @@
           drawer.style.display = 'none';
         };
       });
-    } catch (err) { drawer.innerHTML = `<div class="folder-browser" style="color:var(--danger);padding:10px">${esc(err.message)}</div>`; }
+    } catch (err) {
+      if (reqSeq !== drawer._browseSeq || drawer.isConnected === false) return;
+      drawer.innerHTML = `<div class="folder-browser" style="color:var(--danger);padding:10px">${esc(err.message)}</div>`;
+    }
   }
 
   // --- Admin Bangumi Scraper Center ---

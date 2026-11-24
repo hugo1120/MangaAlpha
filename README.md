@@ -223,6 +223,7 @@ systemctl --user start fake-komga-115
 - **[KOReader](https://koreader.rocks/) 与 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin)**（[@hugo1120](https://github.com/hugo1120)）：为墨水屏设备带来了体验极佳的 OPDS 逐页流式漫画阅读、预取低内存解码与章节导航能力。
 - **Go 核心开源库**：感谢 [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite)（纯 Go 无 CGO SQLite 引擎）、[`nwaples/rardecode`](https://github.com/nwaples/rardecode)（纯 Go RAR4/RAR5 解码器）、[`go-chi/chi`](https://github.com/go-chi/chi) 与 Go 标准库及 `golang.org/x` 团队。
 - **[霞鹜文楷 (LXGW WenKai)](https://github.com/lxgw/LxgwWenKai)**（SIL OFL 1.1）：大版本代号展示所用中文字形子集取材自霞鹜文楷开源字体。
+- **[OpenCC](https://github.com/BYVoid/OpenCC)**（Apache-2.0）：繁简与日文异体字搜索折叠字表（`internal/cjk/table_data.go`）基于 OpenCC 开放词典生成。
 
 <p align="center">
   <img src="docs/images/mangaalpha-stamp.png" alt="MangaAlpha 的 Café Alpha 风格线稿小鱼印章" width="96">
@@ -235,3 +236,4 @@ systemctl --user start fake-komga-115
 - 主服务代码、内置书架与管理后台前端遵循 [MIT License](LICENSE) 开源。
 - 内置网页阅读器（`web/reader/` 与 `/reader/*` 构建产物）基于上游 [Suwayomi-WebUI](https://github.com/Suwayomi/Suwayomi-WebUI) 修改集成，该子模块与衍生适配文件遵循 [Mozilla Public License 2.0 (MPL-2.0)](web/reader/LICENSE)。
 - 内嵌的大版本代号字形子集（`internal/httpserver/static/ui/codename-subset.woff2`）源自 [LXGW WenKai](https://github.com/lxgw/LxgwWenKai)，遵循 [SIL Open Font License 1.1](internal/httpserver/static/ui/LICENSE-LXGW-WenKai-OFL.txt)。
+- CJK 繁简与日文异体字折叠字表（`internal/cjk/table_data.go`）源自 [OpenCC](https://github.com/BYVoid/OpenCC) 开源词典，遵循 Apache License 2.0。

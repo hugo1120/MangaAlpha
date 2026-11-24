@@ -37,7 +37,7 @@ const (
 	SettingArchiveSource        = "bangumi_archive_source"
 	SettingArchiveCustomMetaURL = "bangumi_archive_custom_url"
 	archiveUserAgent            = "xJogger/fake-komga-115/2.5 (https://github.com/xJogger/MangaAlpha)"
-	currentTermsSchemaVersion   = "4"
+	currentTermsSchemaVersion   = "3"
 )
 
 type ArchiveSourceConfig struct {

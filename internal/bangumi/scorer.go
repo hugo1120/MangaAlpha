@@ -282,12 +282,14 @@ func compoundTitleScore(groups []compoundTitle, cand SubjectCandidate) (best flo
 func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScore float64, matchedIdx int, matchedQueryKey, matchedQueryRaw string, matchedExact bool) {
 	var candKeys []string
 	primaryKeys := map[string]bool{}
+	fullKeys := map[string]bool{}
 	addKey := func(raw string, primary bool) {
 		k := NormalizeMatchKey(raw)
 		if k == "" {
 			return
 		}
 		candKeys = appendUniqueText(candKeys, k)
+		fullKeys[k] = true
 		if primary {
 			primaryKeys[k] = true
 		}
@@ -305,6 +307,7 @@ func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScor
 		}
 		if withX := crossTitleKey(simp); withX != "" && withX != k {
 			candKeys = appendUniqueText(candKeys, withX)
+			fullKeys[withX] = true
 			if primary {
 				primaryKeys[withX] = true
 			}
@@ -339,7 +342,7 @@ func ordinaryTitleScore(query ParsedQuery, cand SubjectCandidate) (bestTitleScor
 					matchedIdx = idx
 					matchedQueryKey = qk
 					matchedQueryRaw = qRaw
-					matchedExact = key == ck
+					matchedExact = key == ck && fullKeys[ck]
 				}
 			}
 		}

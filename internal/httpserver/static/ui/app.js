@@ -665,7 +665,7 @@
   function renderShell(activeNav, innerHTML, searchVal = '') {
     const app = document.getElementById('app');
     const admin = isAdminUser();
-    const accountLink = admin ? '/admin?tab=security' : '/account';
+    const accountLink = '/account';
     app.innerHTML = `
       <header class="topbar">
         <div class="topbar-inner">
@@ -689,7 +689,7 @@
           </form>
           <div class="topbar-actions">
             <button type="button" class="btn btn-sm" id="theme-toggle-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
-            ${state.auth.username ? `<a href="${accountLink}" data-nav class="user-pill" title="当前登录账号（点击前往设置）">${esc(state.auth.username)}</a>` : ''}
+            ${state.auth.username ? `<a href="${accountLink}" data-nav class="user-pill" title="个人账号设置、显示偏好与 API Key">${esc(state.auth.username)}</a>` : ''}
             ${admin && activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/settings">手机端设置</a><a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
             <button type="button" class="btn btn-sm" id="logout-btn">退出</button>
           </div>
@@ -2091,7 +2091,13 @@
       return;
     }
     const sp = new URLSearchParams(location.search);
-    const tab = sp.get('tab') || state.adminTab || 'overview';
+    const requestedTab = sp.get('tab') || state.adminTab || 'overview';
+    if (requestedTab === 'security') {
+      const pk = (sp.get('presetKey') || '').trim();
+      navigate(pk ? `/account?presetKey=${encodeURIComponent(pk)}` : '/account', true);
+      return;
+    }
+    const tab = requestedTab;
     state.adminTab = tab;
     document.title = '管理后台 · MangaAlpha';
 
@@ -2103,7 +2109,6 @@
       ['jobs', '后台任务'],
       ['settings', '缓存与设置'],
       ['users', '用户管理'],
-      ['security', '账号与 API Key'],
     ];
 
     renderShell('admin', `
@@ -2139,7 +2144,6 @@
       case 'jobs': await renderAdminJobs(body); break;
       case 'settings': await renderAdminSettings(body); break;
       case 'users': await renderAdminUsers(body); break;
-      case 'security': await renderAdminSecurity(body); break;
       default: await renderAdminOverview(body); break;
     }
   }
@@ -2214,7 +2218,7 @@
       <div class="grid-2">
         <div class="card">
           <h3>客户端接入地址（Koharia / Mihon / KOReader）</h3>
-          <p style="color:var(--text-secondary);font-size:13px">使用管理员账号密码（HTTP Basic）或在「账号与 API Key」页签生成专属 API Key 登录（KOReader 仅需填用户名密码）：</p>
+          <p style="color:var(--text-secondary);font-size:13px">使用账号密码（HTTP Basic）或在右上角进入 <a href="/account" data-nav style="color:var(--accent)">「账号设置」</a> 生成专属 API Key 登录（KOReader 仅需填用户名密码）：</p>
           <div style="display:grid;gap:8px;margin-top:10px">
             <div style="font-size:12.5px;color:var(--text-secondary)">
               <strong>Komga 客户端</strong>（推荐 <a href="https://github.com/Mister-album/Koharia" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Koharia ↗</a> Android 阅读器，或 <a href="https://mihon.app/" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Mihon ↗</a> Komga 扩展）
@@ -3269,7 +3273,7 @@
       api('/admin/api/bangumi/status'),
       api('/admin/api/bangumi/runs?limit=20'),
       api('/admin/api/libraries'),
-      api('/admin/api/bangumi/tracker?limit=20').catch(() => ({ enabled: false, hasToken: false, nsfwMode: 'skip', privateDefault: false, records: [] })),
+      api('/admin/api/bangumi/tracker?limit=0').catch(() => ({})),
     ]);
     paintAdminBangumi(body, st, runs || [], libs || [], tracker || {});
   }
@@ -3279,23 +3283,17 @@
     const archSrc = st.archiveSource || { source: 'zh_cn', customUrl: '', metaUrl: '' };
     const defaultDowForSrc = archSrc.source === 'official' ? 3 : 4;
     const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: defaultDowForSrc, dayOfMonth: 1, timeOfDay: '06:00' };
-    const tr = tracker || { enabled: false, hasToken: false, username: '', nickname: '', nsfwMode: 'skip', privateDefault: false, records: [] };
-    const trRecords = Array.isArray(tr.records) ? tr.records : [];
+    const tr = tracker || {};
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
     const prevInput = document.getElementById('bgm-proxy-url');
     const editingProxy = prevInput && document.activeElement === prevInput;
     const proxyInputVal = editingProxy ? prevInput.value : (st.proxyUrl || '');
     const selStart = editingProxy ? prevInput.selectionStart : null;
     const selEnd = editingProxy ? prevInput.selectionEnd : null;
-    const trackerForm = document.getElementById('bgm-tracker-form');
-    const editingTracker = trackerForm && trackerForm.contains(document.activeElement);
-    const trackerTokenDraft = editingTracker ? (document.getElementById('bgm-tracker-token')?.value || '') : '';
-    const trackerEnabledDraft = editingTracker ? !!document.getElementById('bgm-tracker-enabled')?.checked : !!tr.enabled;
-    const trackerNsfwDraft = editingTracker ? (document.getElementById('bgm-tracker-nsfw-mode')?.value || tr.nsfwMode || 'skip') : (tr.nsfwMode || 'skip');
-    const trackerPrivateDraft = editingTracker ? !!document.getElementById('bgm-tracker-private-default')?.checked : !!tr.privateDefault;
-    const trackerCustomIDDraft = editingTracker ? (document.getElementById('bgm-tracker-oauth-cid')?.value ?? (tr.customOAuthClientId || '')) : (tr.customOAuthClientId || '');
-    const trackerCustomSecDraft = editingTracker ? (document.getElementById('bgm-tracker-oauth-csec')?.value || '') : '';
-    const trackerManualCodeDraft = editingTracker ? (document.getElementById('bgm-tracker-oauth-manual-code')?.value || '') : '';
+    const oauthAppBox = document.getElementById('bgm-oauth-app-box');
+    const editingOAuthApp = oauthAppBox && oauthAppBox.contains(document.activeElement);
+    const trackerCustomIDDraft = editingOAuthApp ? (document.getElementById('bgm-tracker-oauth-cid')?.value ?? (tr.customOAuthClientId || '')) : (tr.customOAuthClientId || '');
+    const trackerCustomSecDraft = editingOAuthApp ? (document.getElementById('bgm-tracker-oauth-csec')?.value || '') : '';
     const agentIncludeNsfw = !!state.bgmAgentIncludeNsfw;
     const buildAgentPrompt = (includeNsfw) => {
       const base = location.origin;
@@ -3491,133 +3489,33 @@
         <pre id="bgm-agent-prompt-box" class="code-box" style="margin:0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.6;user-select:all">${esc(agentPromptText)}</pre>
       </div>
 
-      <div class="card">
-        <div class="section-head" style="margin-bottom:8px">
-          <h3>Bangumi 进度追踪器（单向自动同步）</h3>
-          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">
-            ${tr.hasToken
-              ? `<span class="badge ${tr.enabled ? 'badge-success' : ''}">${tr.enabled ? '已启用自动同步' : '已绑定（未开启同步）'}${tr.nickname || tr.username ? ` · ${esc(tr.nickname || tr.username)}${tr.username ? ` (@${esc(tr.username)})` : ''}` : ''}</span>`
-              : `<span class="badge">未绑定 Bangumi 账号</span>`}
-            ${tr.hasToken ? `<span class="badge ${tr.autoRefresh ? 'badge-accent' : ''}">${tr.autoRefresh ? 'OAuth 自动续期' : 'Personal Access Token'}</span>` : ''}
-            ${tr.hasToken && tr.expired ? `<span class="badge badge-danger">授权已过期</span>` : (tr.hasToken && tr.expiresSoon ? `<span class="badge" style="color:var(--warn);border-color:var(--warn)">即将到期</span>` : '')}
+      <div class="card" id="bgm-oauth-app-box">
+        <div class="section-head" style="margin-bottom:8px;flex-wrap:wrap;gap:8px">
+          <div>
+            <h3 style="margin:0 0 4px">Bangumi 进度追踪器（全局 OAuth 应用配置）</h3>
+            <div style="font-size:12.5px;color:var(--text-secondary)">
+              每个账号独立绑定自己的 Bangumi 进度同步；管理员和普通用户均可在个人「账号设置」中管理自己的授权、开关与同步记录。
+            </div>
+          </div>
+          <a href="/account" data-nav class="btn btn-sm btn-primary">前往「账号设置」管理我的同步 →</a>
+        </div>
+        <div style="margin-top:10px;padding:10px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+          <div style="font-size:12.5px;font-weight:600;color:var(--text-secondary);margin-bottom:6px">
+            全局自定义 Bangumi OAuth App（可选，默认使用官方内置应用${tr.usingCustomOAuthApp ? ' · 当前已启用自定义 App' : ''}）
+          </div>
+          <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px">
+            如需覆盖全服 OAuth 应用，可在 <a href="https://bgm.tv/dev/app" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">bgm.tv/dev/app ↗</a> 自建应用（回调地址留空即可）并填入下方，对全站所有用户生效。
+          </div>
+          <div class="inline-action-bar">
+            <input type="text" id="bgm-tracker-oauth-cid" value="${esc(trackerCustomIDDraft)}" placeholder="自定义 App ID（例如 bgm...）"
+              style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+            <input type="password" id="bgm-tracker-oauth-csec" autocomplete="off" value="${esc(trackerCustomSecDraft)}"
+              placeholder="${tr.hasCustomOAuthSecret ? '已保存自定义 App Secret（留空保持不变）' : '自定义 App Secret'}"
+              style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+            <button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-save">保存自定义 App</button>
+            ${tr.usingCustomOAuthApp ? `<button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-reset">恢复默认内置 App</button>` : ''}
           </div>
         </div>
-        <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-secondary);line-height:1.65">
-          将<strong>后续新增</strong>的阅读进度自动单向推送到你的 Bangumi 收藏（兼容内置阅读器、Android 端、Mihon、Koharia 与 KOReader OPDS，复用上方 Bangumi 网络代理，不会批量回写历史进度）。
-          推荐使用下方 <strong>Bangumi OAuth 一键授权</strong>：服务端会在到期前自动使用 <code>refresh_token</code> 滚动续期，长期免维护。
-        </p>
-        ${tr.hasToken ? `
-          <div style="display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-bottom:10px;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border);font-size:12px;color:var(--text-secondary)">
-            <span>当前方式：<strong>${tr.autoRefresh ? `Bangumi OAuth（${tr.usingCustomOAuthApp ? '自定义应用' : '官方内置应用'}，自动续期）` : 'Personal Access Token（最长 1 年，需到期更换）'}</strong></span>
-            ${tr.expiresAt ? `<span>当前令牌到期：<strong style="color:${tr.expired ? 'var(--danger)' : tr.expiresSoon ? 'var(--warn)' : 'var(--text)'}">${esc(fmtTime(tr.expiresAt))}</strong></span>` : ''}
-            ${tr.lastRefreshAt ? `<span>最近刷新：${esc(fmtTime(tr.lastRefreshAt))}</span>` : ''}
-            ${tr.lastRefreshError ? `<span style="color:var(--danger)">最近刷新失败：${esc(tr.lastRefreshError)}</span>` : ''}
-          </div>` : ''}
-        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">
-          <button type="button" class="btn btn-bgm" id="bgm-tracker-oauth-start">${tr.hasToken && tr.autoRefresh ? '重新进行 Bangumi OAuth 授权' : '使用 Bangumi OAuth 一键授权（推荐 · 自动续期）'}</button>
-          ${tr.hasToken && tr.autoRefresh ? `<button type="button" class="btn btn-sm" id="bgm-tracker-oauth-refresh">立即刷新授权</button>` : ''}
-          ${tr.hasToken ? `<button type="button" class="btn btn-sm" id="bgm-tracker-test">测试连接</button>` : ''}
-          ${tr.hasToken ? `<button type="button" class="btn btn-sm btn-danger" id="bgm-tracker-clear">解绑清空</button>` : ''}
-        </div>
-        <form id="bgm-tracker-form" style="display:grid;gap:10px">
-          <div style="display:flex;flex-wrap:wrap;gap:16px;align-items:center">
-            <label class="check-row" style="font-size:13px;font-weight:600;color:var(--text)">
-              <input type="checkbox" id="bgm-tracker-enabled" ${trackerEnabledDraft ? 'checked' : ''}>
-              <span>启用自动单向同步</span>
-            </label>
-            <label style="display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--text-secondary)">
-              <span>NSFW 策略：</span>
-              <select id="bgm-tracker-nsfw-mode" style="height:32px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
-                <option value="skip" ${trackerNsfwDraft === 'skip' ? 'selected' : ''}>跳过 NSFW 作品不同步（默认）</option>
-                <option value="private" ${trackerNsfwDraft === 'private' ? 'selected' : ''}>以私密收藏（private）同步 NSFW</option>
-              </select>
-            </label>
-            <label class="check-row" style="font-size:12.5px;color:var(--text-secondary)">
-              <input type="checkbox" id="bgm-tracker-private-default" ${trackerPrivateDraft ? 'checked' : ''}>
-              <span>新建普通作品收藏时默认设为私密（仅自己可见）</span>
-            </label>
-            <button type="submit" class="btn btn-primary btn-sm" id="bgm-tracker-save">保存追踪设置</button>
-          </div>
-
-          <details style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-input)">
-            <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary)">备选方式：手动粘贴 Personal Access Token（最长 1 年有效期）</summary>
-            <div style="margin-top:8px;font-size:12px;color:var(--text-muted);line-height:1.6">
-              若不方便走 OAuth 弹窗，也可前往 <a href="https://next.bgm.tv/demo/access-token" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Bangumi Personal Access Token 页面 ↗</a> 生成个人令牌粘贴到下方（Token 仅保存于本地 SQLite，绝不明文回传）。
-            </div>
-            <div class="inline-action-bar" style="margin-top:8px">
-              <input type="password" id="bgm-tracker-token" autocomplete="off" value="${esc(trackerTokenDraft)}"
-                placeholder="${tr.hasToken && !tr.autoRefresh ? '已保存 Personal Access Token（留空保持不变，输入新值可替换）' : '粘贴 Bangumi Personal Access Token'}"
-                style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
-              <button type="submit" class="btn btn-sm btn-primary" id="bgm-tracker-pat-save">验证并保存 PAT</button>
-              <button type="button" class="btn btn-sm" id="bgm-tracker-pat-test">测试输入 Token</button>
-            </div>
-          </details>
-
-          <details style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;background:var(--bg-input)">
-            <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary)">高级选项：手动粘贴 OAuth 回调链接 / 自定义 Bangumi App${tr.usingCustomOAuthApp ? '（已启用自定义 App）' : ''}</summary>
-            <div style="display:grid;gap:10px;margin-top:10px">
-              <div>
-                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">① 弹窗被拦截时手动完成 OAuth 回调：</div>
-                <div class="inline-action-bar">
-                  <input type="text" id="bgm-tracker-oauth-manual-code" value="${esc(trackerManualCodeDraft)}"
-                    placeholder="粘贴跳转后的完整回调 URL（含 ?code=...）或纯 code"
-                    style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
-                  <button type="button" class="btn btn-sm" id="bgm-tracker-oauth-manual-submit">提交完成授权</button>
-                </div>
-              </div>
-              <div>
-                <div style="font-size:12px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">② 覆盖内置官方 OAuth App（可选，自建于 <a href="https://bgm.tv/dev/app" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">bgm.tv/dev/app ↗</a>，回调地址留空即可）：</div>
-                <div class="inline-action-bar">
-                  <input type="text" id="bgm-tracker-oauth-cid" value="${esc(trackerCustomIDDraft)}" placeholder="自定义 App ID（例如 bgm...）"
-                    style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
-                  <input type="password" id="bgm-tracker-oauth-csec" autocomplete="off" value="${esc(trackerCustomSecDraft)}"
-                    placeholder="${tr.hasCustomOAuthSecret ? '已保存自定义 App Secret（留空保持不变）' : '自定义 App Secret'}"
-                    style="height:34px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
-                  <button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-save">保存自定义 App</button>
-                  ${tr.usingCustomOAuthApp ? `<button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-reset">恢复默认内置 App</button>` : ''}
-                </div>
-              </div>
-            </div>
-          </details>
-
-          <div style="font-size:12px;color:var(--text-muted);line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
-            <strong>同步规则与提示：</strong>
-            ① 卷数进度按本地已读完的最高文件序号单调递增同步（受 Bangumi 总卷数封顶，不会回退）；<strong>若某部作品本地是按单话（而非单行本）拆分存放，推送的卷数可能偏快，请知悉。</strong>
-            ② 开始阅读会将未收藏/「想读」推进为「在读」；仅当 Bangumi 状态已完结（<code>ENDED</code>）且本地卷全部读完（达到总卷数）或单本读完时才会标记「读过」。
-            ③ 仅增量更新状态与卷数，<strong>绝不覆盖你在 Bangumi 已写的评分、吐槽、标签，也不会降级已标记的「读过 / 搁置 / 抛弃」状态</strong>（修改评分与状态请直接点击作品页的 Bangumi 链接前往操作）。
-          </div>
-        </form>
-        <div id="bgm-tracker-test-result" style="margin-top:8px;font-size:12.5px"></div>
-        ${trRecords.length > 0 ? `
-          <div style="margin-top:12px">
-            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--text-secondary)">最近同步记录（最多 20 条）</div>
-            <div class="table-wrap"><table class="data-table">
-              <thead><tr><th>作品</th><th>Bangumi 条目</th><th>状态</th><th>远端进度</th><th>更新时间 / 说明</th><th>操作</th></tr></thead>
-              <tbody>
-                ${trRecords.map((rec) => {
-                  const statusBadge = rec.status === 'synced'
-                    ? `<span class="badge badge-success">已同步</span>`
-                    : rec.status === 'skipped'
-                      ? `<span class="badge">已跳过</span>`
-                      : `<span class="badge badge-danger">失败</span>`;
-                  const progParts = [];
-                  const tLbl = fmtBgmCollectionType(rec.remoteType);
-                  if (tLbl) progParts.push(tLbl);
-                  if (rec.remoteVolStatus > 0) progParts.push(`第 ${rec.remoteVolStatus} 卷`);
-                  if (rec.remotePrivate) progParts.push('私密');
-                  return `
-                    <tr>
-                      <td>${rec.seriesId ? `<a href="/series/${encodeURIComponent(rec.seriesId)}" data-nav style="color:var(--accent);font-weight:500">${esc(rec.seriesTitle || rec.seriesId)}</a>` : esc(rec.seriesTitle || '—')}</td>
-                      <td><a href="https://bgm.tv/subject/${rec.bgmSubjectId}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm">#${rec.bgmSubjectId} ↗</a></td>
-                      <td>${statusBadge}</td>
-                      <td style="font-size:12px">${esc(progParts.join(' · ') || '—')}</td>
-                      <td class="cell-wrap" style="font-size:12px;color:${rec.status === 'failed' ? 'var(--danger)' : 'var(--text-muted)'}">${esc(rec.lastError || fmtTime(rec.lastSyncedAt || rec.updatedAt))}</td>
-                      <td>${rec.seriesId && rec.status === 'failed' ? `<button type="button" class="btn btn-sm" data-retry-tracker-series="${esc(rec.seriesId)}">重试</button>` : ''}</td>
-                    </tr>`;
-                }).join('')}
-              </tbody>
-            </table></div>
-          </div>` : ''}
       </div>
 
       <div class="card">
@@ -3854,70 +3752,6 @@
       };
     }
 
-    const oauthStartBtn = document.getElementById('bgm-tracker-oauth-start');
-    if (oauthStartBtn) {
-      oauthStartBtn.onclick = async () => {
-        oauthStartBtn.disabled = true;
-        const box = document.getElementById('bgm-tracker-test-result');
-        if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在生成 Bangumi OAuth 授权链接…</span>`;
-        try {
-          const rep = await api('/admin/api/bangumi/tracker/oauth/start', { method: 'POST' });
-          state.bgmOAuthLastState = rep.state || '';
-          const popup = window.open(rep.authorizeUrl, 'mangaalpha_bgm_oauth', 'width=560,height=720');
-          if (!popup) {
-            if (box) {
-              box.innerHTML = `<span style="color:var(--warn)">浏览器拦截了弹窗，请点此 <a href="${esc(rep.authorizeUrl)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent);font-weight:600">手动打开 Bangumi 授权页 ↗</a></span>`;
-            }
-          } else if (box) {
-            box.innerHTML = `<span style="color:var(--text-secondary)">已打开 Bangumi 授权窗口，请在弹出的页面中点击「同意授权」…</span>`;
-          }
-          state.bgmOAuthRefreshTarget = body;
-        } catch (err) {
-          toast(err.message || '启动 OAuth 授权失败', 'error');
-          if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
-        } finally {
-          oauthStartBtn.disabled = false;
-        }
-      };
-    }
-    const oauthRefreshBtn = document.getElementById('bgm-tracker-oauth-refresh');
-    if (oauthRefreshBtn) {
-      oauthRefreshBtn.onclick = async () => {
-        oauthRefreshBtn.disabled = true;
-        const box = document.getElementById('bgm-tracker-test-result');
-        if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在通过 refresh_token 刷新 Bangumi 授权…</span>`;
-        try {
-          await api('/admin/api/bangumi/tracker/oauth/refresh', { method: 'POST' });
-          toast('Bangumi OAuth 授权已刷新续期');
-          renderAdminBangumi(body);
-        } catch (err) {
-          toast(err.message || '刷新授权失败', 'error');
-          if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
-        } finally {
-          oauthRefreshBtn.disabled = false;
-        }
-      };
-    }
-    const oauthManualBtn = document.getElementById('bgm-tracker-oauth-manual-submit');
-    if (oauthManualBtn) {
-      oauthManualBtn.onclick = async () => {
-        const val = (document.getElementById('bgm-tracker-oauth-manual-code')?.value || '').trim();
-        if (!val) { toast('请先粘贴回调链接或授权码 code', 'error'); return; }
-        oauthManualBtn.disabled = true;
-        try {
-          await api('/admin/api/bangumi/tracker/oauth/exchange', {
-            method: 'POST',
-            body: { codeOrUrl: val, state: state.bgmOAuthLastState || '' },
-          });
-          toast('Bangumi OAuth 授权绑定成功');
-          renderAdminBangumi(body);
-        } catch (err) {
-          toast(err.message || '换取 OAuth Token 失败', 'error');
-        } finally {
-          oauthManualBtn.disabled = false;
-        }
-      };
-    }
     const oauthAppSaveBtn = document.getElementById('bgm-tracker-oauth-app-save');
     if (oauthAppSaveBtn) {
       oauthAppSaveBtn.onclick = async () => {
@@ -3928,7 +3762,7 @@
           const payload = { customOAuthClientId: cid };
           if (csec) payload.customOAuthClientSecret = csec;
           await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: payload });
-          toast('自定义 Bangumi OAuth App 配置已保存，点击上方「OAuth 一键授权」即可使用');
+          toast('全局自定义 Bangumi OAuth App 配置已保存');
           renderAdminBangumi(body);
         } catch (err) {
           toast(err.message || '保存自定义 OAuth App 失败', 'error');
@@ -3948,88 +3782,6 @@
         } catch (err) { toast(err.message, 'error'); }
       };
     }
-
-    const trackerFormEl = document.getElementById('bgm-tracker-form');
-    if (trackerFormEl) {
-      trackerFormEl.onsubmit = async (e) => {
-        e.preventDefault();
-        const saveBtn = document.getElementById('bgm-tracker-save');
-        const tokVal = (document.getElementById('bgm-tracker-token')?.value || '').trim();
-        const enabledVal = !!document.getElementById('bgm-tracker-enabled')?.checked;
-        const nsfwModeVal = document.getElementById('bgm-tracker-nsfw-mode')?.value || 'skip';
-        const privateDefaultVal = !!document.getElementById('bgm-tracker-private-default')?.checked;
-        if (saveBtn) saveBtn.disabled = true;
-        try {
-          const payload = {
-            enabled: enabledVal,
-            nsfwMode: nsfwModeVal,
-            privateDefault: privateDefaultVal,
-          };
-          if (tokVal) payload.accessToken = tokVal;
-          await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: payload });
-          toast(tokVal ? 'Bangumi Token 验证通过，追踪器配置已保存' : 'Bangumi 追踪器配置已保存');
-          renderAdminBangumi(body);
-        } catch (err) {
-          toast(err.message || '保存追踪器配置失败', 'error');
-        } finally {
-          if (saveBtn) saveBtn.disabled = false;
-        }
-      };
-    }
-    const runTrackerTest = async (btn, useInputToken) => {
-      if (!btn) return;
-      btn.disabled = true;
-      const box = document.getElementById('bgm-tracker-test-result');
-      const tokVal = useInputToken ? (document.getElementById('bgm-tracker-token')?.value || '').trim() : '';
-      if (box) box.innerHTML = `<span style="color:var(--text-secondary)">正在连接 api.bgm.tv 验证授权…</span>`;
-      try {
-        const rep = await api('/admin/api/bangumi/tracker/test', {
-          method: 'POST',
-          body: tokVal ? { accessToken: tokVal } : {},
-        });
-        if (rep && rep.ok) {
-          if (box) {
-            box.innerHTML = `<span style="color:var(--success)">✅ 授权有效：${esc(rep.nickname || rep.username)}${rep.username ? ` (@${esc(rep.username)})` : ''}${rep.expiresAt ? ` · 到期 ${esc(fmtTime(rep.expiresAt))}` : ''} · 延迟 ${rep.latencyMs} ms</span>`;
-          }
-        } else if (box) {
-          box.innerHTML = `<span style="color:var(--danger)">❌ 验证失败：${esc((rep && rep.error) || 'Token 无效')}</span>`;
-        }
-      } catch (err) {
-        if (box) box.innerHTML = `<span style="color:var(--danger)">❌ ${esc(err.message)}</span>`;
-      } finally {
-        btn.disabled = false;
-      }
-    };
-    const trackerTestBtn = document.getElementById('bgm-tracker-test');
-    if (trackerTestBtn) trackerTestBtn.onclick = () => runTrackerTest(trackerTestBtn, false);
-    const trackerPatTestBtn = document.getElementById('bgm-tracker-pat-test');
-    if (trackerPatTestBtn) trackerPatTestBtn.onclick = () => runTrackerTest(trackerPatTestBtn, true);
-    const trackerClearBtn = document.getElementById('bgm-tracker-clear');
-    if (trackerClearBtn) {
-      trackerClearBtn.onclick = async () => {
-        if (!confirm('确认解绑并清空 Bangumi 追踪器授权（同时关闭自动同步）？')) return;
-        try {
-          await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearToken: true } });
-          toast('已解绑 Bangumi 追踪器');
-          renderAdminBangumi(body);
-        } catch (err) { toast(err.message, 'error'); }
-      };
-    }
-    body.querySelectorAll('button[data-retry-tracker-series]').forEach((btn) => {
-      btn.onclick = async () => {
-        const sid = btn.getAttribute('data-retry-tracker-series');
-        btn.disabled = true;
-        btn.textContent = '同步中…';
-        try {
-          await api(`/admin/api/series/${encodeURIComponent(sid)}/bangumi/tracker/retry`, { method: 'POST' });
-          toast('已重试同步至 Bangumi');
-          renderAdminBangumi(body);
-        } catch (err) {
-          toast(err.message || '重试同步失败', 'error');
-          renderAdminBangumi(body);
-        }
-      };
-    });
 
     const usPairKeyBtn = document.getElementById('bgm-us-pair-key');
     if (usPairKeyBtn) {
@@ -4206,17 +3958,20 @@
   // --- Admin Cache & Settings Tab ---
 
   async function renderAdminSettings(body) {
-    const [cache, settings, diagData, updStatus] = await Promise.all([
+    const [cache, settings, diagData, updStatus, apwData] = await Promise.all([
       api('/admin/api/cache'),
       api('/admin/api/settings'),
       api('/admin/api/diagnostics?limit=80').catch(() => ({ status: {}, events: [] })),
       api('/admin/api/update').catch(() => null),
+      api('/admin/api/archive-passwords').catch(() => ({ groups: [], totalPasswords: 0, totalBindings: 0 })),
     ]);
     if (updStatus) {
       state.updateStatus = updStatus;
       paintAdminUpdateBanner(updStatus);
     }
     const upd = updStatus || {};
+    const apwGroups = (apwData && Array.isArray(apwData.groups)) ? apwData.groups : [];
+    const apwTotalBindings = Number(apwData && apwData.totalBindings) || 0;
     const isAndroidUA = navigator.userAgent.includes('FK115Android/');
     const entries = cache.entries || {};
     const rangeStat = entries.range || {};
@@ -4328,12 +4083,49 @@
           <div class="field"><label>下一卷索引预热阈值（剩余页数 1-100）</label><input type="number" name="volume_index_prefetch_remaining_pages" value="${esc(settings.volume_index_prefetch_remaining_pages || '10')}"></div>
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:18px;margin:10px 0 16px">
-          <label class="check-row"><input type="checkbox" name="show_nsfw" ${settings.show_nsfw === 'true' ? 'checked' : ''}><span>显示 NSFW 作品（默认隐藏）</span></label>
+          <label class="check-row"><input type="checkbox" name="show_nsfw" ${settings.show_nsfw === 'true' ? 'checked' : ''}><span>显示 NSFW 作品（全局默认；各账号独立开关请在个人「账号设置」调整）</span></label>
           <label class="check-row"><input type="checkbox" name="volume_index_prefetch_enabled" ${settings.volume_index_prefetch_enabled === 'true' ? 'checked' : ''}><span>启用下一卷目录索引自动预热</span></label>
         </div>
         <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted)">定时扫库、Bangumi 刮削与自动补封面已迁移至「书库管理」中的单库/联合库「定时…」流水线配置。</p>
         <button type="submit" class="btn btn-primary">保存系统设置</button>
       </form>
+
+      <div class="card">
+        <div class="section-head" style="margin-bottom:8px">
+          <h3 style="margin:0">已记住的压缩包密码（全服共享 · ${apwGroups.length} 组 · ${apwTotalBindings} 本）</h3>
+          ${apwGroups.length > 0 ? `<button type="button" class="btn btn-sm btn-danger" id="apw-clear-all">全部清空</button>` : ''}
+        </div>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">在网页阅读器打开加密 ZIP / RAR 并输入正确密码后会自动记住并绑定对应漫画，同文件夹其它文件也会自动尝试复用。删除或清空密码后将同步清理对应解密页缓存，下次打开会重新提示输入密码。</p>
+        ${apwGroups.length === 0 ? `<div class="empty-box" style="padding:18px">暂未记住任何压缩包密码。</div>` : `
+          <div style="display:grid;gap:12px">
+            ${apwGroups.map((g, idx) => `
+              <div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--bg-soft, var(--bg))">
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                    <span class="badge">密码 #${idx + 1}</span>
+                    <code data-apw-text="${esc(g.id)}" data-apw-shown="0" style="font-size:13px;padding:2px 8px;border-radius:6px;background:var(--bg-input)">••••••••</code>
+                    <button type="button" class="btn btn-sm btn-ghost" data-apw-toggle="${esc(g.id)}">显示</button>
+                    <span style="font-size:12px;color:var(--text-muted)">绑定 ${(g.bindings || []).length} 本 · 更新于 ${fmtTime(g.updatedAt)}</span>
+                  </div>
+                  <button type="button" class="btn btn-sm btn-danger" data-apw-del-group="${esc(g.id)}">删除此密码</button>
+                </div>
+                ${(g.bindings || []).length === 0 ? `<div style="font-size:12px;color:var(--text-muted)">暂无可见绑定条目</div>` : `
+                  <div class="table-wrap"><table class="data-table">
+                    <thead><tr><th>作品</th><th>卷名</th><th>书库</th><th>绑定时间</th><th>操作</th></tr></thead>
+                    <tbody>
+                      ${(g.bindings || []).map((b) => `
+                        <tr>
+                          <td>${b.seriesId ? `<a href="/series/${encodeURIComponent(b.seriesId)}" data-nav style="color:var(--accent)">${esc(b.seriesTitle || b.seriesId)}</a>` : esc(b.seriesTitle || '—')}</td>
+                          <td style="font-size:12.5px">${esc(b.bookName)}</td>
+                          <td style="font-size:12px;color:var(--text-secondary)">${esc(b.libraryName || '—')}</td>
+                          <td style="font-size:12px;color:var(--text-muted)">${fmtTime(b.updatedAt)}</td>
+                          <td><button type="button" class="btn btn-sm btn-ghost" data-apw-del-binding="${esc(b.bookId)}">解绑</button></td>
+                        </tr>`).join('')}
+                    </tbody>
+                  </table></div>`}
+              </div>`).join('')}
+          </div>`}
+      </div>
 
       <div class="card">
         <div class="section-head" style="flex-wrap:wrap;gap:10px">
@@ -4468,6 +4260,55 @@
         renderAdminSettings(body);
       } catch (err) { toast(err.message, 'error'); }
     };
+
+    const apwPwMap = new Map(apwGroups.map((g) => [g.id, g.password || '']));
+    body.querySelectorAll('button[data-apw-toggle]').forEach((btn) => {
+      btn.onclick = () => {
+        const gid = btn.getAttribute('data-apw-toggle');
+        const codeEl = body.querySelector(`code[data-apw-text="${CSS.escape(gid)}"]`);
+        if (!codeEl) return;
+        const shown = codeEl.getAttribute('data-apw-shown') === '1';
+        if (shown) {
+          codeEl.textContent = '••••••••';
+          codeEl.setAttribute('data-apw-shown', '0');
+          btn.textContent = '显示';
+        } else {
+          codeEl.textContent = apwPwMap.get(gid) || '';
+          codeEl.setAttribute('data-apw-shown', '1');
+          btn.textContent = '隐藏';
+        }
+      };
+    });
+    const apwClearBtn = document.getElementById('apw-clear-all');
+    if (apwClearBtn) {
+      apwClearBtn.onclick = async () => {
+        if (!confirm('确认清空全部已记住的压缩包密码？对应加密卷缓存也将同步清理，下次打开需重新输入密码。')) return;
+        try {
+          await api('/admin/api/archive-passwords', { method: 'DELETE' });
+          toast('已清空全部压缩包密码');
+          renderAdminSettings(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    }
+    body.querySelectorAll('button[data-apw-del-group]').forEach((btn) => {
+      btn.onclick = async () => {
+        if (!confirm('确认删除此条已记住的密码并解除名下全部漫画绑定？')) return;
+        try {
+          await api(`/admin/api/archive-passwords/${encodeURIComponent(btn.getAttribute('data-apw-del-group'))}`, { method: 'DELETE' });
+          toast('压缩包密码已删除');
+          renderAdminSettings(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
+    body.querySelectorAll('button[data-apw-del-binding]').forEach((btn) => {
+      btn.onclick = async () => {
+        try {
+          await api(`/admin/api/archive-passwords/bindings/${encodeURIComponent(btn.getAttribute('data-apw-del-binding'))}`, { method: 'DELETE' });
+          toast('已解除该卷密码绑定');
+          renderAdminSettings(body);
+        } catch (err) { toast(err.message, 'error'); }
+      };
+    });
 
     const diagVerboseToggle = document.getElementById('diag-verbose-toggle');
     if (diagVerboseToggle) {
@@ -4794,231 +4635,6 @@
           }
         };
       },
-    });
-  }
-
-  async function renderAdminSecurity(body) {
-    const [keys, sessions, apwData] = await Promise.all([
-      api('/admin/api/auth/api-keys'),
-      api('/admin/api/auth/sessions'),
-      api('/admin/api/archive-passwords').catch(() => ({ groups: [], totalPasswords: 0, totalBindings: 0 })),
-    ]);
-    const apwGroups = (apwData && Array.isArray(apwData.groups)) ? apwData.groups : [];
-    const apwTotalBindings = Number(apwData && apwData.totalBindings) || 0;
-    const presetKey = (new URLSearchParams(location.search).get('presetKey') || '').trim();
-
-    body.innerHTML = `
-      <div class="grid-2">
-        <form class="card" id="sec-cred-form">
-          <h3>修改管理员用户名 / 密码</h3>
-          <div class="field">
-            <label>当前密码（必填）</label>
-            <input type="password" id="sec-cur-pass" autocomplete="current-password" required>
-          </div>
-          <div class="field">
-            <label>新用户名（留空保持 <code>${esc(state.auth.username)}</code>）</label>
-            <input type="text" id="sec-new-user" placeholder="${esc(state.auth.username)}">
-          </div>
-          <div class="field">
-            <label>新密码（留空不修改密码，修改需至少 8 位）</label>
-            <input type="password" id="sec-new-pass" autocomplete="new-password" placeholder="至少 8 位字符">
-          </div>
-          <button type="submit" class="btn btn-primary">更新凭据（自动注销其他会话）</button>
-        </form>
-
-        <div class="card" ${presetKey ? 'style="border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)"' : ''}>
-          <h3>API Key 管理（推荐用于 AI Agent / 外部客户端 / 脚本）</h3>
-          <p style="font-size:12.5px;color:var(--text-secondary)">支持通过 <code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code> 访问 Komga 接口与 AI Agent 专用书库管理接口（<code>GET /api/agent/v1/manifest</code>），无需暴露主登录密码，可随时单独吊销。</p>
-          <div class="inline-action-bar" style="margin-bottom:12px">
-            <input type="text" id="ak-name" value="${esc(presetKey)}" placeholder="备注名称，例如：Mihon 平板" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
-            <button type="button" class="btn btn-primary" id="ak-create">生成 API Key</button>
-          </div>
-          <div id="ak-revealed" style="display:none;margin-bottom:12px"></div>
-          ${(keys || []).length === 0 ? `<div class="empty-box" style="padding:18px">暂未创建 API Key。</div>` : `
-            <div class="table-wrap"><table class="data-table">
-              <thead><tr><th>名称</th><th>前缀</th><th>最近使用</th><th>操作</th></tr></thead>
-              <tbody>
-                ${keys.map((k) => `
-                  <tr>
-                    <td><strong>${esc(k.name)}</strong></td>
-                    <td><code>${esc(k.keyPrefix)}…</code></td>
-                    <td style="font-size:12px;color:var(--text-muted)">${fmtTime(k.lastUsedAt || k.createdAt)}</td>
-                    <td><button type="button" class="btn btn-sm btn-danger" data-del-ak="${esc(k.id)}">吊销</button></td>
-                  </tr>`).join('')}
-              </tbody>
-            </table></div>`}
-        </div>
-      </div>
-
-      <div class="card">
-        <div class="section-head" style="margin-bottom:8px">
-          <h3 style="margin:0">已记住的压缩包密码（${apwGroups.length} 组 · ${apwTotalBindings} 本）</h3>
-          ${apwGroups.length > 0 ? `<button type="button" class="btn btn-sm btn-danger" id="apw-clear-all">全部清空</button>` : ''}
-        </div>
-        <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">在网页阅读器打开加密 ZIP / RAR 并输入正确密码后会自动记住并绑定对应漫画，同文件夹其它文件也会自动尝试复用。删除或清空密码后将同步清理对应解密页缓存，下次打开会重新提示输入密码。</p>
-        ${apwGroups.length === 0 ? `<div class="empty-box" style="padding:18px">暂未记住任何压缩包密码。</div>` : `
-          <div style="display:grid;gap:12px">
-            ${apwGroups.map((g, idx) => `
-              <div style="border:1px solid var(--border);border-radius:10px;padding:12px 14px;background:var(--bg-soft, var(--bg))">
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:8px">
-                  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-                    <span class="badge">密码 #${idx + 1}</span>
-                    <code data-apw-text="${esc(g.id)}" data-apw-shown="0" style="font-size:13px;padding:2px 8px;border-radius:6px;background:var(--bg-input)">••••••••</code>
-                    <button type="button" class="btn btn-sm btn-ghost" data-apw-toggle="${esc(g.id)}">显示</button>
-                    <span style="font-size:12px;color:var(--text-muted)">绑定 ${(g.bindings || []).length} 本 · 更新于 ${fmtTime(g.updatedAt)}</span>
-                  </div>
-                  <button type="button" class="btn btn-sm btn-danger" data-apw-del-group="${esc(g.id)}">删除此密码</button>
-                </div>
-                ${(g.bindings || []).length === 0 ? `<div style="font-size:12px;color:var(--text-muted)">暂无可见绑定条目</div>` : `
-                  <div class="table-wrap"><table class="data-table">
-                    <thead><tr><th>作品</th><th>卷名</th><th>书库</th><th>绑定时间</th><th>操作</th></tr></thead>
-                    <tbody>
-                      ${(g.bindings || []).map((b) => `
-                        <tr>
-                          <td>${b.seriesId ? `<a href="/series/${encodeURIComponent(b.seriesId)}" style="color:var(--accent)">${esc(b.seriesTitle || b.seriesId)}</a>` : esc(b.seriesTitle || '—')}</td>
-                          <td style="font-size:12.5px">${esc(b.bookName)}</td>
-                          <td style="font-size:12px;color:var(--text-secondary)">${esc(b.libraryName || '—')}</td>
-                          <td style="font-size:12px;color:var(--text-muted)">${fmtTime(b.updatedAt)}</td>
-                          <td><button type="button" class="btn btn-sm btn-ghost" data-apw-del-binding="${esc(b.bookId)}">解绑</button></td>
-                        </tr>`).join('')}
-                    </tbody>
-                  </table></div>`}
-              </div>`).join('')}
-          </div>`}
-      </div>
-
-      <div class="card">
-        <h3>活跃登录会话（${(sessions || []).length}）</h3>
-        <div class="table-wrap"><table class="data-table">
-          <thead><tr><th>会话标识</th><th>浏览器 / 客户端</th><th>最近活跃</th><th>过期时间</th><th>操作</th></tr></thead>
-          <tbody>
-            ${(sessions || []).map((s) => {
-              const sid = s.id || s.tokenPrefix || '';
-              const expTxt = (!s.expiresAt || String(s.expiresAt).startsWith('9999-')) ? '永久有效（自动续期）' : fmtTime(s.expiresAt);
-              return `
-              <tr>
-                <td><code>${esc(sid)}</code> ${s.current ? '<span class="badge badge-success">当前设备</span>' : ''}</td>
-                <td style="font-size:12px;color:var(--text-secondary);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.userAgent || '—')}</td>
-                <td>${fmtTime(s.lastSeenAt)}</td>
-                <td>${esc(expTxt)}</td>
-                <td>${!s.current && sid ? `<button type="button" class="btn btn-sm btn-danger" data-del-sess="${esc(sid)}">强制下线</button>` : ''}</td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table></div>
-      </div>
-    `;
-
-    document.getElementById('sec-cred-form').onsubmit = async (e) => {
-      e.preventDefault();
-      const currentPassword = document.getElementById('sec-cur-pass').value;
-      const newUsername = document.getElementById('sec-new-user').value.trim();
-      const newPassword = document.getElementById('sec-new-pass').value;
-      try {
-        const updated = await api('/admin/api/auth/credentials', {
-          method: 'PUT',
-          body: { currentPassword, newUsername, newPassword },
-          allow401: true,
-        });
-        if (updated && updated.username) state.auth.username = updated.username;
-        toast('管理员凭据已更新');
-        renderAdminSecurity(body);
-      } catch (err) { toast(err.message, 'error'); }
-    };
-
-    document.getElementById('ak-create').onclick = async () => {
-      const name = document.getElementById('ak-name').value.trim();
-      if (!name) { toast('请填写 API Key 备注名称', 'error'); return; }
-      const startSeq = routeSeq;
-      const startUser = state.auth.userId || '';
-      try {
-        const res = await api('/admin/api/auth/api-keys', { method: 'POST', body: { name } });
-        if (startSeq !== routeSeq || (state.auth.userId || '') !== startUser || !body.isConnected) return;
-        await renderAdminSecurity(body);
-        if (startSeq !== routeSeq || (state.auth.userId || '') !== startUser || !body.isConnected) return;
-        const rev = body.querySelector('#ak-revealed');
-        if (rev) {
-          rev.style.display = '';
-          rev.innerHTML = `
-            <div style="padding:10px 12px;border-radius:8px;background:var(--success-soft);border:1px solid var(--success)">
-              <div style="font-size:12px;font-weight:600;color:var(--success);margin-bottom:4px">请立即复制保存，此完整密钥仅显示一次：</div>
-              <div class="code-box" style="user-select:all">${esc(res.key)}</div>
-            </div>`;
-        }
-      } catch (err) { toast(err.message, 'error'); }
-    };
-
-    body.querySelectorAll('button[data-del-ak]').forEach((btn) => {
-      btn.onclick = async () => {
-        if (!confirm('确认吊销该 API Key？')) return;
-        try {
-          await api(`/admin/api/auth/api-keys/${encodeURIComponent(btn.getAttribute('data-del-ak'))}`, { method: 'DELETE' });
-          toast('API Key 已吊销');
-          renderAdminSecurity(body);
-        } catch (err) { toast(err.message, 'error'); }
-      };
-    });
-
-    const apwPwMap = new Map(apwGroups.map((g) => [g.id, g.password || '']));
-    body.querySelectorAll('button[data-apw-toggle]').forEach((btn) => {
-      btn.onclick = () => {
-        const gid = btn.getAttribute('data-apw-toggle');
-        const codeEl = body.querySelector(`code[data-apw-text="${CSS.escape(gid)}"]`);
-        if (!codeEl) return;
-        const shown = codeEl.getAttribute('data-apw-shown') === '1';
-        if (shown) {
-          codeEl.textContent = '••••••••';
-          codeEl.setAttribute('data-apw-shown', '0');
-          btn.textContent = '显示';
-        } else {
-          codeEl.textContent = apwPwMap.get(gid) || '';
-          codeEl.setAttribute('data-apw-shown', '1');
-          btn.textContent = '隐藏';
-        }
-      };
-    });
-
-    const apwClearBtn = document.getElementById('apw-clear-all');
-    if (apwClearBtn) {
-      apwClearBtn.onclick = async () => {
-        if (!confirm('确认清空全部已记住的压缩包密码？对应加密卷缓存也将同步清理，下次打开需重新输入密码。')) return;
-        try {
-          await api('/admin/api/archive-passwords', { method: 'DELETE' });
-          toast('已清空全部压缩包密码');
-          renderAdminSecurity(body);
-        } catch (err) { toast(err.message, 'error'); }
-      };
-    }
-
-    body.querySelectorAll('button[data-apw-del-group]').forEach((btn) => {
-      btn.onclick = async () => {
-        if (!confirm('确认删除此条已记住的密码并解除名下全部漫画绑定？')) return;
-        try {
-          await api(`/admin/api/archive-passwords/${encodeURIComponent(btn.getAttribute('data-apw-del-group'))}`, { method: 'DELETE' });
-          toast('压缩包密码已删除');
-          renderAdminSecurity(body);
-        } catch (err) { toast(err.message, 'error'); }
-      };
-    });
-
-    body.querySelectorAll('button[data-apw-del-binding]').forEach((btn) => {
-      btn.onclick = async () => {
-        try {
-          await api(`/admin/api/archive-passwords/bindings/${encodeURIComponent(btn.getAttribute('data-apw-del-binding'))}`, { method: 'DELETE' });
-          toast('已解除该卷密码绑定');
-          renderAdminSecurity(body);
-        } catch (err) { toast(err.message, 'error'); }
-      };
-    });
-
-    body.querySelectorAll('button[data-del-sess]').forEach((btn) => {
-      btn.onclick = async () => {
-        try {
-          await api(`/admin/api/auth/sessions/${encodeURIComponent(btn.getAttribute('data-del-sess'))}`, { method: 'DELETE' });
-          toast('会话已移除');
-          renderAdminSecurity(body);
-        } catch (err) { toast(err.message, 'error'); }
-      };
     });
   }
 
@@ -6043,10 +5659,14 @@
       const tr = tracker || {};
       const trRecords = Array.isArray(tr.records) ? tr.records : [];
       const isAdmin = Boolean(me && me.isAdmin);
+      const presetKey = (new URLSearchParams(location.search).get('presetKey') || '').trim();
 
       content.innerHTML = `
         <div class="section-head" style="margin-bottom:14px">
-          <h2 style="margin:0">账号设置</h2>
+          <div>
+            <h2 style="margin:0">账号设置</h2>
+            <div style="font-size:12.5px;color:var(--text-secondary);margin-top:2px">以下设置仅影响当前登录账号，不会修改其他用户或全服配置。</div>
+          </div>
           ${isAdmin ? `<a href="/admin" data-nav class="btn btn-sm">前往管理后台 →</a>` : ''}
         </div>
 
@@ -6074,23 +5694,28 @@
           </div>
 
           <form class="card" id="acc-pw-form">
-            <h3>修改登录密码</h3>
+            <h3>${isAdmin ? '修改管理员用户名 / 密码' : '修改登录密码'}</h3>
             <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
-              当前用户名：<code>${esc(user.username || state.auth.username)}</code>${isAdmin ? '（如需修改管理员用户名，请前往 <a href="/admin?tab=security" data-nav style="color:var(--accent)">管理后台 → 账号与 API Key</a>）' : '（用户名由管理员统一维护，不可自助修改）'}
+              当前用户名：<code>${esc(user.username || state.auth.username)}</code>${isAdmin ? '（可仅改用户名、仅改密码或同时修改）' : '（用户名由管理员统一维护，不可自助修改）'}
             </p>
             <div class="field">
               <label>当前密码</label>
               <input type="password" id="acc-cur-pw" autocomplete="current-password" required>
             </div>
+            ${isAdmin ? `
+              <div class="field">
+                <label>新用户名（留空保持 <code>${esc(user.username || state.auth.username)}</code>）</label>
+                <input type="text" id="acc-new-user" autocomplete="username" placeholder="${esc(user.username || state.auth.username)}">
+              </div>` : ''}
             <div class="field">
-              <label>新密码（至少 8 位）</label>
-              <input type="password" id="acc-new-pw" autocomplete="new-password" required minlength="8">
+              <label>新密码（${isAdmin ? '留空不改密码，修改需至少 8 位' : '至少 8 位'}）</label>
+              <input type="password" id="acc-new-pw" autocomplete="new-password" ${isAdmin ? '' : 'required'} minlength="8">
             </div>
             <div class="field">
               <label>确认新密码</label>
-              <input type="password" id="acc-new-pw2" autocomplete="new-password" required minlength="8">
+              <input type="password" id="acc-new-pw2" autocomplete="new-password" ${isAdmin ? '' : 'required'} minlength="8">
             </div>
-            <button type="submit" class="btn btn-primary">保存新密码（自动注销其他设备会话）</button>
+            <button type="submit" class="btn btn-primary">${isAdmin ? '更新凭据（自动注销其他设备会话）' : '保存新密码（自动注销其他设备会话）'}</button>
           </form>
         </div>
 
@@ -6133,11 +5758,13 @@
             </div>
           </div>
 
-          <div class="card">
+          <div class="card" ${presetKey ? 'style="border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-soft)"' : ''}>
             <h3>我的 API Key（仅作用于当前账号权限）</h3>
-            <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">可用于 Komga 客户端（<code>X-API-Key</code>）或油猴脚本免密认证，随时可单独吊销。</p>
+            <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">${isAdmin
+              ? '支持通过 <code>Authorization: Bearer &lt;密钥&gt;</code> 或 <code>X-API-Key: &lt;密钥&gt;</code> 访问 Komga 接口、油猴脚本与 AI Agent 接口（<code>GET /api/agent/v1/manifest</code>），随时可单独吊销。'
+              : '可用于 Komga 客户端（<code>X-API-Key</code>）或油猴脚本免密认证，随时可单独吊销。'}</p>
             <div class="inline-action-bar" style="margin-bottom:12px">
-              <input type="text" id="acc-ak-name" placeholder="备注名称，例如：手机 Koharia" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+              <input type="text" id="acc-ak-name" value="${esc(presetKey)}" placeholder="备注名称，例如：手机 Koharia" style="height:36px;padding:0 10px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
               <button type="button" class="btn btn-primary" id="acc-ak-create">生成 API Key</button>
             </div>
             <div id="acc-ak-revealed" style="display:none;margin-bottom:12px"></div>
@@ -6308,17 +5935,22 @@
       document.getElementById('acc-pw-form').onsubmit = async (e) => {
         e.preventDefault();
         const currentPassword = document.getElementById('acc-cur-pw').value;
+        const newUsername = isAdmin ? (document.getElementById('acc-new-user')?.value || '').trim() : '';
         const newPassword = document.getElementById('acc-new-pw').value;
         const newPassword2 = document.getElementById('acc-new-pw2').value;
-        if (newPassword.length < 8) { toast('新密码至少需要 8 位字符', 'error'); return; }
-        if (newPassword !== newPassword2) { toast('两次输入的新密码不一致', 'error'); return; }
+        if (!newUsername && !newPassword) { toast('请填写要修改的新用户名或新密码', 'error'); return; }
+        if (newPassword) {
+          if (newPassword.length < 8) { toast('新密码至少需要 8 位字符', 'error'); return; }
+          if (newPassword !== newPassword2) { toast('两次输入的新密码不一致', 'error'); return; }
+        }
         try {
-          await api('/admin/api/auth/credentials', {
+          const updated = await api('/admin/api/auth/credentials', {
             method: 'PUT',
-            body: { currentPassword, newPassword },
+            body: isAdmin ? { currentPassword, newUsername, newPassword } : { currentPassword, newPassword },
             allow401: true,
           });
-          toast('登录密码已更新，其他设备会话已自动下线');
+          if (updated && updated.username) state.auth.username = updated.username;
+          toast(isAdmin ? '管理员凭据已更新，其他设备会话已自动下线' : '登录密码已更新，其他设备会话已自动下线');
           renderAccountPage();
         } catch (err) { toast(err.message, 'error'); }
       };
@@ -6586,11 +6218,11 @@
           </div>
           <div style="font-size:12px;color:var(--text-muted);line-height:1.6;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border);margin-bottom:14px">
             批准后将自动签发一个专属 API Key 并一次性交付给该 AI Agent（不暴露你的登录密码）。你随时可以在
-            <a href="/admin?tab=security" data-nav style="color:var(--accent)">「管理后台 → 账号与 API Key」</a> 查看或吊销。
+            <a href="/account" data-nav style="color:var(--accent)">「账号设置 → 我的 API Key」</a> 查看或吊销。
           </div>
           ${isPending ? `
             <div class="field" style="margin-bottom:14px">
-              <label>API Key 备注名称（方便后续在「账号与 API Key」识别与吊销）</label>
+              <label>API Key 备注名称（方便后续在「账号设置」识别与吊销）</label>
               <input type="text" id="agent-auth-key-name" value="${esc(defaultKeyName)}" maxlength="80">
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
@@ -6600,7 +6232,7 @@
             </div>
           ` : `
             <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-              <a href="/admin?tab=security" data-nav class="btn btn-primary">查看 / 管理 API Key</a>
+              <a href="/account" data-nav class="btn btn-primary">查看 / 管理 API Key</a>
               <a href="/admin?tab=bangumi" data-nav class="btn">返回 Bangumi 刮削中心</a>
             </div>
           `}
@@ -6637,7 +6269,7 @@
                     <button type="button" class="btn btn-sm btn-primary" id="agent-auth-copy-key">复制密钥</button>
                   </div>
                   <div style="margin-top:10px;font-size:12px">
-                    <a href="/admin?tab=security" data-nav style="color:var(--accent)">前往「账号与 API Key」查看 / 随时吊销 →</a>
+                    <a href="/account" data-nav style="color:var(--accent)">前往「账号设置」查看 / 随时吊销 →</a>
                   </div>
                 </div>`;
               const copyBtn = document.getElementById('agent-auth-copy-key');
@@ -6673,7 +6305,7 @@
         <div class="card" style="max-width:520px;margin:24px auto;text-align:center">
           <h2 style="margin:0 0 8px">授权请求不可用</h2>
           <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px">${esc(err.message || '授权请求不存在或已过期，请让 AI Agent 重新发起申请。')}</p>
-          <a href="/admin?tab=security" data-nav class="btn btn-primary">前往「账号与 API Key」</a>
+          <a href="/account" data-nav class="btn btn-primary">前往「账号设置」</a>
           <a href="/admin?tab=bangumi" data-nav class="btn" style="margin-left:8px">返回 Bangumi 刮削中心</a>
         </div>`;
     }

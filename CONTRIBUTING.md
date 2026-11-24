@@ -12,7 +12,11 @@
    - 后台管理与元数据修改接口必须经过 `requireAdmin` 校验；
    - SQLite 迁移必须幂等、事务安全，不破坏既有单管理员旧库原地升级。
 5. **关注大库性能**：部分用户的真实书库达到 10 万系列 / 50 万+单册，请避免在列表或搜索热路径引入 N+1 查询或无必要全表回填。
-6. **不要提交私有数据与编译产物**：
+6. **保持前端视觉风格统一**：
+   - 必须使用 `internal/httpserver/static/ui/app.css` 中已定义的双主题 CSS 变量（`--bg`、`--bg-card`、`--bg-input`、`--border`、`--text`、`--text-secondary`、`--accent`、`--radius` 等），严禁硬编码写死色值，确保日间（`[data-theme="light"]`）与夜间模式均对比度正常；
+   - 优先复用现有组件样式（`.card`、`.btn` / `.btn-primary` / `.btn-sm` / `.btn-danger`、`.badge`、`.field`、`.check-row`、`.table-wrap` + `.data-table`、`openModal()`、`toast()`），不引入外部 CSS 框架、图标库或外部 CDN；
+   - 表格外层包裹 `.table-wrap`，确保手机竖屏（`360px ~ 390px`）下无横向溢出或按钮挤压。
+7. **不要提交私有数据与编译产物**：
    - 严禁提交真实 115 / Bangumi Token、密码、内网 IP、本机路径或真实私人书库数据；
    - 不要提交 `internal/httpserver/static/reader_dist/` 下的构建产物（如需改动内置阅读器，仅提交 `web/reader/` 源码变更，CI 会自动重编校验）。
 

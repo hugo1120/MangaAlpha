@@ -12,7 +12,7 @@
 
 - [ ] 已运行 `gofmt -l cmd internal` 无未格式化文件
 - [ ] 已运行 `go test -count=1 -race ./...` 与 `go vet ./...` 全部通过
-- [ ] 若改动前端 UI，已运行 `node --check internal/httpserver/static/ui/app.js`
+- [ ] 若改动前端 UI，已运行 `node --check internal/httpserver/static/ui/app.js`，并确认使用 `app.css` 双主题 CSS 变量、复用既有组件且暗/亮双主题与手机竖屏无溢出
 - [ ] 若改动 `web/reader/`，已运行 `bash scripts/build-reader.sh` 通过 TypeScript 与 Vite 构建
 - [ ] 若涉及目录/搜索/进度/接口/UI，已确认遵守多用户 `UserScope`、书库白名单与 NSFW 隔离规则
 - [ ] 已确认不包含任何真实 Token、密码、内网 IP、本机路径或私有测试数据

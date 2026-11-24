@@ -67,4 +67,5 @@ CGO_ENABLED=0 go build -o /tmp/mangaalpha ./cmd/server
 - 绝不在本公开仓库中引入任何私有仓库域名、内网 IP、本机用户名路径或内部业务标识。
 - 已有 `115` 书库的 `Library` / `Series` / `Book` ID 生成公式不可更改，确保旧版数据库无缝原地升级。
 - 受权限保护的漫画页图与封面响应必须携带 `Cache-Control: private, no-store`，防止同浏览器切号命中缓存绕过权限检查；未登录态与公开只读接口不得暴露服务端版本号或代号。
+- 前端 UI 改动必须与 `internal/httpserver/static/ui/app.css` 视觉体系保持一致：全部颜色走现有暗/亮双主题 CSS 变量（不硬编码色值）、复用既有 `.card`/`.btn`/`.badge`/`.data-table`/`openModal`/`toast` 组件、不引入外部 UI 库或 CDN，且保证桌面与手机竖屏（`360px ~ 390px`）双主题无横向溢出。
 - 前端任务进度严禁在空闲状态下无条件轮询刷屏；仅当存在 `queued`/`running` 任务且页面处于前台可见状态时才按需轮询。

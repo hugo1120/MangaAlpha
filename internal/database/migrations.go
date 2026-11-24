@@ -59,27 +59,14 @@ func applyMigrations(db *sql.DB) error {
 		{"series", "latest_book_created_at", "TEXT"},
 		{"series", "sort_modified_at", "TEXT NOT NULL DEFAULT ''"},
 		{"series", "sort_created_at", "TEXT NOT NULL DEFAULT ''"},
-		{"series", "search_key", "TEXT NOT NULL DEFAULT ''"},
-		{"books", "search_key", "TEXT NOT NULL DEFAULT ''"},
-		{"scan_series_staging", "search_key", "TEXT NOT NULL DEFAULT ''"},
-		{"scan_books_staging", "search_key", "TEXT NOT NULL DEFAULT ''"},
 		{"series_metadata", "is_nsfw", "INTEGER NOT NULL DEFAULT 0"},
 		{"series_metadata", "bgm_rank", "INTEGER"},
 		{"series_metadata", "nsfw_lock", "INTEGER NOT NULL DEFAULT 0"},
-		{"series_metadata", "title_key", "TEXT NOT NULL DEFAULT ''"},
-		{"series_metadata", "publisher_key", "TEXT NOT NULL DEFAULT ''"},
-		{"series_metadata", "alternate_key", "TEXT NOT NULL DEFAULT ''"},
-		{"series_tags", "search_key", "TEXT NOT NULL DEFAULT ''"},
-		{"series_genres", "search_key", "TEXT NOT NULL DEFAULT ''"},
-		{"series_authors", "search_key", "TEXT NOT NULL DEFAULT ''"},
 	}
 	for _, migration := range migrations {
 		if err := addColumnIfMissing(db, migration.table, migration.column, migration.definition); err != nil {
 			return err
 		}
-	}
-	if err := ensureSearchKeys(db); err != nil {
-		return err
 	}
 	if err := ensurePerformanceIndexes(db); err != nil {
 		return err
@@ -88,6 +75,9 @@ func applyMigrations(db *sql.DB) error {
 		return err
 	}
 	if err := ensureSeriesRollups(db); err != nil {
+		return err
+	}
+	if err := ensureSearchFTSTables(db); err != nil {
 		return err
 	}
 	return createShelfRevisions(db)

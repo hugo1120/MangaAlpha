@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xJogger/fake-komga-115/internal/cjk"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"github.com/xJogger/fake-komga-115/internal/id"
@@ -779,24 +778,24 @@ func (m *Manager) saveScannedSeriesTx(
 	if stage {
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO scan_series_staging(
- run_id,id,library_id,cid,name,search_key,relative_path,one_shot,file_modified_at,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+ run_id,id,library_id,cid,name,relative_path,one_shot,file_modified_at,created_at,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(run_id,library_id,cid) DO UPDATE SET
- name=excluded.name,search_key=excluded.search_key,relative_path=excluded.relative_path,
+ name=excluded.name,relative_path=excluded.relative_path,
  one_shot=excluded.one_shot,file_modified_at=excluded.file_modified_at,
  updated_at=excluded.updated_at`,
-			item.runID, series.ID, item.library.ID, series.CID, series.Name, cjk.SearchKey(series.Name), series.RelativePath,
+			item.runID, series.ID, item.library.ID, series.CID, series.Name, series.RelativePath,
 			series.OneShot, modified, now, now)
 	} else {
 		_, err = tx.ExecContext(ctx, `
 INSERT INTO series(
- id,library_id,cid,name,search_key,relative_path,one_shot,file_modified_at,created_at,updated_at,seen_scan_id
-) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+ id,library_id,cid,name,relative_path,one_shot,file_modified_at,created_at,updated_at,seen_scan_id
+) VALUES(?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(library_id,cid) DO UPDATE SET
- name=excluded.name,search_key=excluded.search_key,relative_path=excluded.relative_path,
+ name=excluded.name,relative_path=excluded.relative_path,
  one_shot=excluded.one_shot,file_modified_at=excluded.file_modified_at,
  updated_at=excluded.updated_at,seen_scan_id=excluded.seen_scan_id`,
-			series.ID, item.library.ID, series.CID, series.Name, cjk.SearchKey(series.Name), series.RelativePath,
+			series.ID, item.library.ID, series.CID, series.Name, series.RelativePath,
 			series.OneShot, modified, now, now, item.runID)
 	}
 	if err != nil {
@@ -807,31 +806,31 @@ ON CONFLICT(library_id,cid) DO UPDATE SET
 		if stage {
 			_, err = tx.ExecContext(ctx, `
 INSERT INTO scan_books_staging(
- run_id,id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,sha1,
+ run_id,id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(run_id,library_id,file_id) DO UPDATE SET
  series_id=excluded.series_id,parent_cid=excluded.parent_cid,
- name=excluded.name,search_key=excluded.search_key,size=excluded.size,pick_code=excluded.pick_code,sha1=excluded.sha1,
+ name=excluded.name,size=excluded.size,pick_code=excluded.pick_code,sha1=excluded.sha1,
  file_created_at=excluded.file_created_at,file_modified_at=excluded.file_modified_at,
  number_sort=excluded.number_sort,updated_at=excluded.updated_at`,
 				item.runID, bookID, series.ID, item.library.ID, file.ID, series.ParentCID,
-				file.Name, cjk.SearchKey(file.Name), file.Size, file.PickCode, file.SHA1,
+				file.Name, file.Size, file.PickCode, file.SHA1,
 				file.CreatedAt.UTC().Format(time.RFC3339Nano), file.ModifiedAt.UTC().Format(time.RFC3339Nano),
 				float64(index+1), now, now)
 		} else {
 			_, err = tx.ExecContext(ctx, `
 INSERT INTO books(
- id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,sha1,
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(library_id,file_id) DO UPDATE SET
  series_id=excluded.series_id,library_id=excluded.library_id,parent_cid=excluded.parent_cid,
- name=excluded.name,search_key=excluded.search_key,size=excluded.size,pick_code=excluded.pick_code,sha1=excluded.sha1,
+ name=excluded.name,size=excluded.size,pick_code=excluded.pick_code,sha1=excluded.sha1,
  file_created_at=excluded.file_created_at,file_modified_at=excluded.file_modified_at,
  number_sort=excluded.number_sort,updated_at=excluded.updated_at,seen_scan_id=excluded.seen_scan_id`,
 				bookID, series.ID, item.library.ID, file.ID, series.ParentCID,
-				file.Name, cjk.SearchKey(file.Name), file.Size, file.PickCode, file.SHA1,
+				file.Name, file.Size, file.PickCode, file.SHA1,
 				file.CreatedAt.UTC().Format(time.RFC3339Nano), file.ModifiedAt.UTC().Format(time.RFC3339Nano),
 				float64(index+1), now, now, item.runID)
 		}
@@ -888,18 +887,18 @@ func (m *Manager) commitSuccessfulScan(ctx context.Context, item job, staged boo
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO series(
- id,library_id,cid,name,search_key,relative_path,one_shot,file_modified_at,created_at,updated_at,seen_scan_id
+ id,library_id,cid,name,relative_path,one_shot,file_modified_at,created_at,updated_at,seen_scan_id
 )
-SELECT id,library_id,cid,name,search_key,relative_path,one_shot,file_modified_at,created_at,updated_at,?
+SELECT id,library_id,cid,name,relative_path,one_shot,file_modified_at,created_at,updated_at,?
 FROM scan_series_staging WHERE run_id=?`, item.runID, item.runID); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO books(
- id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,sha1,
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
 )
-SELECT id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,sha1,
+SELECT id,series_id,library_id,file_id,parent_cid,name,size,pick_code,sha1,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,?
 FROM scan_books_staging WHERE run_id=?`, item.runID, item.runID); err != nil {
 			return err

@@ -105,13 +105,13 @@ func TestMetadataLocksAndSearchFilters(t *testing.T) {
 
 	now := nowText()
 	if _, err := store.DB().ExecContext(ctx, `
-INSERT INTO series(id,library_id,cid,name,search_key,relative_path,one_shot,created_at,updated_at,seen_scan_id)
-VALUES('s_1','l_local1','dir1','[SLAM DUNK][Inoue]','[slam dunk][inoue]','SLAM DUNK',0,?,?, 'scan1')`, now, now); err != nil {
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
+VALUES('s_1','l_local1','dir1','[SLAM DUNK][Inoue]','SLAM DUNK',0,?,?, 'scan1')`, now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB().ExecContext(ctx, `
-INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,number_sort,created_at,updated_at,seen_scan_id)
-VALUES('b_1','s_1','l_local1','dir1/v01.cbz','dir1','Vol.01.cbz','vol.01.cbz',1024,'',1,?,?, 'scan1')`, now, now); err != nil {
+INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code,number_sort,created_at,updated_at,seen_scan_id)
+VALUES('b_1','s_1','l_local1','dir1/v01.cbz','dir1','Vol.01.cbz',1024,'',1,?,?, 'scan1')`, now, now); err != nil {
 		t.Fatal(err)
 	}
 

@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+
+	"github.com/xJogger/fake-komga-115/internal/cjk"
 )
 
 var (
@@ -38,8 +40,12 @@ func (s *Store) ListCollections(
 	clauses := []string{`c.user_id=?`}
 	args := []any{userID}
 	if q := strings.TrimSpace(search); q != "" {
-		clauses = append(clauses, `c.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
-		args = append(args, "%"+escapeLike(q)+"%")
+		folded := cjk.SearchKey(q)
+		if folded == "" {
+			return []Collection{}, 0, nil
+		}
+		clauses = append(clauses, `cjk_contains(c.name, ?)`)
+		args = append(args, folded)
 	}
 	if len(libraryIDs) > 0 {
 		enabledLibs, err := s.enabledLibraryIDs(ctx)
@@ -385,7 +391,10 @@ func (s *Store) CollectionSeriesPage(
 	if err != nil {
 		return nil, 0, err
 	}
-	where, args, empty := buildSeriesFilters(q, enabledLibs, UserIDFromContext(ctx))
+	needSeriesFTS := strings.TrimSpace(q.Search) != "" ||
+		len(q.Publishers) > 0 || len(q.Authors) > 0 || len(q.Tags) > 0 || len(q.Genres) > 0
+	seriesFTSReady := needSeriesFTS && s.ensureSearchFTSFresh(ctx, "s")
+	where, args, empty := buildSeriesFilters(q, enabledLibs, UserIDFromContext(ctx), seriesFTSReady)
 	if empty {
 		return []Series{}, 0, nil
 	}
@@ -486,8 +495,12 @@ func (s *Store) ListReadLists(
 	clauses := []string{`r.user_id=?`}
 	args := []any{userID}
 	if q := strings.TrimSpace(search); q != "" {
-		clauses = append(clauses, `r.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
-		args = append(args, "%"+escapeLike(q)+"%")
+		folded := cjk.SearchKey(q)
+		if folded == "" {
+			return []ReadList{}, 0, nil
+		}
+		clauses = append(clauses, `cjk_contains(r.name, ?)`)
+		args = append(args, folded)
 	}
 	if len(libraryIDs) > 0 {
 		enabledLibs, err := s.enabledLibraryIDs(ctx)
@@ -830,7 +843,11 @@ func (s *Store) ReadListBooksPage(
 	if err != nil {
 		return nil, 0, err
 	}
-	where, args, empty := buildBookFilters(q, enabledLibs, !s.ShowNSFW(ctx), UserIDFromContext(ctx))
+	needSeriesFTS := strings.TrimSpace(q.Search) != "" || len(q.Tags) > 0 || len(q.Authors) > 0
+	needBooksFTS := strings.TrimSpace(q.Search) != ""
+	seriesFTSReady := needSeriesFTS && s.ensureSearchFTSFresh(ctx, "s")
+	booksFTSReady := needBooksFTS && s.ensureSearchFTSFresh(ctx, "b")
+	where, args, empty := buildBookFilters(q, enabledLibs, !s.ShowNSFW(ctx), UserIDFromContext(ctx), seriesFTSReady, booksFTSReady)
 	if empty {
 		return []Book{}, 0, nil
 	}

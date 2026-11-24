@@ -629,7 +629,7 @@ func (s *Store) saveSeriesMetadata(ctx context.Context, m SeriesMetadata, now st
 
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO series_metadata(
- `+seriesMetadataColumns+`,title_key,publisher_key,alternate_key
+ `+seriesMetadataColumns+`
 ) VALUES(
  ?,?,?,?,?,
  ?,?,?,?,?,
@@ -640,8 +640,7 @@ INSERT INTO series_metadata(
  ?,?,
  ?,?,?,?,
  ?,?,?,?,
- ?,?,?,?,?,?,?,
- ?,?,?
+ ?,?,?,?,?,?,?
 )
 ON CONFLICT(series_id) DO UPDATE SET
  bgm_subject_id=excluded.bgm_subject_id,
@@ -670,7 +669,6 @@ ON CONFLICT(series_id) DO UPDATE SET
  links_json=excluded.links_json,links_lock=excluded.links_lock,
  sharing_labels_json=excluded.sharing_labels_json,sharing_labels_lock=excluded.sharing_labels_lock,
  is_nsfw=excluded.is_nsfw,nsfw_lock=excluded.nsfw_lock,
- title_key=excluded.title_key,publisher_key=excluded.publisher_key,alternate_key=excluded.alternate_key,
  updated_at=excluded.updated_at`,
 		m.SeriesID, nullableInt64Ptr(m.BgmSubjectID), m.ScrapeStatus, m.ScrapeConfidence, nullableStringPtr(m.ScrapeSyncedAt),
 		m.CoverSource, m.BgmCoverURL, m.BgmCoverPath, nullableFloat64Ptr(m.BgmScore), nullableIntPtr(m.BgmRank),
@@ -683,7 +681,6 @@ ON CONFLICT(series_id) DO UPDATE SET
 		string(authorsJSON), boolInt(m.AuthorsLock), string(altTitlesJSON), boolInt(m.AlternateTitlesLock),
 		string(linksJSON), boolInt(m.LinksLock), string(sharingJSON), boolInt(m.SharingLabelsLock),
 		boolInt(m.IsNSFW), boolInt(m.NSFWLock), now,
-		cjk.SearchKey(m.Title), cjk.SearchKey(m.Publisher), alternateTitlesSearchKey(string(altTitlesJSON)),
 	)
 	if err != nil {
 		return err
@@ -694,7 +691,7 @@ ON CONFLICT(series_id) DO UPDATE SET
 	}
 	for _, genre := range cleanStringSlice(m.Genres) {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO series_genres(series_id,genre,search_key) VALUES(?,?,?)`, m.SeriesID, genre, cjk.SearchKey(genre)); err != nil {
+			`INSERT OR IGNORE INTO series_genres(series_id,genre) VALUES(?,?)`, m.SeriesID, genre); err != nil {
 			return err
 		}
 	}
@@ -704,7 +701,7 @@ ON CONFLICT(series_id) DO UPDATE SET
 	}
 	for _, tag := range cleanStringSlice(m.Tags) {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO series_tags(series_id,tag,search_key) VALUES(?,?,?)`, m.SeriesID, tag, cjk.SearchKey(tag)); err != nil {
+			`INSERT OR IGNORE INTO series_tags(series_id,tag) VALUES(?,?)`, m.SeriesID, tag); err != nil {
 			return err
 		}
 	}
@@ -714,8 +711,8 @@ ON CONFLICT(series_id) DO UPDATE SET
 	}
 	for _, author := range cleanAuthors(m.Authors) {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO series_authors(series_id,name,role,search_key) VALUES(?,?,?,?)`,
-			m.SeriesID, author.Name, author.Role, cjk.SearchKey(author.Name)); err != nil {
+			`INSERT OR IGNORE INTO series_authors(series_id,name,role) VALUES(?,?,?)`,
+			m.SeriesID, author.Name, author.Role); err != nil {
 			return err
 		}
 	}
@@ -844,9 +841,21 @@ func (s *Store) queryAuthorsTop(
 		clauses = append(clauses, `s.id NOT IN (SELECT series_id FROM series_metadata WHERE is_nsfw=1)`)
 	}
 	if search != "" {
-		if key := cjk.SearchKey(search); key != "" {
-			clauses = append(clauses, `sa.search_key LIKE ? ESCAPE '\'`)
-			args = append(args, "%"+escapeLike(key)+"%")
+		folded := cjk.SearchKey(search)
+		if folded == "" {
+			return []Author{}, nil
+		}
+		if phrase := cjk.FTSQueryPhrase(search); phrase != "" {
+			if s.ensureSearchFTSFresh(ctx, "s") {
+				clauses = append(clauses, `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)) AND cjk_contains(sa.name, ?)`)
+				args = append(args, "authors_fts : "+phrase, folded)
+			} else {
+				clauses = append(clauses, `cjk_contains(sa.name, ?)`)
+				args = append(args, folded)
+			}
+		} else {
+			clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
+			args = append(args, "%"+escapeLike(search)+"%")
 		}
 	}
 	if role != "" {
@@ -923,9 +932,21 @@ func (s *Store) AuthorsPage(ctx context.Context, q AuthorQuery) ([]Author, int64
 		}
 	}
 	if search := strings.TrimSpace(q.Search); search != "" {
-		if key := cjk.SearchKey(search); key != "" {
-			clauses = append(clauses, `sa.search_key LIKE ? ESCAPE '\'`)
-			args = append(args, "%"+escapeLike(key)+"%")
+		folded := cjk.SearchKey(search)
+		if folded == "" {
+			return []Author{}, 0, nil
+		}
+		if phrase := cjk.FTSQueryPhrase(search); phrase != "" {
+			if s.ensureSearchFTSFresh(ctx, "s") {
+				clauses = append(clauses, `s.rowid IN (SELECT f.rowid FROM series_search_fts f WHERE f.series_search_fts MATCH ? AND NOT EXISTS (SELECT 1 FROM search_fts_dirty _sd WHERE _sd.kind='s' AND _sd.row_id=f.rowid)) AND cjk_contains(sa.name, ?)`)
+				args = append(args, "authors_fts : "+phrase, folded)
+			} else {
+				clauses = append(clauses, `cjk_contains(sa.name, ?)`)
+				args = append(args, folded)
+			}
+		} else {
+			clauses = append(clauses, `sa.name LIKE ? ESCAPE '\' COLLATE NOCASE`)
+			args = append(args, "%"+escapeLike(search)+"%")
 		}
 	}
 	if role := strings.TrimSpace(q.Role); role != "" {

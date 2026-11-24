@@ -338,9 +338,9 @@ func TestV2AuthAndMihonKomgaContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.DB().Exec(`
-INSERT INTO series(id,library_id,cid,name,search_key,relative_path,one_shot,created_at,updated_at,seen_scan_id)
-VALUES(?,?,?,?,?,?,1,?,?,'scan')`,
-		seriesID, libraryID, "series-cid", "One Shot", "one shot", "Root/One Shot.cbz", now, now); err != nil {
+INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,updated_at,seen_scan_id)
+VALUES(?,?,?,?,?,1,?,?,'scan')`,
+		seriesID, libraryID, "series-cid", "One Shot", "Root/One Shot.cbz", now, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB().Exec(`

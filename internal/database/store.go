@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -25,9 +26,18 @@ type Store struct {
 	unionMu        sync.Mutex
 	basicAuthMu    sync.RWMutex
 	basicAuthCache map[string]time.Time
+
+	ftsMu          sync.Mutex
+	ftsSeriesReady atomic.Bool
+	ftsBooksReady  atomic.Bool
+	ftsStopCtx     context.Context
+	ftsStopCancel  context.CancelFunc
+	ftsWake        chan struct{}
+	ftsWG          sync.WaitGroup
 }
 
 func Open(path string) (*Store, error) {
+	registerCJKSQLFunctions()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
@@ -51,19 +61,31 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	ftsCtx, ftsCancel := context.WithCancel(context.Background())
 	s := &Store{
 		db:             db,
 		basicAuthCache: make(map[string]time.Time),
+		ftsStopCtx:     ftsCtx,
+		ftsStopCancel:  ftsCancel,
+		ftsWake:        make(chan struct{}, 1),
 	}
 	if err := s.ensureDefaults(context.Background()); err != nil {
+		ftsCancel()
 		db.Close()
 		return nil, err
 	}
+	s.startSearchFTSWorker()
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
-func (s *Store) DB() *sql.DB  { return s.db }
+func (s *Store) Close() error {
+	if s.ftsStopCancel != nil {
+		s.ftsStopCancel()
+	}
+	s.ftsWG.Wait()
+	return s.db.Close()
+}
+func (s *Store) DB() *sql.DB { return s.db }
 
 func (s *Store) ensureDefaults(ctx context.Context) error {
 	defaults := map[string]string{

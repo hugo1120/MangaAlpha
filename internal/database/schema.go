@@ -151,7 +151,6 @@ CREATE TABLE IF NOT EXISTS series (
   library_id TEXT NOT NULL,
   cid TEXT NOT NULL,
   name TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   relative_path TEXT NOT NULL,
   one_shot INTEGER NOT NULL DEFAULT 0,
   file_modified_at TEXT,
@@ -176,7 +175,6 @@ CREATE TABLE IF NOT EXISTS books (
   file_id TEXT NOT NULL,
   parent_cid TEXT NOT NULL,
   name TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL,
   pick_code TEXT NOT NULL,
   sha1 TEXT NOT NULL DEFAULT '',
@@ -202,7 +200,6 @@ CREATE TABLE IF NOT EXISTS scan_series_staging (
   library_id TEXT NOT NULL,
   cid TEXT NOT NULL,
   name TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   relative_path TEXT NOT NULL,
   one_shot INTEGER NOT NULL DEFAULT 0,
   file_modified_at TEXT,
@@ -221,7 +218,6 @@ CREATE TABLE IF NOT EXISTS scan_books_staging (
   file_id TEXT NOT NULL,
   parent_cid TEXT NOT NULL,
   name TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   size INTEGER NOT NULL,
   pick_code TEXT NOT NULL,
   sha1 TEXT NOT NULL DEFAULT '',
@@ -249,7 +245,6 @@ CREATE TABLE IF NOT EXISTS series_metadata (
   status TEXT NOT NULL DEFAULT 'ONGOING',
   status_lock INTEGER NOT NULL DEFAULT 0,
   title TEXT NOT NULL DEFAULT '',
-  title_key TEXT NOT NULL DEFAULT '',
   title_lock INTEGER NOT NULL DEFAULT 0,
   title_sort TEXT NOT NULL DEFAULT '',
   title_sort_lock INTEGER NOT NULL DEFAULT 0,
@@ -258,7 +253,6 @@ CREATE TABLE IF NOT EXISTS series_metadata (
   reading_direction TEXT NOT NULL DEFAULT 'LEFT_TO_RIGHT',
   reading_direction_lock INTEGER NOT NULL DEFAULT 0,
   publisher TEXT NOT NULL DEFAULT '',
-  publisher_key TEXT NOT NULL DEFAULT '',
   publisher_lock INTEGER NOT NULL DEFAULT 0,
   age_rating INTEGER,
   age_rating_lock INTEGER NOT NULL DEFAULT 0,
@@ -275,7 +269,6 @@ CREATE TABLE IF NOT EXISTS series_metadata (
   authors_json TEXT NOT NULL DEFAULT '[]',
   authors_lock INTEGER NOT NULL DEFAULT 0,
   alternate_titles_json TEXT NOT NULL DEFAULT '[]',
-  alternate_key TEXT NOT NULL DEFAULT '',
   alternate_titles_lock INTEGER NOT NULL DEFAULT 0,
   links_json TEXT NOT NULL DEFAULT '[]',
   links_lock INTEGER NOT NULL DEFAULT 0,
@@ -294,7 +287,6 @@ CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_id ON series_metadata(bgm_sub
 CREATE TABLE IF NOT EXISTS series_genres (
   series_id TEXT NOT NULL,
   genre TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(series_id, genre),
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
@@ -303,7 +295,6 @@ CREATE INDEX IF NOT EXISTS idx_series_genres_genre ON series_genres(genre COLLAT
 CREATE TABLE IF NOT EXISTS series_tags (
   series_id TEXT NOT NULL,
   tag TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   PRIMARY KEY(series_id, tag),
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
@@ -312,7 +303,6 @@ CREATE INDEX IF NOT EXISTS idx_series_tags_tag ON series_tags(tag COLLATE NOCASE
 CREATE TABLE IF NOT EXISTS series_authors (
   series_id TEXT NOT NULL,
   name TEXT NOT NULL,
-  search_key TEXT NOT NULL DEFAULT '',
   role TEXT NOT NULL,
   PRIMARY KEY(series_id, name, role),
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE

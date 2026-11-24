@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"testing"
 	"time"
-
-	"github.com/xJogger/fake-komga-115/internal/cjk"
 )
 
 func TestSeriesPageSortsByRemoteBookTimes(t *testing.T) {
@@ -322,19 +320,19 @@ func insertCatalogSeries(
 	t.Helper()
 	now := time.Date(2026, 6, 11, 0, 0, 0, 0, time.UTC).Format(time.RFC3339Nano)
 	if _, err := store.DB().Exec(`
-INSERT INTO series(id,library_id,cid,name,search_key,relative_path,created_at,updated_at,seen_scan_id)
-VALUES(?,?,?,?,?,?,?,?,'scan')`,
-		seriesID, libraryID, "cid-"+seriesID, name, cjk.SearchKey(name), name, now, now); err != nil {
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES(?,?,?,?,?,?,?,'scan')`,
+		seriesID, libraryID, "cid-"+seriesID, name, name, now, now); err != nil {
 		t.Fatal(err)
 	}
 	for index, item := range bookTimes {
 		if _, err := store.DB().Exec(`
 INSERT INTO books(
- id,series_id,library_id,file_id,parent_cid,name,search_key,size,pick_code,
+ id,series_id,library_id,file_id,parent_cid,name,size,pick_code,
  file_created_at,file_modified_at,number_sort,created_at,updated_at,seen_scan_id
-) VALUES(?,?,?,?,?,?,?,1,?,?,?,?,?,?,'scan')`,
+) VALUES(?,?,?,?,?,?,1,?,?,?,?,?,?,'scan')`,
 			seriesID+"-book-"+string(rune('a'+index)), seriesID, libraryID,
-			seriesID+"-file-"+string(rune('a'+index)), "parent", "book.cbz", cjk.SearchKey("book.cbz"), "pick",
+			seriesID+"-file-"+string(rune('a'+index)), "parent", "book.cbz", "pick",
 			item.created, item.modified, float64(index+1), now, now); err != nil {
 			t.Fatal(err)
 		}

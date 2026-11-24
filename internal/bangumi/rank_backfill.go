@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xJogger/fake-komga-115/internal/cjk"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
@@ -290,7 +289,6 @@ func (s *Service) applyOfflineMetadataBatch(
 UPDATE series_metadata SET
  bgm_score=?,bgm_rank=?,
  status=?,title=?,title_sort=?,summary=?,publisher=?,
- title_key=?,publisher_key=?,alternate_key=?,
  total_book_count=?,release_date=?,
  genres_json=?,tags_json=?,authors_json=?,alternate_titles_json=?,links_json=?,
  is_nsfw=?,updated_at=?
@@ -305,7 +303,7 @@ WHERE series_id=?`)
 		return 0, err
 	}
 	defer delGenres.Close()
-	insGenres, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_genres(series_id,genre,search_key) VALUES(?,?,?)`)
+	insGenres, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_genres(series_id,genre) VALUES(?,?)`)
 	if err != nil {
 		return 0, err
 	}
@@ -316,7 +314,7 @@ WHERE series_id=?`)
 		return 0, err
 	}
 	defer delTags.Close()
-	insTags, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_tags(series_id,tag,search_key) VALUES(?,?,?)`)
+	insTags, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_tags(series_id,tag) VALUES(?,?)`)
 	if err != nil {
 		return 0, err
 	}
@@ -327,7 +325,7 @@ WHERE series_id=?`)
 		return 0, err
 	}
 	defer delAuthors.Close()
-	insAuthors, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_authors(series_id,name,role,search_key) VALUES(?,?,?,?)`)
+	insAuthors, err := tx.PrepareContext(ctx, `INSERT OR IGNORE INTO series_authors(series_id,name,role) VALUES(?,?,?)`)
 	if err != nil {
 		return 0, err
 	}
@@ -337,7 +335,6 @@ WHERE series_id=?`)
 		if _, err := stmt.ExecContext(ctx,
 			u.bgmScore, u.bgmRank,
 			u.status, u.title, u.titleSort, u.summary, u.publisher,
-			cjk.SearchKey(u.title), cjk.SearchKey(u.publisher), alternateTitlesSearchKey(u.alternateTitlesJSON),
 			u.totalBookCount, u.releaseDate,
 			u.genresJSON, u.tagsJSON, u.authorsJSON, u.alternateTitlesJSON, u.linksJSON,
 			u.isNSFW, now, u.seriesID,
@@ -349,7 +346,7 @@ WHERE series_id=?`)
 				return 0, err
 			}
 			for _, g := range u.genres {
-				if _, err := insGenres.ExecContext(ctx, u.seriesID, g, cjk.SearchKey(g)); err != nil {
+				if _, err := insGenres.ExecContext(ctx, u.seriesID, g); err != nil {
 					return 0, err
 				}
 			}
@@ -359,7 +356,7 @@ WHERE series_id=?`)
 				return 0, err
 			}
 			for _, tg := range u.tags {
-				if _, err := insTags.ExecContext(ctx, u.seriesID, tg, cjk.SearchKey(tg)); err != nil {
+				if _, err := insTags.ExecContext(ctx, u.seriesID, tg); err != nil {
 					return 0, err
 				}
 			}
@@ -369,7 +366,7 @@ WHERE series_id=?`)
 				return 0, err
 			}
 			for _, au := range u.authors {
-				if _, err := insAuthors.ExecContext(ctx, u.seriesID, au.Name, au.Role, cjk.SearchKey(au.Name)); err != nil {
+				if _, err := insAuthors.ExecContext(ctx, u.seriesID, au.Name, au.Role); err != nil {
 					return 0, err
 				}
 			}
@@ -382,23 +379,6 @@ WHERE series_id=?`)
 		return 0, err
 	}
 	return len(updates), nil
-}
-
-func alternateTitlesSearchKey(raw string) string {
-	if strings.TrimSpace(raw) == "" {
-		return ""
-	}
-	var titles []string
-	if err := json.Unmarshal([]byte(raw), &titles); err != nil {
-		return ""
-	}
-	keys := make([]string, 0, len(titles))
-	for _, title := range titles {
-		if key := cjk.SearchKey(title); key != "" {
-			keys = append(keys, key)
-		}
-	}
-	return strings.Join(keys, " ")
 }
 
 func diffOfflineMetadataRow(cur storedSeriesMetaRow, cand SubjectCandidate) (pendingMetaUpdate, bool) {

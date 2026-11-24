@@ -17,23 +17,6 @@ const (
 	sqlInChunkSize                    = 400
 )
 
-// foldedFilterValues turns display values (東立, 东立) into the same folded
-// key so exact taxonomy filters match either spelling.
-func foldedFilterValues(items []string) []string {
-	cleaned := cleanStringSlice(items)
-	out := make([]string, 0, len(cleaned))
-	seen := make(map[string]bool, len(cleaned))
-	for _, item := range cleaned {
-		key := cjk.SearchKey(item)
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		out = append(out, key)
-	}
-	return out
-}
-
 type SeriesQuery struct {
 	Search        string
 	LibraryIDs    []string
@@ -107,6 +90,10 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 			return []Series{}, 0, nil
 		}
 	}
+	needSeriesFTS := strings.TrimSpace(q.Search) != "" ||
+		len(q.Publishers) > 0 || len(q.Authors) > 0 || len(q.Tags) > 0 || len(q.Genres) > 0
+	seriesFTSReady := needSeriesFTS && s.ensureSearchFTSFresh(ctx, "s")
+
 	searchDriven := false
 	var searchCandSQL string
 	var searchCandArgs []any
@@ -123,7 +110,7 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 		} else if len(q.LibraryIDs) > 0 {
 			searchLibs = cleanStringSliceCaseSensitive(q.LibraryIDs)
 		}
-		if candSQL, candArgs, ok := buildSeriesSearchCandidateSQL(q.Search, searchLibs); ok {
+		if candSQL, candArgs, ok := buildSeriesSearchCandidateSQL(q.Search, searchLibs, seriesFTSReady); ok {
 			searchCandSQL = candSQL
 			searchCandArgs = candArgs
 			source = " FROM (" + candSQL + ") _drv CROSS JOIN series s ON s.id=_drv.series_id"
@@ -136,7 +123,7 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 	if searchDriven {
 		filterQ.Search = ""
 	}
-	where, args, empty := buildSeriesFilters(filterQ, enabledLibs, userID)
+	where, args, empty := buildSeriesFilters(filterQ, enabledLibs, userID, seriesFTSReady)
 	if empty {
 		return []Series{}, 0, nil
 	}
@@ -147,9 +134,26 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 		len(q.ReadStatus) == 0
 	noExtraFilters := noExtraNonSearchFilters && strings.TrimSpace(q.Search) == ""
 	if !q.GroupBangumi && !searchDriven {
-		if drvSQL, drvArgs := selectiveSeriesDriver(q, userID); drvSQL != "" {
+		if drvSQL, drvArgs, drvKind := selectiveSeriesDriver(q, userID, seriesFTSReady); drvSQL != "" {
 			source = " FROM (" + drvSQL + ") _drv CROSS JOIN series s ON s.id=_drv.series_id"
 			sourceArgs = drvArgs
+			// Avoid evaluating the same selective driver subquery a second time inside WHERE.
+			switch drvKind {
+			case "collection":
+				filterQ.CollectionIDs = nil
+			case "publisher":
+				filterQ.Publishers = nil
+			case "author":
+				filterQ.Authors = nil
+			case "tag":
+				filterQ.Tags = nil
+			case "genre":
+				filterQ.Genres = nil
+			}
+			where, args, empty = buildSeriesFilters(filterQ, enabledLibs, userID, seriesFTSReady)
+			if empty {
+				return []Series{}, 0, nil
+			}
 		}
 	}
 	sortValue := strings.ToLower(strings.TrimSpace(q.Sort))
@@ -173,21 +177,21 @@ func (s *Store) querySeriesPage(ctx context.Context, q SeriesQuery) ([]Series, i
 			prefix := escapeLike(key) + "%"
 			contains := "%" + escapeLike(key) + "%"
 			primary = `CASE
- WHEN COALESCE(NULLIF((SELECT sm.title_key FROM series_metadata sm WHERE sm.series_id=s.id),''), s.search_key) = ? THEN 0
- WHEN s.search_key = ? THEN 1
- WHEN COALESCE(NULLIF((SELECT sm.title_key FROM series_metadata sm WHERE sm.series_id=s.id),''), s.search_key) LIKE ? ESCAPE '\' THEN 2
- WHEN s.search_key LIKE ? ESCAPE '\' THEN 3
- WHEN COALESCE(NULLIF((SELECT sm.title_key FROM series_metadata sm WHERE sm.series_id=s.id),''), s.search_key) LIKE ? ESCAPE '\' THEN 4
- WHEN s.search_key LIKE ? ESCAPE '\' THEN 5
+ WHEN cjk_key(COALESCE(NULLIF((SELECT sm.title FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name)) = ? THEN 0
+ WHEN cjk_key(s.name) = ? THEN 1
+ WHEN cjk_key(COALESCE(NULLIF((SELECT sm.title FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name)) LIKE ? ESCAPE '\' THEN 2
+ WHEN cjk_key(s.name) LIKE ? ESCAPE '\' THEN 3
+ WHEN cjk_key(COALESCE(NULLIF((SELECT sm.title FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name)) LIKE ? ESCAPE '\' THEN 4
+ WHEN cjk_key(s.name) LIKE ? ESCAPE '\' THEN 5
  ELSE 6 END`
 			ties = ` ASC, COALESCE(NULLIF((SELECT sm.title_sort FROM series_metadata sm WHERE sm.series_id=s.id),''), s.name) COLLATE NOCASE ASC, s.id ASC`
 			searchPrimary = `CASE
- WHEN COALESCE(NULLIF(sm.title_key,''), s.search_key) = ? THEN 0
- WHEN s.search_key = ? THEN 1
- WHEN COALESCE(NULLIF(sm.title_key,''), s.search_key) LIKE ? ESCAPE '\' THEN 2
- WHEN s.search_key LIKE ? ESCAPE '\' THEN 3
- WHEN COALESCE(NULLIF(sm.title_key,''), s.search_key) LIKE ? ESCAPE '\' THEN 4
- WHEN s.search_key LIKE ? ESCAPE '\' THEN 5
+ WHEN cjk_key(COALESCE(NULLIF(sm.title,''), s.name)) = ? THEN 0
+ WHEN cjk_key(s.name) = ? THEN 1
+ WHEN cjk_key(COALESCE(NULLIF(sm.title,''), s.name)) LIKE ? ESCAPE '\' THEN 2
+ WHEN cjk_key(s.name) LIKE ? ESCAPE '\' THEN 3
+ WHEN cjk_key(COALESCE(NULLIF(sm.title,''), s.name)) LIKE ? ESCAPE '\' THEN 4
+ WHEN cjk_key(s.name) LIKE ? ESCAPE '\' THEN 5
  ELSE 6 END`
 			searchTies = ` ASC, COALESCE(NULLIF(sm.title_sort,''), s.name) COLLATE NOCASE ASC, s.id ASC`
 			orderArgs = append(orderArgs, key, key, prefix, prefix, contains, contains)
@@ -349,7 +353,7 @@ SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,s.file_modified
 	return items, total, err
 }
 
-func selectiveSeriesDriver(q SeriesQuery, userID string) (string, []any) {
+func selectiveSeriesDriver(q SeriesQuery, userID string, useFTS bool) (string, []any, string) {
 	if len(q.CollectionIDs) > 0 {
 		ids := cleanStringSliceCaseSensitive(q.CollectionIDs)
 		args := make([]any, 0, 1+len(ids))
@@ -357,53 +361,25 @@ func selectiveSeriesDriver(q SeriesQuery, userID string) (string, []any) {
 		for _, id := range ids {
 			args = append(args, id)
 		}
-		return `SELECT DISTINCT cs.series_id FROM collection_series cs JOIN collections c ON c.id=cs.collection_id WHERE c.user_id=? AND cs.collection_id IN ` + Placeholders(len(ids)), args
+		return `SELECT DISTINCT cs.series_id FROM collection_series cs JOIN collections c ON c.id=cs.collection_id WHERE c.user_id=? AND cs.collection_id IN ` + Placeholders(len(ids)), args, "collection"
 	}
 	if len(q.Publishers) > 0 {
-		pubs := foldedFilterValues(q.Publishers)
-		if len(pubs) == 0 {
-			return `SELECT DISTINCT sm.series_id FROM series_metadata sm WHERE 0`, nil
-		}
-		args := make([]any, len(pubs))
-		for i, p := range pubs {
-			args[i] = p
-		}
-		return `SELECT DISTINCT sm.series_id FROM series_metadata sm WHERE sm.publisher_key IN ` + Placeholders(len(pubs)), args
+		sql, args := buildFoldedTaxonomySeriesSubquery("sm", "series_metadata", "publisher", "publisher_fts", q.Publishers, useFTS)
+		return sql, args, "publisher"
 	}
 	if len(q.Authors) > 0 {
-		authors := foldedFilterValues(q.Authors)
-		if len(authors) == 0 {
-			return `SELECT DISTINCT sa.series_id FROM series_authors sa WHERE 0`, nil
-		}
-		args := make([]any, len(authors))
-		for i, a := range authors {
-			args[i] = a
-		}
-		return `SELECT DISTINCT sa.series_id FROM series_authors sa WHERE sa.search_key IN ` + Placeholders(len(authors)), args
+		sql, args := buildFoldedTaxonomySeriesSubquery("sa", "series_authors", "name", "authors_fts", q.Authors, useFTS)
+		return sql, args, "author"
 	}
 	if len(q.Tags) > 0 {
-		tags := foldedFilterValues(q.Tags)
-		if len(tags) == 0 {
-			return `SELECT DISTINCT st.series_id FROM series_tags st WHERE 0`, nil
-		}
-		args := make([]any, len(tags))
-		for i, t := range tags {
-			args[i] = t
-		}
-		return `SELECT DISTINCT st.series_id FROM series_tags st WHERE st.search_key IN ` + Placeholders(len(tags)), args
+		sql, args := buildFoldedTaxonomySeriesSubquery("st", "series_tags", "tag", "tags_fts", q.Tags, useFTS)
+		return sql, args, "tag"
 	}
 	if len(q.Genres) > 0 {
-		genres := foldedFilterValues(q.Genres)
-		if len(genres) == 0 {
-			return `SELECT DISTINCT sg.series_id FROM series_genres sg WHERE 0`, nil
-		}
-		args := make([]any, len(genres))
-		for i, g := range genres {
-			args[i] = g
-		}
-		return `SELECT DISTINCT sg.series_id FROM series_genres sg WHERE sg.search_key IN ` + Placeholders(len(genres)), args
+		sql, args := buildFoldedTaxonomySeriesSubquery("sg", "series_genres", "genre", "genres_fts", q.Genres, useFTS)
+		return sql, args, "genre"
 	}
-	return "", nil
+	return "", nil, ""
 }
 
 func (s *Store) querySeriesBgmRankAscFast(
@@ -626,6 +602,11 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 		}
 	}
 
+	needSeriesFTS := strings.TrimSpace(q.Search) != "" || len(q.Tags) > 0 || len(q.Authors) > 0
+	needBooksFTS := strings.TrimSpace(q.Search) != ""
+	seriesFTSReady := needSeriesFTS && s.ensureSearchFTSFresh(ctx, "s")
+	booksFTSReady := needBooksFTS && s.ensureSearchFTSFresh(ctx, "b")
+
 	progMode := progressTableMode(q.ReadStatus)
 	if progMode != "" {
 		q.ReadStatus = nil
@@ -640,7 +621,7 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 		if libEmpty {
 			return []Book{}, 0, nil
 		}
-		if candSQL, candArgs, ok := buildBookSearchCandidateSQL(q.Search, searchLibs); ok {
+		if candSQL, candArgs, ok := buildBookSearchCandidateSQL(q.Search, searchLibs, seriesFTSReady, booksFTSReady); ok {
 			bookCandSQL = candSQL
 			bookCandArgs = candArgs
 			source = " FROM (" + candSQL + ") _bdrv CROSS JOIN books b ON b.rowid=_bdrv.book_rowid"
@@ -654,7 +635,7 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 	}
 	userID := UserIDFromContext(ctx)
 	excludeNSFW := !s.ShowNSFW(ctx)
-	where, args, empty := buildBookFilters(filterQ, enabledLibs, excludeNSFW, userID)
+	where, args, empty := buildBookFilters(filterQ, enabledLibs, excludeNSFW, userID, seriesFTSReady, booksFTSReady)
 	if empty {
 		return []Book{}, 0, nil
 	}
@@ -677,15 +658,16 @@ func (s *Store) queryBooksPage(ctx context.Context, q BookQuery) ([]Book, int64,
 		order = "RANDOM()"
 	case strings.HasPrefix(sortValue, "relevance") && strings.TrimSpace(q.Search) != "":
 		phrase := extractPrimarySearchPhrase(q.Search)
-		if phrase != "" {
-			prefix := escapeLike(phrase) + "%"
-			contains := "%" + escapeLike(phrase) + "%"
+		key := cjk.SearchKey(phrase)
+		if phrase != "" && key != "" {
+			prefix := escapeLike(key) + "%"
+			contains := "%" + escapeLike(key) + "%"
 			order = `CASE
- WHEN b.name = ? COLLATE NOCASE THEN 0
- WHEN b.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 1
- WHEN b.name LIKE ? ESCAPE '\' COLLATE NOCASE THEN 2
+ WHEN cjk_key(b.name) = ? THEN 0
+ WHEN cjk_key(b.name) LIKE ? ESCAPE '\' THEN 1
+ WHEN cjk_key(b.name) LIKE ? ESCAPE '\' THEN 2
  ELSE 3 END ASC, b.name COLLATE NOCASE ASC, b.number_sort ASC, b.id ASC`
-			orderArgs = append(orderArgs, phrase, prefix, contains)
+			orderArgs = append(orderArgs, key, prefix, contains)
 		}
 	case strings.HasPrefix(sortValue, "readprogress.readdate"), strings.HasPrefix(sortValue, "readdate"):
 		if progMode != "" {
@@ -1131,7 +1113,7 @@ func intersectLibraryIDs(requested, enabled []string) ([]string, bool) {
 	return out, len(out) == 0
 }
 
-func buildSeriesFilters(q SeriesQuery, enabledLibs []string, userID string) (string, []any, bool) {
+func buildSeriesFilters(q SeriesQuery, enabledLibs []string, userID string, useFTS bool) (string, []any, bool) {
 	var clauses []string
 	var args []any
 	if !q.IncludeHidden {
@@ -1170,7 +1152,7 @@ func buildSeriesFilters(q SeriesQuery, enabledLibs []string, userID string) (str
 			args = append(args, id)
 		}
 	}
-	if searchSQL, searchArgs := buildSeriesSearchSQL(q.Search); searchSQL != "" {
+	if searchSQL, searchArgs := buildSeriesSearchSQL(q.Search, useFTS); searchSQL != "" {
 		clauses = append(clauses, searchSQL)
 		args = append(args, searchArgs...)
 	}
@@ -1196,51 +1178,27 @@ func buildSeriesFilters(q SeriesQuery, enabledLibs []string, userID string) (str
 		}
 	}
 	if len(q.Genres) > 0 {
-		genres := foldedFilterValues(q.Genres)
-		if len(genres) == 0 {
-			clauses = append(clauses, "0")
-		} else {
-			clauses = append(clauses,
-				`s.id IN (SELECT sg.series_id FROM series_genres sg WHERE sg.search_key IN `+Placeholders(len(genres))+`)`)
-			for _, g := range genres {
-				args = append(args, g)
-			}
+		if sub, subArgs := buildFoldedTaxonomySeriesSubquery("sg", "series_genres", "genre", "genres_fts", q.Genres, useFTS); sub != "" {
+			clauses = append(clauses, `s.id IN (`+sub+`)`)
+			args = append(args, subArgs...)
 		}
 	}
 	if len(q.Tags) > 0 {
-		tags := foldedFilterValues(q.Tags)
-		if len(tags) == 0 {
-			clauses = append(clauses, "0")
-		} else {
-			clauses = append(clauses,
-				`s.id IN (SELECT st.series_id FROM series_tags st WHERE st.search_key IN `+Placeholders(len(tags))+`)`)
-			for _, t := range tags {
-				args = append(args, t)
-			}
+		if sub, subArgs := buildFoldedTaxonomySeriesSubquery("st", "series_tags", "tag", "tags_fts", q.Tags, useFTS); sub != "" {
+			clauses = append(clauses, `s.id IN (`+sub+`)`)
+			args = append(args, subArgs...)
 		}
 	}
 	if len(q.Publishers) > 0 {
-		pubs := foldedFilterValues(q.Publishers)
-		if len(pubs) == 0 {
-			clauses = append(clauses, "0")
-		} else {
-			clauses = append(clauses,
-				`s.id IN (SELECT sm.series_id FROM series_metadata sm WHERE sm.publisher_key IN `+Placeholders(len(pubs))+`)`)
-			for _, p := range pubs {
-				args = append(args, p)
-			}
+		if sub, subArgs := buildFoldedTaxonomySeriesSubquery("sm", "series_metadata", "publisher", "publisher_fts", q.Publishers, useFTS); sub != "" {
+			clauses = append(clauses, `s.id IN (`+sub+`)`)
+			args = append(args, subArgs...)
 		}
 	}
 	if len(q.Authors) > 0 {
-		authors := foldedFilterValues(q.Authors)
-		if len(authors) == 0 {
-			clauses = append(clauses, "0")
-		} else {
-			clauses = append(clauses,
-				`s.id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.search_key IN `+Placeholders(len(authors))+`)`)
-			for _, a := range authors {
-				args = append(args, a)
-			}
+		if sub, subArgs := buildFoldedTaxonomySeriesSubquery("sa", "series_authors", "name", "authors_fts", q.Authors, useFTS); sub != "" {
+			clauses = append(clauses, `s.id IN (`+sub+`)`)
+			args = append(args, subArgs...)
 		}
 	}
 	if len(q.Languages) > 0 {
@@ -1348,7 +1306,7 @@ func seriesUnreadCondition() string {
 )`
 }
 
-func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool, userID string) (string, []any, bool) {
+func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool, userID string, useSeriesFTS, useBooksFTS bool) (string, []any, bool) {
 	libs, empty := intersectLibraryIDs(q.LibraryIDs, enabledLibs)
 	if empty {
 		return "", nil, true
@@ -1373,7 +1331,7 @@ func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool, userI
 			args = append(args, id)
 		}
 	}
-	if searchSQL, searchArgs := buildBookSearchSQL(q.Search); searchSQL != "" {
+	if searchSQL, searchArgs := buildBookSearchSQL(q.Search, useSeriesFTS, useBooksFTS); searchSQL != "" {
 		clauses = append(clauses, searchSQL)
 		args = append(args, searchArgs...)
 	}
@@ -1387,27 +1345,15 @@ func buildBookFilters(q BookQuery, enabledLibs []string, excludeNSFW bool, userI
 		args = append(args, *q.OneShot)
 	}
 	if len(q.Tags) > 0 {
-		tags := foldedFilterValues(q.Tags)
-		if len(tags) == 0 {
-			clauses = append(clauses, "0")
-		} else {
-			clauses = append(clauses,
-				`b.series_id IN (SELECT st.series_id FROM series_tags st WHERE st.search_key IN `+Placeholders(len(tags))+`)`)
-			for _, t := range tags {
-				args = append(args, t)
-			}
+		if sub, subArgs := buildFoldedTaxonomySeriesSubquery("st", "series_tags", "tag", "tags_fts", q.Tags, useSeriesFTS); sub != "" {
+			clauses = append(clauses, `b.series_id IN (`+sub+`)`)
+			args = append(args, subArgs...)
 		}
 	}
 	if len(q.Authors) > 0 {
-		authors := foldedFilterValues(q.Authors)
-		if len(authors) == 0 {
-			clauses = append(clauses, "0")
-		} else {
-			clauses = append(clauses,
-				`b.series_id IN (SELECT sa.series_id FROM series_authors sa WHERE sa.search_key IN `+Placeholders(len(authors))+`)`)
-			for _, a := range authors {
-				args = append(args, a)
-			}
+		if sub, subArgs := buildFoldedTaxonomySeriesSubquery("sa", "series_authors", "name", "authors_fts", q.Authors, useSeriesFTS); sub != "" {
+			clauses = append(clauses, `b.series_id IN (`+sub+`)`)
+			args = append(args, subArgs...)
 		}
 	}
 	if conditions, condArgs := readStatusConditions(q.ReadStatus, "book", userID); len(conditions) > 0 {

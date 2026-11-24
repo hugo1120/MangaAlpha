@@ -1304,6 +1304,20 @@ table.data-table .btn {
   flex-shrink: 0;
 }
 
+.confirm-backdrop {
+  z-index: 110;
+}
+
+.confirm-message {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .bgm-candidate {
   display: flex;
   gap: 14px;
@@ -1333,6 +1347,7 @@ table.data-table .btn {
   flex-direction: column;
   gap: 8px;
   max-width: 360px;
+  pointer-events: none;
 }
 
 .toast {
@@ -1342,6 +1357,7 @@ table.data-table .btn {
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow);
   font-size: 13px;
+  pointer-events: auto;
 }
 
 .toast-error { border-left: 4px solid var(--danger); }
@@ -1632,6 +1648,10 @@ table.data-table .btn {
     padding: 8px;
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
+  }
+  .modal-backdrop.confirm-backdrop {
+    align-items: center;
+    padding: 16px;
   }
   .modal-dialog {
     max-height: calc(var(--vvh, 100dvh) - 16px);

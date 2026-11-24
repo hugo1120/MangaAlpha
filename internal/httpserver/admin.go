@@ -453,10 +453,19 @@ func (s *Server) deleteWebDAVAccount(w http.ResponseWriter, r *http.Request) {
 	err := s.store.DeleteWebDAVAccount(r.Context(), chi.URLParam(r, "accountID"))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "WebDAV account not found.")
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "WebDAV 账号不存在或已被删除。")
 			return
 		}
-		writeError(w, http.StatusConflict, "WEBDAV_IN_USE", err.Error())
+		var inUseErr *database.WebDAVAccountInUseError
+		if errors.As(err, &inUseErr) {
+			msg := "无法删除该 WebDAV 账号：仍有书库正在使用，请先在「书库管理」中移除对应书库。"
+			if len(inUseErr.Libraries) > 0 {
+				msg = "无法删除该 WebDAV 账号，以下书库仍在使用：" + strings.Join(inUseErr.Libraries, "、") + "。请先在「书库管理」中移除对应书库。"
+			}
+			writeError(w, http.StatusConflict, "WEBDAV_IN_USE", msg)
+			return
+		}
+		s.writeDBError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -667,7 +676,9 @@ func (s *Server) createLibrary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.store.UpsertLibrary(r.Context(), item); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+		if errors.Is(err, database.ErrWebDAVAccountNotFound) {
+			writeError(w, 400, "INVALID_WEBDAV_ACCOUNT", "Selected WebDAV account does not exist")
+		} else if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			writeError(w, 409, "LIBRARY_EXISTS", "This library root is already configured.")
 		} else {
 			s.writeDBError(w, r, err)

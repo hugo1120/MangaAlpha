@@ -23,6 +23,9 @@ import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.webkit.CookieManager;
 import android.webkit.JavascriptInterface;
+import android.webkit.JsPromptResult;
+import android.webkit.JsResult;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
@@ -30,12 +33,14 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import org.json.JSONObject;
+import java.util.concurrent.atomic.AtomicBoolean;
 import mobile.Instance;
 
 public final class MainActivity extends Activity {
@@ -45,6 +50,8 @@ public final class MainActivity extends Activity {
     private static final int COLOR_READER_BG = 0xFF000000;
 
     private WebView web;
+    private AlertDialog activeJsDialog;
+    private Runnable activeJsCancel;
     private LinearLayout statusPane;
     private TextView status;
     private FrameLayout frame;
@@ -194,6 +201,7 @@ public final class MainActivity extends Activity {
     private void update(Instance instance, String message) {
         if (instance == null) {
             status.setText(message);
+            dismissActiveJsDialog();
             if (web != null) {
                 origin = "";
                 show(statusPane);
@@ -203,6 +211,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (web != null && origin.equals(instance.origin())) return;
+        dismissActiveJsDialog();
         origin = instance.origin();
         final String readyOrigin = origin;
         web = new WebView(this);
@@ -266,6 +275,106 @@ public final class MainActivity extends Activity {
                 }
             }
         });
+        web.setWebChromeClient(new WebChromeClient() {
+            @Override public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+                if (!isInsideUrl(url) || isFinishing() || isDestroyed()) {
+                    result.cancel();
+                    return true;
+                }
+                dismissActiveJsDialog();
+                AtomicBoolean settled = new AtomicBoolean(false);
+                Runnable cancelResult = () -> {
+                    if (settled.compareAndSet(false, true)) result.cancel();
+                };
+                AlertDialog dialog = new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message == null ? "" : message)
+                        .setPositiveButton("确定", (d, which) -> {
+                            if (settled.compareAndSet(false, true)) result.confirm();
+                        })
+                        .setOnCancelListener(d -> cancelResult.run())
+                        .create();
+                dialog.setOnDismissListener(d -> {
+                    if (activeJsDialog == dialog) {
+                        activeJsDialog = null;
+                        activeJsCancel = null;
+                    }
+                    cancelResult.run();
+                });
+                activeJsDialog = dialog;
+                activeJsCancel = cancelResult;
+                dialog.show();
+                return true;
+            }
+
+            @Override public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+                if (!isInsideUrl(url) || isFinishing() || isDestroyed()) {
+                    result.cancel();
+                    return true;
+                }
+                dismissActiveJsDialog();
+                AtomicBoolean settled = new AtomicBoolean(false);
+                Runnable cancelResult = () -> {
+                    if (settled.compareAndSet(false, true)) result.cancel();
+                };
+                AlertDialog dialog = new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message == null ? "" : message)
+                        .setPositiveButton("确定", (d, which) -> {
+                            if (settled.compareAndSet(false, true)) result.confirm();
+                        })
+                        .setNegativeButton("取消", (d, which) -> cancelResult.run())
+                        .setOnCancelListener(d -> cancelResult.run())
+                        .create();
+                dialog.setOnDismissListener(d -> {
+                    if (activeJsDialog == dialog) {
+                        activeJsDialog = null;
+                        activeJsCancel = null;
+                    }
+                    cancelResult.run();
+                });
+                activeJsDialog = dialog;
+                activeJsCancel = cancelResult;
+                dialog.show();
+                return true;
+            }
+
+            @Override public boolean onJsPrompt(WebView view, String url, String message, String defaultValue, JsPromptResult result) {
+                if (!isInsideUrl(url) || isFinishing() || isDestroyed()) {
+                    result.cancel();
+                    return true;
+                }
+                dismissActiveJsDialog();
+                AtomicBoolean settled = new AtomicBoolean(false);
+                Runnable cancelResult = () -> {
+                    if (settled.compareAndSet(false, true)) result.cancel();
+                };
+                EditText input = new EditText(MainActivity.this);
+                input.setText(defaultValue == null ? "" : defaultValue);
+                int pad = Math.round(20 * getResources().getDisplayMetrics().density);
+                FrameLayout wrapper = new FrameLayout(MainActivity.this);
+                wrapper.setPadding(pad, pad / 2, pad, 0);
+                wrapper.addView(input);
+                AlertDialog dialog = new AlertDialog.Builder(MainActivity.this)
+                        .setMessage(message == null ? "" : message)
+                        .setView(wrapper)
+                        .setPositiveButton("确定", (d, which) -> {
+                            if (settled.compareAndSet(false, true)) result.confirm(input.getText().toString());
+                        })
+                        .setNegativeButton("取消", (d, which) -> cancelResult.run())
+                        .setOnCancelListener(d -> cancelResult.run())
+                        .create();
+                dialog.setOnDismissListener(d -> {
+                    if (activeJsDialog == dialog) {
+                        activeJsDialog = null;
+                        activeJsCancel = null;
+                    }
+                    cancelResult.run();
+                });
+                activeJsDialog = dialog;
+                activeJsCancel = cancelResult;
+                dialog.show();
+                return true;
+            }
+        });
         show(web);
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
@@ -280,7 +389,31 @@ public final class MainActivity extends Activity {
     }
 
     private boolean inside(Uri uri) {
-        return origin.equals("http://" + uri.getEncodedAuthority()) && "http".equals(uri.getScheme());
+        return uri != null && origin.equals("http://" + uri.getEncodedAuthority()) && "http".equals(uri.getScheme());
+    }
+
+    private boolean isInsideUrl(String url) {
+        if (url == null || url.isEmpty()) return false;
+        try {
+            return inside(Uri.parse(url));
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private void dismissActiveJsDialog() {
+        AlertDialog dialog = activeJsDialog;
+        Runnable cancel = activeJsCancel;
+        activeJsDialog = null;
+        activeJsCancel = null;
+        if (dialog != null) {
+            try {
+                if (dialog.isShowing()) dialog.dismiss();
+            } catch (RuntimeException ignored) {}
+        }
+        if (cancel != null) {
+            cancel.run();
+        }
     }
 
     private void pickFolder() {
@@ -317,6 +450,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        dismissActiveJsDialog();
         if (service != null) service.unwatch(observer);
         if (bound) unbindService(connection);
         if (web != null) web.destroy();

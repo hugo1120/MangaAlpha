@@ -598,11 +598,19 @@
   }
 
   let modalScroll = null;
-  function closeModal() {
-    const root = document.getElementById('modal-root');
-    if (root) {
-      if (root.contains(document.activeElement)) document.activeElement.blur();
-      root.innerHTML = '';
+  let activeConfirmCleanup = null;
+
+  function hasAnyOverlayOpen() {
+    const mr = document.getElementById('modal-root');
+    const cr = document.getElementById('confirm-root');
+    return Boolean((mr && mr.firstElementChild) || (cr && cr.firstElementChild));
+  }
+
+  function syncModalBodyLock() {
+    if (hasAnyOverlayOpen()) {
+      if (!modalScroll) modalScroll = { x: window.scrollX, y: window.scrollY };
+      document.body.classList.add('modal-open');
+      return;
     }
     document.body.classList.remove('modal-open');
     if (modalScroll) {
@@ -610,6 +618,15 @@
       modalScroll = null;
       if (window.scrollX !== x || window.scrollY !== y) window.scrollTo(x, y);
     }
+  }
+
+  function closeModal() {
+    const root = document.getElementById('modal-root');
+    if (root) {
+      if (root.contains(document.activeElement)) document.activeElement.blur();
+      root.innerHTML = '';
+    }
+    syncModalBodyLock();
   }
 
   function openModal({ title, subheadHTML = '', bodyHTML, footHTML = '', maxWidth = '760px', onMount }) {
@@ -635,8 +652,108 @@
     if (onMount) onMount(document.getElementById('modal-body'));
   }
 
+  function closeConfirmModal(accepted = false) {
+    if (activeConfirmCleanup) {
+      activeConfirmCleanup(Boolean(accepted));
+    }
+  }
+
+  function confirmModal(message, opts = {}) {
+    const {
+      title = '请确认操作',
+      confirmText = '确认',
+      cancelText = '取消',
+      danger = true,
+    } = opts;
+    if (activeConfirmCleanup) {
+      activeConfirmCleanup(false);
+    }
+    let root = document.getElementById('confirm-root');
+    if (!root) {
+      root = document.createElement('div');
+      root.id = 'confirm-root';
+      document.body.appendChild(root);
+    }
+    const prevFocus = document.activeElement && typeof document.activeElement.focus === 'function'
+      ? document.activeElement
+      : null;
+    const openedRouteSeq = routeSeq;
+    const openedUserId = (state.auth && state.auth.userId) || '';
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (accepted) => {
+        if (settled) return;
+        settled = true;
+        if (activeConfirmCleanup === finish) activeConfirmCleanup = null;
+        document.removeEventListener('keydown', onKeyDown, true);
+        if (root.contains(document.activeElement)) document.activeElement.blur();
+        root.innerHTML = '';
+        syncModalBodyLock();
+        if (prevFocus && prevFocus.isConnected) {
+          focusIfDesktop(prevFocus);
+        }
+        const currentUserId = (state.auth && state.auth.userId) || '';
+        resolve(Boolean(accepted) && routeSeq === openedRouteSeq && currentUserId === openedUserId);
+      };
+      const onKeyDown = (e) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          finish(false);
+          return;
+        }
+        if (e.key === 'Tab') {
+          const focusables = [
+            document.getElementById('confirm-close-btn'),
+            document.getElementById('confirm-cancel-btn'),
+            document.getElementById('confirm-ok-btn'),
+          ].filter((el) => el && !el.disabled);
+          if (focusables.length === 0) return;
+          const idx = focusables.indexOf(document.activeElement);
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.shiftKey) {
+            focusables[idx <= 0 ? focusables.length - 1 : idx - 1].focus();
+          } else {
+            focusables[idx < 0 || idx >= focusables.length - 1 ? 0 : idx + 1].focus();
+          }
+        }
+      };
+
+      activeConfirmCleanup = finish;
+      if (!modalScroll) modalScroll = { x: window.scrollX, y: window.scrollY };
+      document.body.classList.add('modal-open');
+      root.innerHTML = `
+        <div class="modal-backdrop confirm-backdrop" id="confirm-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-modal-title">
+          <div class="modal-dialog" style="max-width:440px">
+            <div class="modal-head">
+              <h3 id="confirm-modal-title">${esc(title)}</h3>
+              <button type="button" class="btn btn-sm" style="flex-shrink:0" id="confirm-close-btn">关闭</button>
+            </div>
+            <div class="modal-body">
+              <p class="confirm-message">${esc(message)}</p>
+            </div>
+            <div class="modal-foot">
+              <button type="button" class="btn" id="confirm-cancel-btn">${esc(cancelText)}</button>
+              <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" id="confirm-ok-btn">${esc(confirmText)}</button>
+            </div>
+          </div>
+        </div>`;
+      document.addEventListener('keydown', onKeyDown, true);
+      document.getElementById('confirm-close-btn').onclick = () => finish(false);
+      document.getElementById('confirm-cancel-btn').onclick = () => finish(false);
+      document.getElementById('confirm-ok-btn').onclick = () => finish(true);
+      document.getElementById('confirm-backdrop').addEventListener('click', (e) => {
+        if (e.target.id === 'confirm-backdrop') finish(false);
+      });
+      focusIfDesktop(document.getElementById('confirm-cancel-btn'));
+    });
+  }
+
   function navigate(target, replace = false) {
     stopPolling();
+    closeConfirmModal(false);
     closeModal();
     if (replace) {
       history.replaceState(null, '', target);
@@ -658,6 +775,7 @@
 
   window.addEventListener('popstate', () => {
     stopPolling();
+    closeConfirmModal(false);
     closeModal();
     route();
   });
@@ -1515,8 +1633,10 @@
         renderSeriesDetail(seriesID);
       } catch (err) { toast(err.message, 'error'); }
     };
-    document.getElementById('btn-reset-series-read').onclick = async () => {
-      if (!confirm('确认清空整部作品的阅读进度？')) return;
+    const resetSeriesReadBtn = document.getElementById('btn-reset-series-read');
+    resetSeriesReadBtn.onclick = async () => {
+      if (!(await confirmModal('确认清空整部作品的阅读进度？', { title: '清空阅读进度', confirmText: '确认清空' }))) return;
+      if (!resetSeriesReadBtn.isConnected) return;
       try {
         await api(`/api/v1/series/${encodeURIComponent(seriesID)}/read-progress`, { method: 'DELETE' });
         toast('阅读进度已重置');
@@ -1869,7 +1989,11 @@
         if (clearBtn) {
           clearBtn.onclick = async () => {
             if (mutating) return;
-            if (!confirm('确认解除 Bangumi 绑定并恢复原始目录标题与首卷封面？')) return;
+            const confirmed = await confirmModal('确认解除 Bangumi 绑定并恢复原始目录标题与首卷封面？', {
+              title: '解除 Bangumi 绑定',
+              confirmText: '确认解除',
+            });
+            if (!confirmed || mutating || !box.isConnected || openRouteSeq !== routeSeq) return;
             setMutating(true);
             try {
               await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/bind`, { method: 'DELETE' });
@@ -2314,11 +2438,17 @@
     `;
   }
 
+  let sourcesRenderSeq = 0;
+
   async function renderAdminSources(body) {
+    if (!body || !body.isConnected) return;
+    const reqSeq = ++sourcesRenderSeq;
+    const renderRouteSeq = routeSeq;
     const [acc115, webdavs] = await Promise.all([
       api('/admin/api/account'),
       api('/admin/api/webdav-accounts'),
     ]);
+    if (reqSeq !== sourcesRenderSeq || renderRouteSeq !== routeSeq || !body.isConnected) return;
     body.innerHTML = `
       <div class="grid-2">
         <div class="card">
@@ -2424,12 +2554,30 @@
     });
     body.querySelectorAll('button[data-wd-del]').forEach((btn) => {
       btn.onclick = async () => {
-        if (!confirm('确认删除该 WebDAV 账号？（若仍有书库使用该账号将拒绝删除）')) return;
+        if (btn.disabled) return;
+        const confirmed = await confirmModal('确认删除该 WebDAV 账号？（若仍有书库使用该账号将拒绝删除）', {
+          title: '删除 WebDAV 账号',
+          confirmText: '确认删除',
+        });
+        if (!confirmed || !btn.isConnected || btn.disabled) return;
+        const origText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '删除中…';
         try {
           await api(`/admin/api/webdav-accounts/${encodeURIComponent(btn.getAttribute('data-wd-del'))}`, { method: 'DELETE' });
           toast('已删除 WebDAV 账号');
-          renderAdminSources(body);
-        } catch (err) { toast(err.message, 'error'); }
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = origText;
+          toast(err.message, 'error');
+          return;
+        }
+        if (!body.isConnected) return;
+        try {
+          await renderAdminSources(body);
+        } catch (err) {
+          toast(`账号已删除，但刷新列表失败：${err.message}`, 'error');
+        }
       };
     });
   }
@@ -3132,11 +3280,18 @@
             all.onchange = () => { limit.disabled = all.checked; start.classList.toggle('btn-danger', all.checked); };
             all.onchange();
             start.onclick = async () => {
+              if (start.disabled) return;
               if (!all.checked && (!limit.value || !limit.checkValidity())) {
                 limit.reportValidity();
                 return;
               }
-              if (all.checked && !confirm('确认处理全库？远程库可能产生网络流量，任务可在后台取消。')) return;
+              if (all.checked) {
+                const confirmed = await confirmModal('确认处理全库？远程库可能产生网络流量，任务可在后台取消。', {
+                  title: '确认全库补齐封面',
+                  confirmText: '开始全库补齐',
+                });
+                if (!confirmed || !start.isConnected || start.disabled) return;
+              }
               start.disabled = true;
               try {
                 await api('/admin/api/cover-jobs', { method: 'POST', body: {
@@ -3188,7 +3343,12 @@
     });
     body.querySelectorAll('button[data-lib-del]').forEach((btn) => {
       btn.onclick = async () => {
-        if (!confirm('确认删除该书库及其索引记录？（不会删除网盘或磁盘上的原始文件；若删除联合库，其物理子库会自动恢复独立显示）')) return;
+        if (btn.disabled) return;
+        const confirmed = await confirmModal('确认删除该书库及其索引记录？（不会删除网盘或磁盘上的原始文件；若删除联合库，其物理子库会自动恢复独立显示）', {
+          title: '删除书库',
+          confirmText: '确认删除',
+        });
+        if (!confirmed || !btn.isConnected || btn.disabled) return;
         const origText = btn.textContent;
         btn.disabled = true;
         btn.textContent = '删除中…';
@@ -3839,7 +3999,8 @@
     const oauthAppResetBtn = document.getElementById('bgm-tracker-oauth-app-reset');
     if (oauthAppResetBtn) {
       oauthAppResetBtn.onclick = async () => {
-        if (!confirm('确认清除自定义 App 配置并恢复官方内置 MangaAlpha 应用？')) return;
+        if (!(await confirmModal('确认清除自定义 App 配置并恢复官方内置 MangaAlpha 应用？', { title: '恢复内置 OAuth 应用', confirmText: '确认恢复' }))) return;
+        if (!oauthAppResetBtn.isConnected) return;
         try {
           await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearCustomOAuthApp: true } });
           toast('已恢复默认内置 Bangumi OAuth 应用');
@@ -4210,7 +4371,9 @@
           <span>已记录 ${Number(diagStatus.eventsCount || 0).toLocaleString()} 条 · 占用 ${fmtBytes(diagStatus.totalBytes || 0)}</span>
           ${diagStatus.hasAndroidLog ? `<span class="badge badge-success">含 Android 原生事件</span>` : ''}
           <button type="button" class="btn btn-sm" id="diag-refresh-btn">刷新预览</button>
-          <a class="btn btn-sm btn-primary" href="/admin/api/diagnostics/export" download>导出诊断报告 (.txt)</a>
+          ${isAndroidUA
+            ? `<a class="btn btn-sm btn-primary" href="/__android/settings">前往手机端设置导出 (.txt)</a>`
+            : `<a class="btn btn-sm btn-primary" href="/admin/api/diagnostics/export" download>导出诊断报告 (.txt)</a>`}
           <button type="button" class="btn btn-sm btn-danger" id="diag-clear-btn">清空日志</button>
         </div>
         <pre class="diag-log-view" id="diag-log-preview">${esc(formatDiagLines(diagEvents))}</pre>
@@ -4286,7 +4449,8 @@
     body.querySelectorAll('button[data-clear-cache]').forEach((btn) => {
       btn.onclick = async () => {
         const ct = btn.getAttribute('data-clear-cache');
-        if (!confirm(`确认清理缓存 (${ct})？`)) return;
+        if (!(await confirmModal(`确认清理缓存 (${ct})？`, { title: '清理缓存', confirmText: '确认清理' }))) return;
+        if (!btn.isConnected) return;
         try {
           await api(`/admin/api/cache/${encodeURIComponent(ct)}`, { method: 'DELETE' });
           state.coverVer = Date.now();
@@ -4347,7 +4511,8 @@
     const apwClearBtn = document.getElementById('apw-clear-all');
     if (apwClearBtn) {
       apwClearBtn.onclick = async () => {
-        if (!confirm('确认清空全部已记住的压缩包密码？对应加密卷缓存也将同步清理，下次打开需重新输入密码。')) return;
+        if (!(await confirmModal('确认清空全部已记住的压缩包密码？对应加密卷缓存也将同步清理，下次打开需重新输入密码。', { title: '清空压缩包密码', confirmText: '确认清空' }))) return;
+        if (!apwClearBtn.isConnected) return;
         try {
           await api('/admin/api/archive-passwords', { method: 'DELETE' });
           toast('已清空全部压缩包密码');
@@ -4357,7 +4522,8 @@
     }
     body.querySelectorAll('button[data-apw-del-group]').forEach((btn) => {
       btn.onclick = async () => {
-        if (!confirm('确认删除此条已记住的密码并解除名下全部漫画绑定？')) return;
+        if (!(await confirmModal('确认删除此条已记住的密码并解除名下全部漫画绑定？', { title: '删除压缩包密码', confirmText: '确认删除' }))) return;
+        if (!btn.isConnected) return;
         try {
           await api(`/admin/api/archive-passwords/${encodeURIComponent(btn.getAttribute('data-apw-del-group'))}`, { method: 'DELETE' });
           toast('压缩包密码已删除');
@@ -4396,7 +4562,8 @@
     const diagClearBtn = document.getElementById('diag-clear-btn');
     if (diagClearBtn) {
       diagClearBtn.onclick = async () => {
-        if (!confirm('确认清空当前所有本地诊断日志？')) return;
+        if (!(await confirmModal('确认清空当前所有本地诊断日志？', { title: '清空诊断日志', confirmText: '确认清空' }))) return;
+        if (!diagClearBtn.isConnected) return;
         try {
           await api('/admin/api/diagnostics', { method: 'DELETE' });
           toast('诊断日志已清空');
@@ -4554,8 +4721,12 @@
         const u = userByID.get(uid);
         if (!u) return;
         const nextEnabled = !u.enabled;
-        if (!nextEnabled && !confirm(`确认停用用户「${u.username}」？\n停用后将立即强制下线其所有会话，且其 API Key 与 Komga / OPDS Basic 登录将被拒绝；其阅读进度与收藏夹数据会保留，重新启用即可恢复。`)) {
-          return;
+        if (!nextEnabled) {
+          const confirmed = await confirmModal(
+            `确认停用用户「${u.username}」？\n停用后将立即强制下线其所有会话，且其 API Key 与 Komga / OPDS Basic 登录将被拒绝；其阅读进度与收藏夹数据会保留，重新启用即可恢复。`,
+            { title: '停用用户', confirmText: '确认停用' },
+          );
+          if (!confirmed || !btn.isConnected) return;
         }
         try {
           await api(`/admin/api/users/${encodeURIComponent(uid)}`, {
@@ -4573,7 +4744,8 @@
         const uid = btn.getAttribute('data-usr-kick');
         const u = userByID.get(uid);
         if (!u) return;
-        if (!confirm(`确认将用户「${u.username}」的所有登录会话强制下线？`)) return;
+        if (!(await confirmModal(`确认将用户「${u.username}」的所有登录会话强制下线？`, { title: '强制下线', confirmText: '确认下线' }))) return;
+        if (!btn.isConnected) return;
         try {
           const res = await api(`/admin/api/users/${encodeURIComponent(uid)}/kick`, { method: 'POST' });
           toast(`已下线 ${Number(res?.kickedSessions || 0)} 个会话`);
@@ -4587,9 +4759,11 @@
         const uid = btn.getAttribute('data-usr-del');
         const u = userByID.get(uid);
         if (!u) return;
-        if (!confirm(`确认永久删除用户「${u.username}」？\n此操作将彻底清除该用户的阅读进度、阅读历史、收藏夹、阅读列表、API Key 与个人 Bangumi 追踪配置，且不可恢复（不会影响共享书库或其他用户）。`)) {
-          return;
-        }
+        const confirmed = await confirmModal(
+          `确认永久删除用户「${u.username}」？\n此操作将彻底清除该用户的阅读进度、阅读历史、收藏夹、阅读列表、API Key 与个人 Bangumi 追踪配置，且不可恢复（不会影响共享书库或其他用户）。`,
+          { title: '永久删除用户', confirmText: '永久删除' },
+        );
+        if (!confirmed || !btn.isConnected) return;
         try {
           await api(`/admin/api/users/${encodeURIComponent(uid)}`, { method: 'DELETE' });
           toast(`已删除用户「${u.username}」`);
@@ -5196,8 +5370,10 @@
       `;
 
       document.getElementById('btn-edit-col').onclick = () => openCollectionFormModal(col, () => renderCollectionDetail(collectionID));
-      document.getElementById('btn-delete-col').onclick = async () => {
-        if (!confirm(`确定删除收藏夹「${col.name}」？这不会删除其中的漫画文件。`)) return;
+      const deleteColBtn = document.getElementById('btn-delete-col');
+      deleteColBtn.onclick = async () => {
+        if (!(await confirmModal(`确定删除收藏夹「${col.name}」？这不会删除其中的漫画文件。`, { title: '删除收藏夹', confirmText: '确认删除' }))) return;
+        if (!deleteColBtn.isConnected) return;
         try {
           await api(`/api/v1/collections/${encodeURIComponent(collectionID)}`, { method: 'DELETE' });
           toast('收藏夹已删除');
@@ -5386,8 +5562,10 @@
       `;
 
       document.getElementById('btn-edit-rl').onclick = () => openReadListFormModal(rl, () => renderReadListDetail(readListID));
-      document.getElementById('btn-delete-rl').onclick = async () => {
-        if (!confirm(`确定删除阅读列表「${rl.name}」？这不会删除其中的漫画文件。`)) return;
+      const deleteRlBtn = document.getElementById('btn-delete-rl');
+      deleteRlBtn.onclick = async () => {
+        if (!(await confirmModal(`确定删除阅读列表「${rl.name}」？这不会删除其中的漫画文件。`, { title: '删除阅读列表', confirmText: '确认删除' }))) return;
+        if (!deleteRlBtn.isConnected) return;
         try {
           await api(`/api/v1/readlists/${encodeURIComponent(readListID)}`, { method: 'DELETE' });
           toast('阅读列表已删除');
@@ -6072,7 +6250,8 @@
 
       content.querySelectorAll('button[data-acc-del-ak]').forEach((btn) => {
         btn.onclick = async () => {
-          if (!confirm('确认吊销该 API Key？')) return;
+          if (!(await confirmModal('确认吊销该 API Key？', { title: '吊销 API Key', confirmText: '确认吊销' }))) return;
+          if (!btn.isConnected) return;
           try {
             await api(`/admin/api/auth/api-keys/${encodeURIComponent(btn.getAttribute('data-acc-del-ak'))}`, { method: 'DELETE' });
             toast('API Key 已吊销');
@@ -6195,7 +6374,8 @@
         const clearBtn = document.getElementById('acc-bgm-clear');
         if (clearBtn) {
           clearBtn.onclick = async () => {
-            if (!confirm('确认解绑并清空个人 Bangumi 追踪器授权？')) return;
+            if (!(await confirmModal('确认解绑并清空个人 Bangumi 追踪器授权？', { title: '解绑 Bangumi 追踪器', confirmText: '确认解绑' }))) return;
+            if (!clearBtn.isConnected) return;
             try {
               await api('/admin/api/bangumi/tracker/config', { method: 'PUT', body: { clearToken: true } });
               toast('已解绑 Bangumi 追踪器');
@@ -6435,6 +6615,7 @@
   let routeSeq = 0;
   async function route() {
     const seq = ++routeSeq;
+    closeConfirmModal(false);
     try {
       const st = await api('/admin/api/auth/status', { allow401: true });
       if (seq !== routeSeq) return;
@@ -6442,6 +6623,7 @@
     } catch (_) {}
 
     if (seq !== routeSeq) return;
+    closeConfirmModal(false);
     updateFooterVersion(state.auth);
     const p = location.pathname;
     if (!state.auth.claimed) {

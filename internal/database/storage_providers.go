@@ -4,8 +4,31 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 )
+
+// ErrWebDAVAccountInUse indicates that one or more libraries still reference a WebDAV account.
+var ErrWebDAVAccountInUse = errors.New("webdav account is in use by one or more libraries")
+
+// ErrWebDAVAccountNotFound indicates that the referenced WebDAV account does not exist.
+var ErrWebDAVAccountNotFound = errors.New("webdav account not found")
+
+// WebDAVAccountInUseError carries the human-readable list of libraries referencing a WebDAV account.
+type WebDAVAccountInUseError struct {
+	Libraries []string
+}
+
+func (e *WebDAVAccountInUseError) Error() string {
+	if e == nil || len(e.Libraries) == 0 {
+		return ErrWebDAVAccountInUse.Error()
+	}
+	return fmt.Sprintf("cannot delete WebDAV account while libraries still use it: %s", strings.Join(e.Libraries, ", "))
+}
+
+func (e *WebDAVAccountInUseError) Unwrap() error {
+	return ErrWebDAVAccountInUse
+}
 
 func (s *Store) WebDAVAccounts(ctx context.Context) ([]WebDAVAccount, error) {
 	rows, err := s.db.QueryContext(ctx, `
@@ -117,22 +140,80 @@ ON CONFLICT(id) DO UPDATE SET
 
 func (s *Store) DeleteWebDAVAccount(ctx context.Context, id string) error {
 	id = strings.TrimSpace(id)
-	var inUse int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT count(*) FROM libraries WHERE provider_type='webdav' AND webdav_account_id=?`,
-		id,
-	).Scan(&inUse); err != nil {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
 		return err
 	}
-	if inUse > 0 {
-		return errors.New("cannot delete WebDAV account while one or more libraries still use it")
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM webdav_accounts WHERE id=?`, id)
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	rows, err := conn.QueryContext(ctx, `
+SELECT l.name, l.enabled,
+       coalesce((SELECT group_concat(ul2.name, ' / ')
+                 FROM union_layers ul
+                 JOIN libraries ul2 ON ul2.id = ul.union_library_id
+                 WHERE ul.member_library_id = l.id), '')
+FROM libraries l
+WHERE l.provider_type='webdav' AND l.webdav_account_id=?
+ORDER BY l.name COLLATE NOCASE, l.id`, id)
+	if err != nil {
+		return err
+	}
+	var using []string
+	for rows.Next() {
+		var (
+			name       string
+			enabled    int
+			unionNames string
+		)
+		if err := rows.Scan(&name, &enabled, &unionNames); err != nil {
+			rows.Close()
+			return err
+		}
+		label := strings.TrimSpace(name)
+		if label == "" {
+			label = "(未命名书库)"
+		}
+		var notes []string
+		if enabled == 0 {
+			notes = append(notes, "已隐藏")
+		}
+		if strings.TrimSpace(unionNames) != "" {
+			notes = append(notes, "联合库「"+strings.TrimSpace(unionNames)+"」子库")
+		}
+		if len(notes) > 0 {
+			label += "（" + strings.Join(notes, "，") + "）"
+		}
+		using = append(using, label)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if len(using) > 0 {
+		return &WebDAVAccountInUseError{Libraries: using}
+	}
+
+	res, err := conn.ExecContext(ctx, `DELETE FROM webdav_accounts WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
 	if affected, _ := res.RowsAffected(); affected == 0 {
 		return sql.ErrNoRows
 	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return err
+	}
+	committed = true
 	return nil
 }

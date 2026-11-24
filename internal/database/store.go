@@ -467,7 +467,8 @@ WHERE l.id=?`, id).Scan(
 func (s *Store) UpsertLibrary(ctx context.Context, item Library) error {
 	now := nowText()
 	provider := item.EffectiveProvider()
-	_, err := s.db.ExecContext(ctx, `
+	webdavAccountID := strings.TrimSpace(item.WebDAVAccountID)
+	const upsertSQL = `
 INSERT INTO libraries(
  id,name,provider_type,root_cid,webdav_account_id,root_path,enabled,one_shot,created_at,updated_at
 ) VALUES(?,?,?,?,?,?,?,?,?,?)
@@ -479,9 +480,44 @@ ON CONFLICT(id) DO UPDATE SET
  root_path=excluded.root_path,
  enabled=excluded.enabled,
  one_shot=excluded.one_shot,
- updated_at=excluded.updated_at`,
+ updated_at=excluded.updated_at`
+	if provider == ProviderWebDAV {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			return err
+		}
+		committed := false
+		defer func() {
+			if !committed {
+				_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			}
+		}()
+		var exists int
+		if err := conn.QueryRowContext(ctx, `SELECT 1 FROM webdav_accounts WHERE id=?`, webdavAccountID).Scan(&exists); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrWebDAVAccountNotFound
+			}
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, upsertSQL,
+			item.ID, strings.TrimSpace(item.Name), provider, strings.TrimSpace(item.RootCID),
+			webdavAccountID, strings.TrimSpace(item.RootPath),
+			item.Enabled, item.OneShot, now, now); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return err
+		}
+		committed = true
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, upsertSQL,
 		item.ID, strings.TrimSpace(item.Name), provider, strings.TrimSpace(item.RootCID),
-		strings.TrimSpace(item.WebDAVAccountID), strings.TrimSpace(item.RootPath),
+		webdavAccountID, strings.TrimSpace(item.RootPath),
 		item.Enabled, item.OneShot, now, now)
 	return err
 }

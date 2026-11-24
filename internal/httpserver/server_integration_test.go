@@ -437,6 +437,26 @@ INSERT INTO books(
 		t.Fatalf("client settings PATCH status=%d", response.StatusCode)
 	}
 
+	response = requestJSONWithClient(t, sessionClient, http.MethodPatch, server.URL+"/api/v1/client-settings/user", map[string]any{
+		"webui.shelf.pageSize": map[string]any{"value": "48"},
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Fatalf("webui display preference PATCH status=%d", response.StatusCode)
+	}
+	var displaySettings map[string]map[string]any
+	getJSONWithClient(t, sessionClient, server.URL+"/api/v1/client-settings/user/list", &displaySettings)
+	if displaySettings["webui.shelf.pageSize"]["value"] != "48" {
+		t.Fatalf("webui display preference not stored: %#v", displaySettings)
+	}
+	response = requestJSONWithClient(t, sessionClient, http.MethodPatch, server.URL+"/api/v1/client-settings/user", map[string]any{
+		"webui.shelf.pageSize": map[string]any{"value": "121"},
+	})
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("out-of-range webui page size status=%d", response.StatusCode)
+	}
+
 	var structuredSeriesPage map[string]any
 	response = requestJSONWithClient(t, sessionClient, http.MethodPost, server.URL+"/api/v1/series/list?page=0&size=10&sort=metadata.titleSort,asc", map[string]any{
 		"condition": map[string]any{

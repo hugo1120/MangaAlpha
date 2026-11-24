@@ -3,7 +3,9 @@ package httpserver
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/xJogger/fake-komga-115/internal/database"
@@ -13,6 +15,15 @@ const (
 	maxClientSettingKeyLength   = 256
 	maxClientSettingValueLength = 8192
 )
+
+// webUIClientSettingRanges keeps the built-in web UI's display preferences
+// inside sane bounds; arbitrary webui.* keys remain free-form for the reader.
+var webUIClientSettingRanges = map[string][2]int{
+	"webui.shelf.pageSize":    {12, 120},
+	"webui.home.continueSize": {4, 24},
+	"webui.home.updatedSize":  {4, 36},
+	"webui.home.addedSize":    {4, 36},
+}
 
 type komgaSearchFilters struct {
 	Search        string
@@ -135,6 +146,17 @@ func validateClientSetting(key string, value *string) error {
 	}
 	if value != nil && len(*value) > maxClientSettingValueLength {
 		return errors.New("client setting value is too long")
+	}
+	if value != nil {
+		if limits, ok := webUIClientSettingRanges[strings.TrimSpace(key)]; ok {
+			n, err := strconv.Atoi(strings.TrimSpace(*value))
+			if err != nil {
+				return fmt.Errorf("%s must be an integer", key)
+			}
+			if n < limits[0] || n > limits[1] {
+				return fmt.Errorf("%s must be between %d and %d", key, limits[0], limits[1])
+			}
+		}
 	}
 	return nil
 }

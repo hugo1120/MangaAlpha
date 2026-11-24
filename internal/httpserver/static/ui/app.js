@@ -4,6 +4,45 @@
   const THEME_MODE_KEY = 'fk115_theme_mode';
   const darkMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 
+  // Per-user web UI display preferences, stored in Komga client settings under
+  // the existing webui.* namespace so they travel across devices.
+  const DISPLAY_PREFS = {
+    shelfPageSize: { key: 'webui.shelf.pageSize', def: 36, min: 12, max: 120 },
+    homeContinueSize: { key: 'webui.home.continueSize', def: 8, min: 4, max: 24 },
+    homeUpdatedSize: { key: 'webui.home.updatedSize', def: 18, min: 4, max: 36 },
+    homeAddedSize: { key: 'webui.home.addedSize', def: 12, min: 4, max: 36 },
+  };
+
+  function clampDisplayPref(spec, raw) {
+    const n = Number.parseInt(raw, 10);
+    if (!Number.isFinite(n)) return spec.def;
+    return Math.min(spec.max, Math.max(spec.min, n));
+  }
+
+  function defaultDisplayPrefs() {
+    const out = {};
+    for (const [name, spec] of Object.entries(DISPLAY_PREFS)) {
+      out[name] = spec.def;
+    }
+    return out;
+  }
+
+  function displayPrefStorageKey(userId, name) {
+    return `fk115_display.${userId}.${name}`;
+  }
+
+  function readLocalDisplayPrefs(userId) {
+    const out = defaultDisplayPrefs();
+    if (!userId) return out;
+    for (const [name, spec] of Object.entries(DISPLAY_PREFS)) {
+      try {
+        const raw = localStorage.getItem(displayPrefStorageKey(userId, name));
+        if (raw != null && raw !== '') out[name] = clampDisplayPref(spec, raw);
+      } catch (_) {}
+    }
+    return out;
+  }
+
   const state = {
     auth: {
       claimed: true,
@@ -21,6 +60,8 @@
     },
     themeMode: localStorage.getItem(THEME_MODE_KEY) || 'auto',
     theme: 'dark',
+    displayPrefs: defaultDisplayPrefs(),
+    displayPrefsUserId: '',
     libraries: [],
     taxonomies: { loaded: false, genres: [], tags: [], publishers: [] },
     pollTimer: null,
@@ -33,6 +74,113 @@
 
   function isAdminUser() {
     return Boolean(state.auth && state.auth.isAdmin);
+  }
+
+  function resetDisplayPrefs() {
+    state.displayPrefs = defaultDisplayPrefs();
+    state.displayPrefsUserId = '';
+  }
+
+  function displayPref(name) {
+    const spec = DISPLAY_PREFS[name];
+    return Math.min(spec.max, Math.max(spec.min, state.displayPrefs[name] || spec.def));
+  }
+
+  async function ensureDisplayPrefs() {
+    const uid = (state.auth && state.auth.userId) || '';
+    if (!uid) {
+      resetDisplayPrefs();
+      return;
+    }
+    if (state.displayPrefsUserId === uid) return;
+    state.displayPrefs = readLocalDisplayPrefs(uid);
+    try {
+      const res = await api('/api/v1/client-settings/user/list', {
+        headers: { 'X-FK115-User-Id': uid },
+      });
+      if (((state.auth && state.auth.userId) || '') !== uid) return;
+      const next = defaultDisplayPrefs();
+      for (const [name, spec] of Object.entries(DISPLAY_PREFS)) {
+        const item = res && res[spec.key];
+        const storageKey = displayPrefStorageKey(uid, name);
+        if (item && item.value != null && item.value !== '') {
+          const value = clampDisplayPref(spec, item.value);
+          next[name] = value;
+          try { localStorage.setItem(storageKey, String(value)); } catch (_) {}
+        } else {
+          try { localStorage.removeItem(storageKey); } catch (_) {}
+        }
+      }
+      state.displayPrefs = next;
+      state.displayPrefsUserId = uid;
+    } catch (_) {
+      // A failed read must not block the shelf; per-user cached or default values stay in use.
+    }
+  }
+
+  async function saveDisplayPref(name, raw) {
+    const uid = (state.auth && state.auth.userId) || '';
+    const spec = DISPLAY_PREFS[name];
+    const value = clampDisplayPref(spec, raw);
+    await api('/api/v1/client-settings/user', {
+      method: 'PATCH',
+      body: { [spec.key]: { value: String(value) } },
+    });
+    if (((state.auth && state.auth.userId) || '') === uid) {
+      state.displayPrefs[name] = value;
+      if (uid) {
+        try { localStorage.setItem(displayPrefStorageKey(uid, name), String(value)); } catch (_) {}
+      }
+    }
+    return value;
+  }
+
+  function displayPrefSelectHTML(name, label, values) {
+    const current = displayPref(name);
+    const options = values.slice();
+    if (!options.includes(current)) options.push(current);
+    options.sort((a, b) => a - b);
+    const id = `disp-pref-${name}`;
+    return `<div class="field" style="margin:0">
+      <label for="${esc(id)}">${esc(label)}</label>
+      <select id="${esc(id)}" data-display-pref="${esc(name)}">
+        ${options.map((value) => `<option value="${value}" ${value === current ? 'selected' : ''}>${value} 项</option>`).join('')}
+      </select>
+    </div>`;
+  }
+
+  function bindDisplayPrefControls(root) {
+    root.querySelectorAll('select[data-display-pref]').forEach((select) => {
+      select.onchange = async () => {
+        const name = select.getAttribute('data-display-pref');
+        const previous = displayPref(name);
+        select.disabled = true;
+        try {
+          const saved = await saveDisplayPref(name, select.value);
+          toast(`已保存显示偏好：${saved} 项`);
+        } catch (err) {
+          select.value = String(previous);
+          toast(err.message, 'error');
+        } finally {
+          select.disabled = false;
+        }
+      };
+    });
+  }
+
+  function displayPrefCardHTML() {
+    return `<div class="card">
+      <h3>网页显示偏好（仅当前账号）</h3>
+      <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
+        这些数量会保存到当前账号（Komga client settings 的 <code>webui.*</code> 命名空间），换设备登录同样生效；浏览器只保留一份本地缓存用于首屏加速。
+      </p>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
+        ${displayPrefSelectHTML('shelfPageSize', '书架每页', [24, 36, 48, 60, 96])}
+        ${displayPrefSelectHTML('homeContinueSize', '首页「继续阅读」', [4, 8, 12, 18, 24])}
+        ${displayPrefSelectHTML('homeUpdatedSize', '首页「最近更新」', [8, 12, 18, 24, 36])}
+        ${displayPrefSelectHTML('homeAddedSize', '首页「最新入库」', [8, 12, 18, 24, 36])}
+      </div>
+    </div>`;
   }
 
   async function copyTextSafeGlobal(txt) {
@@ -558,6 +706,7 @@
       state.libraries = [];
       state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
       state.updateStatus = null;
+      resetDisplayPrefs();
       navigate('/login', true);
     };
     document.getElementById('global-search-form').onsubmit = (e) => {
@@ -661,6 +810,7 @@
         };
         state.libraries = [];
         state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
+        resetDisplayPrefs();
         toast('管理员账号设置成功');
         navigate('/', true);
       } catch (err) {
@@ -722,6 +872,7 @@
         };
         state.libraries = [];
         state.taxonomies = { loaded: false, genres: [], tags: [], publishers: [] };
+        resetDisplayPrefs();
         navigate(safeRedirectTarget(redirect), true);
       } catch (err) {
         toast(err.message || '用户名或密码错误', 'error');
@@ -794,7 +945,7 @@
 
       return html;
     });
-    load('home-continue', '/api/v1/books?read_status=IN_PROGRESS&sort=readProgress.readDate,desc&size=8', (res) => {
+    load('home-continue', '/api/v1/books?read_status=IN_PROGRESS&sort=readProgress.readDate,desc&size=' + displayPref('homeContinueSize'), (res) => {
       const contBooks = res?.content || [];
       let html = '';
       if (contBooks.length > 0) {
@@ -827,7 +978,7 @@
 
       return html;
     });
-    load('home-updated', seriesURL + 'sort=lastModifiedDate,desc&size=18', (res) => {
+    load('home-updated', seriesURL + 'sort=lastModifiedDate,desc&size=' + displayPref('homeUpdatedSize'), (res) => {
       const updatedList = res?.content || [];
       let html = '';
       if (updatedList.length > 0) {
@@ -843,7 +994,7 @@
 
       return html;
     });
-    load('home-added', seriesURL + 'sort=createdDate,desc&size=12', (res) => {
+    load('home-added', seriesURL + 'sort=createdDate,desc&size=' + displayPref('homeAddedSize'), (res) => {
       const addedList = res?.content || [];
       let html = '';
       if (addedList.length > 0) {
@@ -877,7 +1028,7 @@
     const author = sp.get('author') || '';
     const sort = sp.get('sort') || 'lastModifiedDate,desc';
     const page = Math.max(0, parseInt(sp.get('page') || '0', 10) || 0);
-    const size = 36;
+    const size = displayPref('shelfPageSize');
 
     document.title = '浏览书库 · MangaAlpha';
     const oldList = document.getElementById('library-cards');
@@ -5943,6 +6094,8 @@
           </form>
         </div>
 
+        ${displayPrefCardHTML()}
+
         <div class="grid-2">
           <div class="card">
             <h3>外部阅读客户端接入地址</h3>
@@ -6149,6 +6302,8 @@
           }
         };
       }
+
+      bindDisplayPrefControls(content);
 
       document.getElementById('acc-pw-form').onsubmit = async (e) => {
         e.preventDefault();
@@ -6621,6 +6776,9 @@
       renderLogin();
       return;
     }
+
+    await ensureDisplayPrefs();
+    if (seq !== routeSeq) return;
 
     if (p === '/' || p === '') {
       await renderHome();

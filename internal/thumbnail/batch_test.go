@@ -173,10 +173,17 @@ func batchTestLogger() *slog.Logger {
 func TestMissingUnboundBatchLimitsEligibleSeries(t *testing.T) {
 	store, lib := batchTestStore(t)
 	insertBatchSeries(t, store, lib, "bound", "Manually bound", "2025-04-01T00:00:00Z")
+	insertBatchSeries(t, store, lib, "external", "External cover", "2025-04-02T00:00:00Z")
 	insertBatchSeries(t, store, lib, "valid", "Has cover", "2025-03-01T00:00:00Z")
 	insertBatchSeries(t, store, lib, "newer", "Missing cover", "2025-02-01T00:00:00Z")
 	insertBatchSeries(t, store, lib, "older", "Missing cover", "2025-01-01T00:00:00Z")
 	if _, err := store.DB().Exec(`INSERT INTO series_metadata(series_id,bgm_subject_id,scrape_status,updated_at) VALUES ('bound',10,'manual','')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO series_metadata(series_id,ext_source_id,ext_entry_id,ext_cover_url,updated_at)
+VALUES ('external','catalog','101','https://covers.example.test/101.png',''),
+       ('newer','catalog','102','','')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := store.DB().Exec(`
@@ -198,5 +205,12 @@ VALUES('valid','book-valid','1','fixture','image/jpeg',1,1,1,'','')`); err != ni
 	finished := waitBatchRun(t, manager, run.ID)
 	if finished.TotalSeries != 1 || finished.GeneratedCount != 1 || len(called) != 1 || <-called != "newer" {
 		t.Fatalf("wrong eligible selection: %+v", finished)
+	}
+	// A cover can be bound after selection and before the worker reaches the series.
+	if _, err := store.DB().Exec(`UPDATE series_metadata SET ext_cover_url='https://covers.example.test/102.png' WHERE series_id='newer'`); err != nil {
+		t.Fatal(err)
+	}
+	if generated, err := manager.runSeries(t.Context(), "newer", true); err != nil || generated || len(called) != 0 {
+		t.Fatalf("bound external cover generated = %v, err = %v, calls = %d", generated, err, len(called))
 	}
 }

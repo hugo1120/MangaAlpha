@@ -176,6 +176,7 @@ func New(_ context.Context, options Options) (*App, error) {
 	pipelineManager := pipeline.New(
 		store, scanManager, bangumiService, coverManager, options.Logger,
 	)
+	pipelineManager.SetMetadataManager(metadataManager)
 	// When a physical sub-library finishes a manual/standalone scan, silently refresh its parent union library.
 	scanManager.AddCompletionListener(func(libraryID, _ string, trigger, status string) {
 		if status != "success" || trigger == "pipeline" {

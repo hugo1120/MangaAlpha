@@ -529,12 +529,15 @@ func randomBatchID() string {
 	return hex.EncodeToString(value[:])
 }
 
+const batchBoundCover = `coalesce(sm.bgm_subject_id,0)>0 OR
+ (coalesce(sm.ext_source_id,'')<>'' AND coalesce(sm.ext_entry_id,'')<>'' AND coalesce(sm.ext_cover_url,'')<>'')`
+
 func (m *BatchManager) selectMissingUnbound(ctx context.Context, libraryID string, all bool, limit int) ([]batchSeries, error) {
 	query := `
 SELECT s.id,s.name,c.series_id IS NOT NULL
 FROM series s LEFT JOIN series_metadata sm ON sm.series_id=s.id
 LEFT JOIN series_thumbnails c ON c.series_id=s.id
-WHERE s.library_id=? AND coalesce(sm.bgm_subject_id,0)<=0
+WHERE s.library_id=? AND NOT (` + batchBoundCover + `)
 AND EXISTS (SELECT 1 FROM books existing_book WHERE existing_book.series_id=s.id)
 ORDER BY COALESCE((SELECT MAX(b.file_modified_at) FROM books b WHERE b.series_id=s.id),
  s.file_modified_at,s.updated_at) DESC,s.name COLLATE NOCASE ASC,s.id ASC`
@@ -582,7 +585,7 @@ func (m *BatchManager) runSeries(ctx context.Context, seriesID string, missingUn
 	if missingUnbound {
 		var bound bool
 		err := m.store.DB().QueryRowContext(ctx,
-			"SELECT EXISTS(SELECT 1 FROM series_metadata WHERE series_id=? AND bgm_subject_id>0)", seriesID).Scan(&bound)
+			"SELECT EXISTS(SELECT 1 FROM series_metadata sm WHERE sm.series_id=? AND ("+batchBoundCover+"))", seriesID).Scan(&bound)
 		if err != nil || bound {
 			return false, err
 		}

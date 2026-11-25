@@ -21,6 +21,65 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/extmeta"
 )
 
+func TestMetadataScrapeRejectsEmptyMappingSource(t *testing.T) {
+	srv, store, bgm, _ := setupV27TestServer(t, "")
+	ctx := t.Context()
+	if _, err := store.ClaimAdmin(ctx, "fixture-owner", "FixturePassword123!"); err != nil {
+		t.Fatal(err)
+	}
+	key, _, err := store.CreateAPIKey(ctx, "fixture admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: bangumiTestTransport(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		_, _ = io.WriteString(w, `{"packs":[]}`)
+		resp := w.Result()
+		resp.Request = r
+		return resp, nil
+	})}
+	manager, err := extmeta.NewManager(store, bgm, nil, srv.runtime.DataDir, nil, extmeta.ManagerOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	srv.WithMetadata(manager)
+	src, err := manager.AddCustomSource(ctx, database.MetadataSource{
+		Name: "Community", Kind: extmeta.KindMappingPack, Enabled: true, ManifestURL: "https://upstream.example.test/index.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.StartSourceSync(ctx, src.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		run := manager.Syncs()[0]
+		if run.CompletedAt != "" {
+			if run.Status != "success" {
+				t.Fatalf("mapping sync = %+v", run)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("mapping sync did not finish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/admin/api/metadata/scrape", strings.NewReader("{}"))
+	r.Header.Set("X-API-Key", key)
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, r)
+	body := decodeMetadataFixture[struct {
+		Code    string `json:"error"`
+		Message string `json:"message"`
+	}](t, w)
+	if w.Code != http.StatusBadRequest || body.Code != "NO_READY_METADATA_SOURCES" || body.Message != extmeta.ErrNoReadySources.Error() {
+		t.Fatalf("scrape with empty mappings = HTTP %d, %s", w.Code, w.Body.String())
+	}
+}
+
 func TestMetadataAdminRoutesBindingExportAndCovers(t *testing.T) {
 	srv, store, bgm, _ := setupV27TestServer(t, "")
 	ctx := context.Background()

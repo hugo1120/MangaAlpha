@@ -31,6 +31,36 @@ func TestCJKVariantConversion(t *testing.T) {
 	}
 }
 
+func TestBangumiRunsExcludeExternalScrapesAndRecoverStaleRuns(t *testing.T) {
+	ctx := t.Context()
+	root := t.TempDir()
+	store, err := database.Open(filepath.Join(root, "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO bangumi_scrape_runs(id,mode,status,created_at)
+VALUES('native','incremental:offline','success',?),('ext_stale','force+online','running',?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	service, err := NewService(store, filepath.Join(root, "bangumi"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer service.Close()
+	runs, err := service.Runs(ctx, 30)
+	if err != nil || len(runs) != 1 || runs[0].ID != "native" {
+		t.Fatalf("Bangumi runs = %+v, err = %v", runs, err)
+	}
+	stale, err := service.Run(ctx, "ext_stale")
+	if err != nil || stale.Status != "failed" || stale.CompletedAt == nil ||
+		len(stale.Errors) != 1 || stale.Errors[0] != "service restarted before scrape job completed" {
+		t.Fatalf("stale external run = %+v, err = %v", stale, err)
+	}
+}
+
 func TestParseSeriesNameRealWorldPatterns(t *testing.T) {
 	cases := []struct {
 		raw        string

@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"database/sql"
 	"image"
 	"image/color"
 	"image/png"
@@ -19,6 +20,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/extmeta"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
@@ -222,17 +224,157 @@ func TestPipelineSkipWithoutBangumiOfflineDBAbortOnEmptyMountAndUnionSelectedMem
 		t.Fatal(err)
 	}
 
+	meta, err := extmeta.NewManager(store, bgmSvc, nil, tmp, logger, extmeta.ManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Close()
+	pipeMgr.SetMetadataManager(meta)
 	run3, err := pipeMgr.Start(ctx, unionLib.ID, "scheduled")
 	if err != nil {
 		t.Fatal(err)
 	}
 	done3 := waitPipe(run3.ID)
-	if done3.Status != "success" || len(done3.ScanRunIDs) != 1 {
+	if done3.Status != "success" || len(done3.ScanRunIDs) != 1 || done3.BangumiRunID != "" ||
+		!strings.Contains(done3.Summary, "目标书库暂无已就绪离线元数据索引，已跳过刮削与补封面") {
 		t.Fatalf("expected union pipeline scanning ONLY 1 selected sub-library, got %+v", done3)
 	}
 	// Verify Vol 03 from topDir + Vol 02 from bottomDir + Vol 01 from topDir are all present (3 vols total!)
 	uBooks, total, err := store.BooksPage(ctx, database.BookQuery{LibraryIDs: []string{unionLib.ID}, Unpaged: true})
 	if err != nil || total != 3 || len(uBooks) != 3 {
 		t.Fatalf("expected 3 books in union library after pipeline refresh, err=%v total=%d len=%d", err, total, len(uBooks))
+	}
+}
+
+func TestPipelineScrapesWithOnlyExternalOfflineSource(t *testing.T) {
+	ctx := t.Context()
+	tmp := t.TempDir()
+	mangaDir := filepath.Join(tmp, "Manga")
+	makeTinyCBZ(t, filepath.Join(mangaDir, "Blue River", "Vol 01.cbz"))
+	makeTinyCBZ(t, filepath.Join(mangaDir, "Unknown Work", "Vol 01.cbz"))
+	store, err := database.Open(filepath.Join(tmp, "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	lib := database.Library{
+		ID: "local", Name: "Local", ProviderType: database.ProviderLocal,
+		RootCID: "local:" + mangaDir, RootPath: mangaDir, Enabled: true,
+	}
+	if err := store.UpsertLibrary(ctx, lib); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertLibrarySchedule(ctx, database.LibrarySchedule{
+		LibraryID: lib.ID, Enabled: true, Frequency: "daily", TimeOfDay: "04:00",
+		AutoBangumi: true, AutoCoverLimit: 5,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	client := oneonefive.New(store, logger)
+	webdavMgr := webdav.NewManager()
+	scanMgr := scanner.NewWithWebDAV(store, client, webdavMgr, logger)
+	defer scanMgr.Close()
+	cacheMgr, err := cache.New(store, filepath.Join(tmp, "cache"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archiveSvc := archive.NewServiceWithWebDAV(store, client, webdavMgr, cacheMgr, logger)
+	defer archiveSvc.Close()
+	thumbSvc, err := thumbnail.New(store, filepath.Join(tmp, "thumbs"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverMgr := thumbnail.NewBatchManager(store, archiveSvc, thumbSvc, logger)
+	defer coverMgr.Close()
+	bgm, err := bangumi.NewService(store, filepath.Join(tmp, "bangumi"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer bgm.Close()
+	meta, err := extmeta.NewManager(store, bgm, nil, tmp, logger, extmeta.ManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer meta.Close()
+
+	sourcePath := filepath.Join(tmp, "external.sqlite")
+	upstream, err := sql.Open("sqlite", sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = upstream.Exec(`
+CREATE TABLE entries (
+ id TEXT PRIMARY KEY, title TEXT, title_alt TEXT, authors TEXT, summary TEXT, tags TEXT,
+ category TEXT, cover_url TEXT, rating REAL, is_nsfw INTEGER, updated_at INTEGER, extra_json TEXT
+);
+INSERT INTO entries(id,title,cover_url,is_nsfw)
+VALUES('101','Blue River','https://covers.example.test/101.png',0)`)
+	closeErr := upstream.Close()
+	if err != nil || closeErr != nil {
+		t.Fatalf("create external metadata fixture: %v, close: %v", err, closeErr)
+	}
+	src, err := meta.AddCustomSource(ctx, database.MetadataSource{
+		Kind: extmeta.KindOfflineSQLite, Name: "Offline catalog", LocalPath: sourcePath, Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := meta.StartSourceSync(ctx, src.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		sync := meta.Syncs()[0]
+		if sync.CompletedAt != "" {
+			if sync.Status != "success" {
+				t.Fatalf("external source sync = %+v", sync)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("external source sync did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := meta.SetLibrarySources(ctx, lib.ID, []string{src.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if bgm.ArchiveStatus().Ready {
+		t.Fatal("fixture should have no Bangumi archive")
+	}
+	pipeline := New(store, scanMgr, bgm, coverMgr, logger)
+	pipeline.SetMetadataManager(meta)
+	defer pipeline.Close()
+	run, err := pipeline.Start(ctx, lib.ID, "scheduled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		run, err = pipeline.Run(ctx, run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if run.CompletedAt != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("pipeline did not finish: %+v", run)
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	if run.Status != "success" || !strings.HasPrefix(run.BangumiRunID, "ext_") || run.CoverRunID == "" ||
+		!strings.Contains(run.Summary, "多源刮削命中 1 / 未命中 1") {
+		t.Fatalf("external source pipeline = %+v", run)
+	}
+	scrape, err := meta.ScrapeRunByID(ctx, run.BangumiRunID)
+	if err != nil || scrape.Matched != 1 || scrape.Unmatched != 1 || scrape.AllowOnline ||
+		scrape.Mode != bangumi.ScrapeModeIncremental {
+		t.Fatalf("pipeline scrape = %+v, err = %v", scrape, err)
+	}
+	cover, err := coverMgr.Run(ctx, run.CoverRunID)
+	if err != nil || cover.TotalSeries != 1 || cover.GeneratedCount != 1 {
+		t.Fatalf("pipeline cover = %+v, err = %v", cover, err)
 	}
 }

@@ -4,15 +4,25 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+)
+
+var ErrNoReadySources = errors.New("目标书库暂无已就绪的离线数据源，请先一键下载 Bangumi 离线索引库或同步扩展离线源")
+
+const (
+	scrapeProgressBatch    = 25
+	scrapeProgressInterval = 400 * time.Millisecond
+	topLevelLibraryFilter  = "l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)"
 )
 
 type ScrapeRun struct {
@@ -42,11 +52,69 @@ type scrapeSeries struct {
 }
 
 type scrapePlan struct {
-	sources  map[string]database.MetadataSource
-	chains   map[string][]database.LibraryMetadataSource
-	mappings *MappingIndex
-	bySchema map[string][]string
-	online   []database.MetadataSource
+	sources       map[string]database.MetadataSource
+	chains        map[string][]database.LibraryMetadataSource
+	mappings      *MappingIndex
+	readySidecars map[string]bool
+	bySchema      map[string][]string
+	online        []database.MetadataSource
+}
+
+func (p scrapePlan) chain(libraryID string) []database.LibraryMetadataSource {
+	if chain := p.chains[libraryID]; len(chain) > 0 {
+		return chain
+	}
+	return []database.LibraryMetadataSource{{SourceID: TargetSourceBangumi, Enabled: true}}
+}
+
+func (p scrapePlan) hasReadyChain(libraryID string, bgmReady bool) bool {
+	for _, link := range p.chain(libraryID) {
+		if !link.Enabled {
+			continue
+		}
+		if p.readySidecars[link.SourceID] ||
+			(bgmReady && (link.SourceID == TargetSourceBangumi || p.sources[link.SourceID].Kind == KindBangumiArchive)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *Manager) HasReadySourcesForLibrary(ctx context.Context, libraryID string, allowOnline bool) (bool, error) {
+	if err := checkAdmin(ctx); err != nil {
+		return false, err
+	}
+	plan, err := m.scrapePlan(ctx)
+	if err != nil {
+		return false, err
+	}
+	if (allowOnline && len(plan.online) > 0) || plan.mappings.Len() > 0 {
+		return true, nil
+	}
+	bgmReady := m.bangumi != nil && m.bangumi.ArchiveStatus().Ready
+	if libraryID != "" {
+		return plan.hasReadyChain(libraryID, bgmReady), nil
+	}
+	rows, err := m.store.DB().QueryContext(ctx, "SELECT l.id FROM libraries l WHERE "+topLevelLibraryFilter)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	hasLibraries := false
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return false, err
+		}
+		hasLibraries = true
+		if plan.hasReadyChain(id, bgmReady) {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return !hasLibraries && (bgmReady || len(plan.readySidecars) > 0), nil
 }
 
 func (m *Manager) StartMultiScrape(ctx context.Context, libraryID, mode string, allowOnline bool) (ScrapeRun, error) {
@@ -74,6 +142,13 @@ func (m *Manager) StartMultiScrape(ctx context.Context, libraryID, mode string, 
 		}
 		libraryName = lib.Name
 	}
+	ready, err := m.HasReadySourcesForLibrary(ctx, libraryID, allowOnline)
+	if err != nil {
+		return ScrapeRun{}, err
+	}
+	if !ready {
+		return ScrapeRun{}, ErrNoReadySources
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -82,42 +157,168 @@ func (m *Manager) StartMultiScrape(ctx context.Context, libraryID, mode string, 
 	if m.scrapeCancel != nil {
 		return ScrapeRun{}, ErrBusy
 	}
-	jobCtx, cancel := context.WithCancel(m.ctx)
-	m.scrapeCancel = cancel
 	run := ScrapeRun{
-		ID: newRunID(), LibraryID: libraryID, LibraryName: libraryName, Mode: mode, AllowOnline: allowOnline,
+		ID: "ext_" + newRunID(), LibraryID: libraryID, LibraryName: libraryName, Mode: mode, AllowOnline: allowOnline,
 		Status: "running", StartedAt: timestamp(),
 	}
+	storedMode := mode
+	if allowOnline {
+		storedMode += "+online"
+	}
+	if _, err := m.store.DB().ExecContext(ctx, `
+INSERT INTO bangumi_scrape_runs(id,library_id,mode,force,status,started_at,created_at)
+VALUES(?,nullif(?,''),?,?,'running',?,?)`, run.ID, libraryID, storedMode, mode == bangumi.ScrapeModeForce,
+		run.StartedAt, run.StartedAt); err != nil {
+		return ScrapeRun{}, err
+	}
+	jobCtx, cancel := context.WithCancel(m.ctx)
+	m.scrapeCancel = cancel
+	m.scrapeFlush = make(chan struct{}, 1)
 	m.scrapes = append(m.scrapes, run)
 	if len(m.scrapes) > runHistoryLimit {
 		m.scrapes = slices.Delete(m.scrapes, 0, len(m.scrapes)-runHistoryLimit)
 	}
+	flush := m.scrapeFlush
 	m.wg.Go(func() {
-		run := run
 		defer cancel()
-		err := m.multiScrape(database.WithAutomaticMetadata(jobCtx), &run)
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		switch {
-		case jobCtx.Err() != nil:
-			run.Status = "canceled"
-		case err != nil:
-			run.Status, run.Error = "failed", "metadata scrape failed"
-		default:
-			run.Status = "success"
-		}
-		run.CompletedAt = timestamp()
-		m.scrapes[len(m.scrapes)-1] = run
-		m.scrapeCancel = nil
+		m.executeScrape(jobCtx, run, flush)
 	})
 	return run, nil
+}
+
+func (m *Manager) executeScrape(ctx context.Context, run ScrapeRun, flush <-chan struct{}) {
+	flushCtx, stopFlush := context.WithCancel(ctx)
+	flushed := make(chan struct{})
+	initial := run
+	go func() {
+		defer close(flushed)
+		m.flushScrapeProgress(flushCtx, initial, flush)
+	}()
+
+	err := m.multiScrape(database.WithAutomaticMetadata(ctx), &run)
+	stopFlush()
+	<-flushed
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	switch {
+	case ctx.Err() != nil:
+		run.Status = "canceled"
+	case err != nil:
+		run.Status, run.Error = "failed", "metadata scrape failed"
+	case run.Failed > 0:
+		run.Status = "partial"
+	default:
+		run.Status = "success"
+	}
+	run.CompletedAt = timestamp()
+	if err := m.saveScrapeRun(context.Background(), run); err != nil {
+		run.Status, run.Error = "failed", "could not save metadata scrape status"
+		if m.logger != nil {
+			m.logger.Warn(run.Error, "runId", run.ID)
+		}
+	}
+	m.scrapes[len(m.scrapes)-1] = run
+	m.scrapeCancel = nil
+	m.scrapeFlush = nil
+}
+
+func (m *Manager) flushScrapeProgress(ctx context.Context, saved ScrapeRun, flush <-chan struct{}) {
+	ticker := time.NewTicker(scrapeProgressInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		case <-flush:
+		}
+		m.mu.RLock()
+		run := m.scrapes[len(m.scrapes)-1]
+		m.mu.RUnlock()
+		if run != saved && m.saveScrapeRun(ctx, run) == nil {
+			saved = run
+		}
+	}
+}
+
+func (m *Manager) saveScrapeRun(ctx context.Context, run ScrapeRun) error {
+	messages := []string{}
+	if run.Error != "" {
+		messages = append(messages, run.Error)
+	}
+	errorsJSON, _ := json.Marshal(messages)
+	_, err := m.store.DB().ExecContext(ctx, `
+UPDATE bangumi_scrape_runs SET status=?,completed_at=nullif(?,''),total_series=?,processed_series=?,
+ matched_count=?,unmatched_count=?,skipped_count=?,failed_count=?,current_series=?,errors_json=?
+WHERE id=?`, run.Status, run.CompletedAt, run.TotalSeries, run.Processed, run.Matched, run.Unmatched,
+		run.Skipped, run.Failed, run.CurrentSeries, string(errorsJSON), run.ID)
+	return err
+}
+
+const selectScrapeRuns = `
+SELECT r.id,coalesce(r.library_id,''),coalesce(l.name,'全部未隐藏书库'),r.mode,r.status,
+ coalesce(r.started_at,''),coalesce(r.completed_at,''),r.total_series,r.processed_series,
+ r.matched_count,r.unmatched_count,r.skipped_count,r.failed_count,r.current_series,r.errors_json
+FROM bangumi_scrape_runs r LEFT JOIN libraries l ON l.id=r.library_id
+WHERE r.id LIKE 'ext_%'`
+
+func scanStoredScrapeRun(row interface{ Scan(...any) error }) (ScrapeRun, error) {
+	var run ScrapeRun
+	var errorsJSON string
+	if err := row.Scan(&run.ID, &run.LibraryID, &run.LibraryName, &run.Mode, &run.Status, &run.StartedAt,
+		&run.CompletedAt, &run.TotalSeries, &run.Processed, &run.Matched, &run.Unmatched, &run.Skipped,
+		&run.Failed, &run.CurrentSeries, &errorsJSON); err != nil {
+		return ScrapeRun{}, err
+	}
+	run.Mode, run.AllowOnline = strings.CutSuffix(run.Mode, "+online")
+	var messages []string
+	if json.Unmarshal([]byte(errorsJSON), &messages) == nil && len(messages) > 0 {
+		run.Error = messages[0]
+	}
+	return run, nil
+}
+
+// mergeScrapeProgress overlays the in-process snapshot while retaining the current library name.
+// The caller holds m.mu for reading.
+func (m *Manager) mergeScrapeProgress(run ScrapeRun) ScrapeRun {
+	for _, live := range m.scrapes {
+		if live.ID == run.ID {
+			live.LibraryName = run.LibraryName
+			return live
+		}
+	}
+	return run
+}
+
+func (m *Manager) ScrapeRunByID(ctx context.Context, runID string) (ScrapeRun, error) {
+	if err := checkAdmin(ctx); err != nil {
+		return ScrapeRun{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	run, err := scanStoredScrapeRun(m.store.DB().QueryRowContext(ctx, selectScrapeRuns+" AND r.id=?", runID))
+	if err != nil {
+		return ScrapeRun{}, err
+	}
+	return m.mergeScrapeProgress(run), nil
 }
 
 func (m *Manager) ScrapeRuns() []ScrapeRun {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := append([]ScrapeRun{}, m.scrapes...)
-	slices.Reverse(out)
+	out := make([]ScrapeRun, 0)
+	rows, err := m.store.DB().QueryContext(context.Background(), selectScrapeRuns+" ORDER BY r.created_at DESC LIMIT 30")
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		run, err := scanStoredScrapeRun(rows)
+		if err != nil {
+			break
+		}
+		out = append(out, m.mergeScrapeProgress(run))
+	}
 	return out
 }
 
@@ -153,14 +354,16 @@ func (m *Manager) scrapePlan(ctx context.Context) (scrapePlan, error) {
 	}
 	plan := scrapePlan{
 		sources: make(map[string]database.MetadataSource, len(sources)),
-		chains:  chains, mappings: m.mappingIndex, bySchema: make(map[string][]string),
+		chains:  chains, mappings: m.mappingIndex, readySidecars: make(map[string]bool),
+		bySchema: make(map[string][]string),
 	}
 	for _, src := range sources {
 		if !src.Enabled {
 			continue
 		}
 		plan.sources[src.ID] = src
-		if sidecar := m.sidecars[src.ID]; src.Ready && sidecar != nil {
+		if sidecar := m.sidecars[src.ID]; src.Kind == KindOfflineSQLite && src.Ready && sidecar != nil {
+			plan.readySidecars[src.ID] = true
 			schema := sidecar.Schema()
 			plan.bySchema[schema] = append(plan.bySchema[schema], src.ID)
 		}
@@ -178,7 +381,7 @@ SELECT s.id,s.library_id,s.name,s.relative_path,s.one_shot,
        (coalesce(sm.bgm_subject_id,0)>0 OR coalesce(sm.ext_entry_id,'')<>'')
 FROM series s JOIN libraries l ON l.id=s.library_id
 LEFT JOIN series_metadata sm ON sm.series_id=s.id
-WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
+WHERE ` + topLevelLibraryFilter + `
   AND coalesce(sm.match_origin,'') NOT IN ('manual','agent')
   AND NOT (coalesce(sm.match_origin,'')='' AND (coalesce(sm.bgm_subject_id,0)>0 OR coalesce(sm.ext_entry_id,'')<>''))`
 	var args []any
@@ -255,6 +458,7 @@ func (m *Manager) finishSeries(ctx context.Context, run *ScrapeRun, target scrap
 		run.Skipped++
 	case err != nil:
 		run.Failed++
+		run.Error = "metadata scrape failed for one or more series"
 	case matched:
 		run.Matched++
 		if incoming.MatchOrigin == "mapping" {
@@ -269,16 +473,20 @@ func (m *Manager) finishSeries(ctx context.Context, run *ScrapeRun, target scrap
 
 func (m *Manager) publishScrapeProgress(run *ScrapeRun) {
 	m.mu.Lock()
-	m.scrapes[len(m.scrapes)-1] = *run
-	m.mu.Unlock()
+	defer m.mu.Unlock()
+	i := len(m.scrapes) - 1
+	if run.Processed != m.scrapes[i].Processed && run.Processed%scrapeProgressBatch == 0 {
+		select {
+		case m.scrapeFlush <- struct{}{}:
+		default:
+		}
+	}
+	m.scrapes[i] = *run
 }
 
 func (m *Manager) matchOffline(ctx context.Context, target scrapeSeries, plan scrapePlan) (database.ScrapedMetadata, bool, error) {
 	series := target.series
-	chain := plan.chains[series.LibraryID]
-	if len(chain) == 0 {
-		chain = []database.LibraryMetadataSource{{SourceID: TargetSourceBangumi, Enabled: true}}
-	}
+	chain := plan.chain(series.LibraryID)
 	parsed := bangumi.ParseSeriesWithPath(series.Name, series.RelativePath)
 	var embedded *EmbeddedMeta
 	var readArchive bool
@@ -288,7 +496,7 @@ func (m *Manager) matchOffline(ctx context.Context, target scrapeSeries, plan sc
 			continue
 		}
 		src := plan.sources[link.SourceID]
-		if link.SourceID == TargetSourceBangumi || src.Kind == KindBangumiArchive && src.Ready {
+		if link.SourceID == TargetSourceBangumi || src.Kind == KindBangumiArchive {
 			if m.bangumi == nil {
 				continue
 			}
@@ -301,7 +509,7 @@ func (m *Manager) matchOffline(ctx context.Context, target scrapeSeries, plan sc
 				sourceErr = err
 			}
 		}
-		if src.Kind != KindOfflineSQLite || !src.Ready {
+		if !plan.readySidecars[link.SourceID] {
 			continue
 		}
 		if !readArchive && m.opts.ArchiveMetaReader != nil {

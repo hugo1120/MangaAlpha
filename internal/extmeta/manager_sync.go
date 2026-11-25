@@ -447,7 +447,7 @@ func (m *Manager) downloadMappings(ctx context.Context, client *http.Client, src
 		if err != nil {
 			return nil, err
 		}
-		if len(index.Packs) == 0 || len(index.Packs) > 128 {
+		if len(index.Packs) > 128 {
 			return nil, ErrInvalidConfig
 		}
 		urls = nil
@@ -493,9 +493,6 @@ func (m *Manager) downloadMappings(ctx context.Context, client *http.Client, src
 			return nil, err
 		}
 		records = append(records, part...)
-	}
-	if len(records) == 0 {
-		return nil, errors.New("mapping packs contain no valid records")
 	}
 	return records, nil
 }

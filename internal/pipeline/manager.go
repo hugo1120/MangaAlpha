@@ -12,10 +12,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/extmeta"
 	"github.com/xJogger/fake-komga-115/internal/scanner"
 	"github.com/xJogger/fake-komga-115/internal/thumbnail"
 )
@@ -31,11 +33,12 @@ type pipelineJob struct {
 }
 
 type Manager struct {
-	store   *database.Store
-	scanner *scanner.Manager
-	bangumi *bangumi.Service
-	covers  *thumbnail.BatchManager
-	logger  *slog.Logger
+	store    *database.Store
+	scanner  *scanner.Manager
+	bangumi  *bangumi.Service
+	covers   *thumbnail.BatchManager
+	logger   *slog.Logger
+	metadata atomic.Pointer[extmeta.Manager]
 
 	nowFunc      func() time.Time
 	pollInterval time.Duration
@@ -81,6 +84,10 @@ WHERE status IN ('queued','running')`, now)
 	go m.worker()
 	go m.scheduler()
 	return m
+}
+
+func (m *Manager) SetMetadataManager(meta *extmeta.Manager) {
+	m.metadata.Store(meta)
 }
 
 func (m *Manager) Close() {
@@ -418,31 +425,66 @@ func (m *Manager) execute(item pipelineJob) {
 		return
 	}
 
-	// Stage 3 & 4: Bangumi scrape + missing-unbound cover generation
-	// Per spec: if Bangumi offline archive is NOT ready, skip BOTH Bangumi scrape AND auto cover generation.
-	bgmOfflineReady := m.bangumi != nil && m.bangumi.ArchiveStatus().Ready
-	if !bgmOfflineReady {
-		summaryParts = append(summaryParts, "未就绪 Bangumi 离线库，已跳过刮削与补封面")
+	// Stage 3 & 4: Offline scrape and missing-unbound cover generation.
+	metadata := m.metadata.Load()
+	skipMessage := "未就绪 Bangumi 离线库，已跳过刮削与补封面"
+	var ready bool
+	if metadata != nil {
+		var readyErr error
+		ready, readyErr = metadata.HasReadySourcesForLibrary(ctx, lib.ID, false)
+		if readyErr != nil {
+			status := "failed"
+			if ctx.Err() != nil {
+				status = "canceled"
+			}
+			m.finish(item.runID, status, "bangumi", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"), readyErr.Error())
+			return
+		}
+		skipMessage = "目标书库暂无已就绪离线元数据索引，已跳过刮削与补封面"
+	} else {
+		ready = m.bangumi != nil && m.bangumi.ArchiveStatus().Ready
+	}
+	if !ready {
+		summaryParts = append(summaryParts, skipMessage)
 		m.finish(item.runID, "success", "done", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"), "")
 		return
 	}
 
 	if sched.AutoBangumi {
 		m.updateProgress(item.runID, "bangumi", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"))
-		bRun, bErr := m.runAndWaitBangumi(ctx, lib.ID)
-		bgmRunID = bRun.ID
-		if bErr != nil {
-			if errors.Is(bErr, context.Canceled) || ctx.Err() != nil {
-				m.finish(item.runID, "canceled", "bangumi", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"), "pipeline canceled during Bangumi scrape")
+		errorLabel := "Bangumi 刮削异常"
+		cancelMessage := "pipeline canceled during Bangumi scrape"
+		summaryFormat := "Bangumi 命中 %d / 未命中 %d"
+		var (
+			status             string
+			matched, unmatched int
+			scrapeErr          error
+		)
+		if metadata != nil {
+			errorLabel = "多源刮削异常"
+			cancelMessage = "pipeline canceled during metadata scrape"
+			summaryFormat = "多源刮削命中 %d / 未命中 %d"
+			run, err := m.runAndWaitMetadata(ctx, lib.ID)
+			bgmRunID, status, matched, unmatched, scrapeErr = run.ID, run.Status, run.Matched, run.Unmatched, err
+		} else {
+			run, err := m.runAndWaitBangumi(ctx, lib.ID)
+			bgmRunID, status, matched, unmatched, scrapeErr = run.ID, run.Status, run.MatchedCount, run.UnmatchedCount, err
+		}
+		if scrapeErr != nil {
+			if errors.Is(scrapeErr, context.Canceled) || ctx.Err() != nil {
+				m.finish(item.runID, "canceled", "bangumi", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"), cancelMessage)
+				return
+			}
+			if errors.Is(scrapeErr, extmeta.ErrNoReadySources) {
+				summaryParts = append(summaryParts, skipMessage)
+				m.finish(item.runID, "success", "done", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"), "")
 				return
 			}
 			hasPartial = true
-			summaryParts = append(summaryParts, "Bangumi 刮削异常: "+bErr.Error())
+			summaryParts = append(summaryParts, errorLabel+"："+scrapeErr.Error())
 		} else {
-			if bRun.Status == "partial" {
-				hasPartial = true
-			}
-			summaryParts = append(summaryParts, fmt.Sprintf("Bangumi 命中 %d / 未命中 %d", bRun.MatchedCount, bRun.UnmatchedCount))
+			hasPartial = status == "partial"
+			summaryParts = append(summaryParts, fmt.Sprintf(summaryFormat, matched, unmatched))
 		}
 	}
 
@@ -556,6 +598,47 @@ func (m *Manager) runAndWaitBangumi(ctx context.Context, libraryID string) (data
 		case <-ctx.Done():
 			_ = m.bangumi.CancelBatch(context.Background(), run.ID)
 			return cur, context.Canceled
+		case <-ticker.C:
+		}
+	}
+}
+
+func (m *Manager) runAndWaitMetadata(ctx context.Context, libraryID string) (extmeta.ScrapeRun, error) {
+	metadata := m.metadata.Load()
+	if metadata == nil {
+		return extmeta.ScrapeRun{}, extmeta.ErrUnavailable
+	}
+	run, err := metadata.StartMultiScrape(ctx, libraryID, bangumi.ScrapeModeIncremental, false)
+	if err != nil {
+		return run, err
+	}
+	cancel := func() { _ = metadata.CancelScrape(run.ID) }
+	m.setChildCancel(cancel)
+	defer m.setChildCancel(nil)
+
+	ticker := time.NewTicker(m.pollInterval)
+	defer ticker.Stop()
+	for {
+		cur, err := metadata.ScrapeRunByID(ctx, run.ID)
+		if err != nil {
+			cancel()
+			return run, err
+		}
+		switch cur.Status {
+		case "success", "partial":
+			return cur, nil
+		case "canceled":
+			return cur, context.Canceled
+		case "failed":
+			if cur.Error == "" {
+				cur.Error = "metadata scrape failed"
+			}
+			return cur, errors.New(cur.Error)
+		}
+		select {
+		case <-ctx.Done():
+			cancel()
+			return cur, ctx.Err()
 		case <-ticker.C:
 		}
 	}

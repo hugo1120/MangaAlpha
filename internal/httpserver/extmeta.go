@@ -55,6 +55,8 @@ func (s *Server) metadataError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Metadata item not found.")
 	case errors.Is(err, extmeta.ErrInvalidConfig), errors.Is(err, extmeta.ErrSSRFBlocked):
 		writeError(w, http.StatusBadRequest, "INVALID_METADATA_CONFIG", "Invalid metadata configuration.")
+	case errors.Is(err, extmeta.ErrNoReadySources):
+		writeError(w, http.StatusBadRequest, "NO_READY_METADATA_SOURCES", err.Error())
 	case errors.Is(err, extmeta.ErrBusy):
 		writeError(w, http.StatusConflict, "METADATA_BUSY", "A metadata task is already running.")
 	case errors.Is(err, extmeta.ErrUnavailable), errors.Is(err, extmeta.ErrCircuitOpen):

@@ -775,7 +775,7 @@ VALUES(?,?,?,?,'queued',?)`, runID, libParam, modeLabel, forceInt, now); err != 
 func (s *Service) CancelBatch(ctx context.Context, runID string) error {
 	res, err := s.store.DB().ExecContext(ctx, `
 UPDATE bangumi_scrape_runs SET cancel_requested=1
-WHERE id=? AND status IN ('queued','running')`, strings.TrimSpace(runID))
+WHERE id=? AND id NOT LIKE 'ext_%' AND status IN ('queued','running')`, strings.TrimSpace(runID))
 	if err != nil {
 		return err
 	}
@@ -792,7 +792,7 @@ WHERE id=? AND status IN ('queued','running')`, strings.TrimSpace(runID))
 
 func (s *Service) CancelLibrary(ctx context.Context, libraryID string) {
 	rows, err := s.store.DB().QueryContext(ctx,
-		`SELECT id FROM bangumi_scrape_runs WHERE library_id=? AND status IN ('queued','running')`, libraryID)
+		`SELECT id FROM bangumi_scrape_runs WHERE library_id=? AND id NOT LIKE 'ext_%' AND status IN ('queued','running')`, libraryID)
 	if err != nil {
 		return
 	}
@@ -819,6 +819,7 @@ SELECT r.id,r.library_id,coalesce(l.name,'全部未隐藏书库'),r.mode,r.force
  r.current_series,r.errors_json,r.cancel_requested,r.started_at,r.completed_at,r.created_at
 FROM bangumi_scrape_runs r
 LEFT JOIN libraries l ON l.id=r.library_id
+WHERE r.id NOT LIKE 'ext_%'
 ORDER BY r.created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err

@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
@@ -141,6 +142,111 @@ func addManagerSource(t *testing.T, m *Manager, source database.MetadataSource) 
 	return src
 }
 
+func TestManagerEmptyMappingPacksSyncAndReload(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "empty manifest", body: `{"packs":[]}`},
+		{name: "empty NDJSON", body: `{"packs":["pack.ndjson"]}`},
+		{name: "no valid records", body: `{"packs":["invalid.ndjson"]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/index.json":
+					return managerResponse(r, http.StatusOK, strings.NewReader(tc.body)), nil
+				case "/pack.ndjson":
+					return managerResponse(r, http.StatusOK, strings.NewReader("")), nil
+				case "/invalid.ndjson":
+					return managerResponse(r, http.StatusOK, strings.NewReader("not a mapping\n")), nil
+				default:
+					return nil, fmt.Errorf("unexpected request")
+				}
+			})}
+			opts := ManagerOptions{HTTPClient: client}
+			store, m, root := newTestManager(t, opts)
+			seedMetadataLibrary(t, store, "main", true)
+			src := addManagerSource(t, m, database.MetadataSource{
+				Name: "Community", Kind: KindMappingPack, ManifestURL: "https://source.example.test/index.json",
+			})
+			previousError := "previous sync failed"
+			if _, err := store.UpdateMetadataSourceSyncState(ctx, src.ID, database.MetadataSourceSyncState{LastError: &previousError}); err != nil {
+				t.Fatal(err)
+			}
+			syncManagerFixture(t, m, src, false, "success")
+
+			assertEmpty := func(manager *Manager) {
+				t.Helper()
+				src, err := store.GetMetadataSource(ctx, src.ID)
+				if err != nil || !src.Ready || src.EntryCount != 0 || src.FileSize != 0 || src.LastError != "" {
+					t.Fatalf("empty mapping source = %+v, err = %v", src, err)
+				}
+				info, err := os.Stat(manager.mappingPath(src.ID))
+				if err != nil || info.Size() != 0 {
+					t.Fatalf("empty mapping file = %v, err = %v", info, err)
+				}
+				for _, libraryID := range []string{"main", ""} {
+					run, err := manager.StartMultiScrape(ctx, libraryID, "force", false)
+					if !errors.Is(err, ErrNoReadySources) || run.ID != "" {
+						t.Fatalf("scrape with only empty mapping = %+v, err = %v", run, err)
+					}
+				}
+				if runs := manager.ScrapeRuns(); len(runs) != 0 {
+					t.Fatalf("unexpected scrape history: %+v", runs)
+				}
+			}
+			assertEmpty(m)
+			m.Close()
+			reopened, err := NewManager(store, nil, nil, root, nil, opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			assertEmpty(reopened)
+		})
+	}
+}
+
+func TestManagerOfflineReadinessUsesVisibleLibraryChains(t *testing.T) {
+	ctx := t.Context()
+	store, m, root := newTestManager(t, ManagerOptions{})
+	path := filepath.Join(root, "catalog-source.sqlite")
+	createManagerGallery(t, path, "Blue River")
+	src := addManagerSource(t, m, database.MetadataSource{Name: "Catalog", Kind: KindOfflineSQLite, LocalPath: path})
+	syncManagerFixture(t, m, src, false, "success")
+	assertReady := func(id string, want bool) {
+		t.Helper()
+		if ready, err := m.HasReadySourcesForLibrary(ctx, id, false); err != nil || ready != want {
+			t.Fatalf("readiness for %q = %v, err = %v, want %v", id, ready, err, want)
+		}
+	}
+	assertReady("", true)
+	seedMetadataLibrary(t, store, "main", true)
+	seedMetadataLibrary(t, store, "hidden", false)
+	seedMetadataLibrary(t, store, "member", true)
+	seedMetadataLibrary(t, store, "other-member", true)
+	if _, _, err := store.CreateUnionLibrary(ctx, "Combined", true, []string{"member", "other-member"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"hidden", "member"} {
+		if _, err := m.SetLibrarySources(ctx, id, []string{src.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertReady("", false)
+	assertReady("main", false)
+	if _, err := m.SetLibrarySources(ctx, "main", []string{src.ID}); err != nil {
+		t.Fatal(err)
+	}
+	assertReady("", true)
+	assertReady("main", true)
+	execManagerFixture(t, store.DB(), "UPDATE library_metadata_sources SET enabled=0 WHERE library_id='main'")
+	assertReady("main", false)
+	assertReady("", false)
+}
+
 func TestManagerOfflineChainMappingAndManualProtection(t *testing.T) {
 	ctx := context.Background()
 	mappings := `{"schema":"mangaalpha_mapping_v1","key":"Blue River","targetSource":"gallery_v1","targetId":"102"}
@@ -196,13 +302,42 @@ func TestManagerOfflineChainMappingAndManualProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	run, err := m.StartMultiScrape(ctx, "", "force", false)
+	run, err := m.StartMultiScrape(ctx, "main", "force", true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	waitForManager(t, func() bool { return m.ScrapeRuns()[0].CompletedAt != "" })
 	if done := m.ScrapeRuns()[0]; done.ID != run.ID || done.Status != "success" || done.Matched != 2 || done.Mapped != 1 {
 		t.Fatalf("scrape = %+v", done)
+	}
+	if live, err := m.ScrapeRunByID(ctx, run.ID); err != nil || live.Mapped != 1 {
+		t.Fatalf("in-process scrape = %+v, err = %v", live, err)
+	}
+	m.Close()
+	reopened, err := NewManager(store, nil, nil, root, nil, ManagerOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	runs := reopened.ScrapeRuns()
+	if len(runs) != 1 {
+		t.Fatalf("scrape history = %+v", runs)
+	}
+	persisted := runs[0]
+	if !strings.HasPrefix(persisted.ID, "ext_") || persisted.ID != run.ID || persisted.LibraryID != "main" ||
+		persisted.LibraryName != "main" || persisted.Mode != bangumi.ScrapeModeForce || !persisted.AllowOnline ||
+		persisted.Matched != 2 || persisted.TotalSeries != 2 || persisted.Processed != 2 ||
+		persisted.Status != "success" || persisted.StartedAt != run.StartedAt || persisted.CompletedAt == "" {
+		t.Fatalf("persisted scrape = %+v", persisted)
+	}
+	if byID, err := reopened.ScrapeRunByID(ctx, run.ID); err != nil || byID != persisted {
+		t.Fatalf("scrape by ID = %+v, err = %v", byID, err)
+	}
+	var mode, createdAt string
+	var force bool
+	if err := store.DB().QueryRowContext(ctx, "SELECT mode,force,created_at FROM bangumi_scrape_runs WHERE id=?", run.ID).
+		Scan(&mode, &force, &createdAt); err != nil || mode != "force+online" || !force || createdAt != run.StartedAt {
+		t.Fatalf("stored scrape mode = %q, force = %v, createdAt = %q, err = %v", mode, force, createdAt, err)
 	}
 	for _, tc := range []struct {
 		id, entry, origin string
@@ -215,6 +350,31 @@ func TestManagerOfflineChainMappingAndManualProtection(t *testing.T) {
 	}
 	if got := readMetadata(t, store, "hidden-series"); got.MatchOrigin != "" {
 		t.Fatalf("hidden series changed: %+v", got)
+	}
+}
+
+func TestManagerNonEmptyMappingAllowsScrapeWithoutOtherSources(t *testing.T) {
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		body := `{"schema":"mangaalpha_mapping_v1","key":"Blue River","targetSource":"bangumi","targetId":"42"}`
+		return managerResponse(r, http.StatusOK, strings.NewReader(body)), nil
+	})}
+	store, m, _ := newTestManager(t, ManagerOptions{HTTPClient: client})
+	seedMetadataLibrary(t, store, "main", true)
+	src := addManagerSource(t, m, database.MetadataSource{
+		Name: "Community", Kind: KindMappingPack, DownloadURL: "https://source.example.test/pack.ndjson",
+	})
+	syncManagerFixture(t, m, src, false, "success")
+	run, err := m.StartMultiScrape(t.Context(), "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForManager(t, func() bool { return m.ScrapeRuns()[0].CompletedAt != "" })
+	var libraryID sql.NullString
+	if err := store.DB().QueryRow("SELECT library_id FROM bangumi_scrape_runs WHERE id=?", run.ID).Scan(&libraryID); err != nil || libraryID.Valid {
+		t.Fatalf("stored all-library ID = %+v, err = %v", libraryID, err)
+	}
+	if done := m.ScrapeRuns()[0]; done.LibraryName != "全部未隐藏书库" || done.Status != "success" {
+		t.Fatalf("all-library scrape = %+v", done)
 	}
 }
 
@@ -351,12 +511,27 @@ func TestManagerOnlineCircuitKeepsQueueCheckpoint(t *testing.T) {
 	if status.Processed != 0 || status.Total != 1 || status.HTTPStatus != 429 || status.CooldownUntil == nil || hits.Load() != 1 {
 		t.Fatalf("online checkpoint = %+v, requests = %d", status, hits.Load())
 	}
+	waitForManager(t, func() bool {
+		var total int
+		var current string
+		if err := store.DB().QueryRow("SELECT total_series,current_series FROM bangumi_scrape_runs WHERE id=?", run.ID).
+			Scan(&total, &current); err != nil {
+			t.Fatal(err)
+		}
+		return total == 1 && current == "Uncatalogued Work"
+	})
 	if err := m.CancelScrape(run.ID); err != nil {
 		t.Fatal(err)
 	}
 	waitForManager(t, func() bool { return m.ScrapeRuns()[0].Status == "canceled" })
 	if status := m.OnlineEnrichStatus(); status.Status != "canceled" || status.Processed != 0 {
 		t.Fatalf("online cancellation = %+v", status)
+	}
+	var storedStatus string
+	var completedAt sql.NullString
+	if err := store.DB().QueryRow("SELECT status,completed_at FROM bangumi_scrape_runs WHERE id=?", run.ID).
+		Scan(&storedStatus, &completedAt); err != nil || storedStatus != "canceled" || !completedAt.Valid {
+		t.Fatalf("stored cancellation = %q, completedAt = %+v, err = %v", storedStatus, completedAt, err)
 	}
 }
 

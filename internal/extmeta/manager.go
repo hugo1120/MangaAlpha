@@ -56,6 +56,7 @@ type Manager struct {
 	syncs        []SyncRun
 	scrapes      []ScrapeRun
 	scrapeCancel context.CancelFunc
+	scrapeFlush  chan struct{}
 	online       OnlineStatus
 	nextOnline   time.Time
 	sidecars     map[string]*SidecarStore

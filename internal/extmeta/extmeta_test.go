@@ -28,6 +28,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +39,88 @@ type stubIPResolver struct {
 
 func (s stubIPResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
 	return s.addrs, s.err
+}
+
+type recordingDialer struct {
+	addresses []string
+	err       error
+}
+
+func (d *recordingDialer) DialContext(_ context.Context, _, addr string) (net.Conn, error) {
+	d.addresses = append(d.addresses, addr)
+	return nil, d.err
+}
+
+func TestSafeDialTransparentProxyDNS(t *testing.T) {
+	t.Parallel()
+	dialError := errors.New("fixture dial ended")
+	for _, tc := range []struct {
+		name string
+		dns  []string
+		want []string
+	}{
+		{"fake IPv4", []string{"198.18.0.42"}, []string{"198.18.0.42"}},
+		{"fake IPv6", []string{"fc00::1234"}, []string{"fc00::1234"}},
+		{"dual stack", []string{"fc00::1234", "198.18.0.42"}, []string{"198.18.0.42", "fc00::1234"}},
+		{"stable dual stack", []string{"fc00::1234", "198.18.0.42", "fc00::1235", "198.18.0.41"},
+			[]string{"198.18.0.42", "198.18.0.41", "fc00::1234", "fc00::1235"}},
+		{"unspecified AAAA", []string{"93.184.216.34", "::"}, []string{"93.184.216.34"}},
+		{"unspecified A", []string{"198.18.0.42", "0.0.0.0"}, []string{"198.18.0.42"}},
+		{"mapped IPv4", []string{"::ffff:198.18.0.42", "::ffff:0.0.0.0"}, []string{"198.18.0.42"}},
+		{"fake mixed with public", []string{"198.18.0.42", "93.184.216.34"}, []string{"198.18.0.42", "93.184.216.34"}},
+		{"fake IPv6 mixed with public IPv4", []string{"fc00::1234", "93.184.216.34"}, []string{"93.184.216.34", "fc00::1234"}},
+		{"only unspecified", []string{"0.0.0.0", "::"}, nil},
+		{"private", []string{"198.18.0.42", "10.0.0.5"}, nil},
+		{"loopback", []string{"198.18.0.42", "127.0.0.1"}, nil},
+		{"ULA", []string{"198.18.0.42", "fd00::1"}, nil},
+		{"outside Fake-IP", []string{"198.18.0.42", "fc00:4000::1"}, nil},
+		{"CGNAT", []string{"198.18.0.42", "100.64.0.1"}, nil},
+		{"link local", []string{"198.18.0.42", "169.254.169.254"}, nil},
+		{"scoped IPv6", []string{"198.18.0.42", "fc00::1234%fixture"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var resolver stubIPResolver
+			for _, raw := range tc.dns {
+				addr := netip.MustParseAddr(raw)
+				resolver.addrs = append(resolver.addrs, net.IPAddr{IP: addr.AsSlice(), Zone: addr.Zone()})
+			}
+			dialer := &recordingDialer{err: dialError}
+			dial := makeSafeDialContext(dialer, resolver, false)
+			_, err := dial(t.Context(), "tcp", "dual.example.test:443")
+			wantErr := dialError
+			if len(tc.want) == 0 {
+				wantErr = ErrSSRFBlocked
+			}
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("dial error = %v, want %v", err, wantErr)
+			}
+			var wantAddresses []string
+			for _, addr := range tc.want {
+				wantAddresses = append(wantAddresses, net.JoinHostPort(addr, "443"))
+			}
+			if !slices.Equal(dialer.addresses, wantAddresses) {
+				t.Errorf("dial addresses = %v, want %v", dialer.addresses, wantAddresses)
+			}
+		})
+	}
+}
+
+func TestSafeDialBlocksInternalHostnamesAndLiteralIPs(t *testing.T) {
+	t.Parallel()
+	dialer := &recordingDialer{err: errors.New("unexpected dial")}
+	dial := makeSafeDialContext(dialer, stubIPResolver{err: errors.New("unexpected DNS lookup")}, false)
+	for _, host := range []string{
+		"intranet", "localhost", "sub.localhost", "NaS.LoCaL.", "host.docker.internal",
+		"printer.lan", "server.home.arpa", "host.localdomain", "1.in-addr.arpa", "1.ip6.arpa",
+		"198.18.0.42", "::ffff:198.18.0.42", "fc00::1234", "0.0.0.0", "::",
+	} {
+		if _, err := dial(t.Context(), "tcp", net.JoinHostPort(host, "443")); !errors.Is(err, ErrSSRFBlocked) {
+			t.Errorf("host %q: got %v, want ErrSSRFBlocked", host, err)
+		}
+	}
+	if len(dialer.addresses) != 0 {
+		t.Errorf("unexpected dial addresses %v", dialer.addresses)
+	}
 }
 
 func TestSSRFClientBlocksNonPublicTargetsAndRedirects(t *testing.T) {
@@ -55,6 +138,8 @@ func TestSSRFClientBlocksNonPublicTargetsAndRedirects(t *testing.T) {
 		"http://169.254.169.254/latest/meta-data/",
 		"http://100.64.0.1/test",
 		"http://0.0.0.0/test",
+		"http://[::]/test",
+		"http://198.18.0.42/test",
 		"http://224.0.0.1/test",
 		"http://[fe80::1]/test",
 		"http://[fc00::1]/test",
@@ -226,7 +311,7 @@ func TestSSRFProxyValidatesTargetsWithoutResolvingThem(t *testing.T) {
 	for _, host := range []string{
 		"metadata", "redis", "postgres", "intranet", "NaS.LoCaL.", "host.docker.internal",
 		"printer.lan", "server.home.arpa", "host.localdomain", "1.in-addr.arpa", "1.ip6.arpa",
-		"169.254.169.254", "198.18.0.1",
+		"169.254.169.254", "198.18.0.42", "[fc00::1234]", "0.0.0.0", "[::]",
 	} {
 		resp, err := client.Get("http://" + host + "/")
 		if resp != nil {
@@ -243,6 +328,84 @@ func TestSSRFProxyValidatesTargetsWithoutResolvingThem(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusNoContent || hits.Load() != 1 {
 		t.Fatalf("proxy status = %d, requests = %d", resp.StatusCode, hits.Load())
+	}
+}
+
+func TestCoverSSRFAndCircuitDiagnostics(t *testing.T) {
+	rec := testMetadataDiagnostics(t)
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/blocked":
+			return nil, fmt.Errorf("%w: disallowed IP fc00::1234, fixture-secret", ErrSSRFBlocked)
+		case "/forbidden":
+			return managerResponse(r, http.StatusForbidden, strings.NewReader("")), nil
+		case "/limit":
+			return managerResponse(r, http.StatusTooManyRequests, strings.NewReader("")), nil
+		case "/unavailable":
+			return managerResponse(r, http.StatusServiceUnavailable, strings.NewReader("")), nil
+		default:
+			return managerResponse(r, http.StatusNotFound, strings.NewReader("")), nil
+		}
+	})}
+	svc, err := NewCoverService(CoverConfig{DataDir: t.TempDir(), Client: client, Burst: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		path string
+		want error
+	}{
+		{"/blocked", ErrSSRFBlocked},
+		{"/forbidden", ErrCircuitOpen},
+		{"/limit", ErrCircuitOpen},
+		{"/unavailable", ErrCircuitOpen},
+		{"/missing", nil},
+	} {
+		_, err := svc.GetOrFetch(t.Context(), tc.path, "fixture", "https://repo.example.test"+tc.path)
+		if err == nil || tc.want != nil && !errors.Is(err, tc.want) {
+			t.Errorf("cover fetch %s returned %v, want failure %v", tc.path, err, tc.want)
+		}
+	}
+	events := rec.Recent(10)
+	want := []struct {
+		code       string
+		httpStatus any
+	}{
+		{"SSRF_BLOCKED", nil},
+		{"CIRCUIT_OPEN", float64(http.StatusForbidden)},
+		{"CIRCUIT_OPEN", float64(http.StatusTooManyRequests)},
+		{"CIRCUIT_OPEN", float64(http.StatusServiceUnavailable)},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("cover diagnostics = %+v, want %d events", events, len(want))
+	}
+	for i, ev := range events {
+		if ev.Component != "extmeta" || ev.Stage != "extmeta_cover" || ev.Action != "fetch" ||
+			ev.Level != diagnostics.LevelWarn || ev.Code != want[i].code || ev.Meta["httpStatus"] != want[i].httpStatus || ev.Detail == "" {
+			t.Errorf("unexpected cover diagnostic: %+v", ev)
+		}
+	}
+	assertSafeMetadataDiagnostics(t, rec.ExportText(10))
+}
+
+func TestRemoteUpdateAndDownloadPreserveHTTPStatus(t *testing.T) {
+	t.Parallel()
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		status := http.StatusNotFound
+		if r.Method == http.MethodHead {
+			status = http.StatusMethodNotAllowed
+		}
+		return managerResponse(r, status, strings.NewReader("")), nil
+	})}
+	const upstream = "https://repo.example.test/source.sqlite"
+	_, releaseErr := CheckRemoteUpdate(t.Context(), client, "", upstream, "", "", "", 0, "")
+	_, rangeErr := CheckRemoteUpdate(t.Context(), client, upstream, "", "", "", "", 0, "")
+	_, downloadErr := DownloadAndDecompressToFile(t.Context(), client, upstream, "", filepath.Join(t.TempDir(), "source.sqlite"), nil)
+	for _, err := range []error{releaseErr, rangeErr, downloadErr} {
+		var httpErr *HTTPStatusError
+		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+			t.Errorf("remote HTTP error = %v, want typed HTTP 404", err)
+		}
 	}
 }
 
@@ -314,6 +477,7 @@ func TestRepoManifestParseFetchAndValidation(t *testing.T) {
 		body []byte
 	}{
 		{"empty", nil},
+		{"invalid_json", []byte(`<html>`)},
 		{"wrong_schema", []byte(`{"schema":"other-v1","sources":[]}`)},
 		{"duplicate_id", []byte(`{"schema":"mangaalpha-repo-v1","sources":[{"id":"dup","kind":"mapping_pack","name":"A"},{"id":"dup","kind":"tag_dictionary","name":"B"}]}`)},
 		{"bad_id_slash", []byte(`{"schema":"mangaalpha-repo-v1","sources":[{"id":"a/b","kind":"mapping_pack","name":"A"}]}`)},
@@ -323,8 +487,8 @@ func TestRepoManifestParseFetchAndValidation(t *testing.T) {
 		{"oversize", bytes.Repeat([]byte("a"), MaxRepoManifestBytes+1)},
 	}
 	for _, tc := range invalidCases {
-		if _, err := ParseRepoManifest(tc.body); err == nil {
-			t.Fatalf("expected ParseRepoManifest(%s) to fail", tc.name)
+		if _, err := ParseRepoManifest(tc.body); !errors.Is(err, ErrInvalidManifest) {
+			t.Fatalf("ParseRepoManifest(%s) = %v, want ErrInvalidManifest", tc.name, err)
 		}
 	}
 
@@ -349,8 +513,8 @@ func TestRepoManifestParseFetchAndValidation(t *testing.T) {
 	if len(fetched.Sources) != 4 {
 		t.Fatalf("expected 4 fetched sources, got %d", len(fetched.Sources))
 	}
-	if _, err := FetchRepoManifest(context.Background(), client, srv.URL+"/too-big.json"); err == nil {
-		t.Fatalf("expected oversized remote repo manifest to fail")
+	if _, err := FetchRepoManifest(context.Background(), client, srv.URL+"/too-big.json"); !errors.Is(err, ErrInvalidManifest) {
+		t.Fatalf("oversized remote repo manifest = %v, want ErrInvalidManifest", err)
 	}
 }
 

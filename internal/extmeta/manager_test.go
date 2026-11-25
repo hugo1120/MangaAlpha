@@ -1,11 +1,14 @@
 package extmeta
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 type managerTransport func(*http.Request) (*http.Response, error)
@@ -40,6 +44,167 @@ func newTestManager(t *testing.T, opts ManagerOptions) (*database.Store, *Manage
 	}
 	t.Cleanup(manager.Close)
 	return store, manager, root
+}
+
+func testMetadataDiagnostics(t *testing.T) *diagnostics.Recorder {
+	t.Helper()
+	rec, err := diagnostics.New(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := diagnostics.Default()
+	diagnostics.SetDefault(rec)
+	t.Cleanup(func() { diagnostics.SetDefault(previous) })
+	return rec
+}
+
+func TestManagerRepoErrorsAndDiagnostics(t *testing.T) {
+	rec := testMetadataDiagnostics(t)
+	const proxy = "socks5://fixture-user:fixture-secret@proxy.example.test:1080"
+	const privateDetail = proxy + " fixture-secret [fc00::1234] 127.0.0.1 /fixture/private.sqlite"
+	timeout := &net.DNSError{Err: privateDetail, IsTimeout: true}
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/blocked":
+			return nil, fmt.Errorf("%w: %s", ErrSSRFBlocked, privateDetail)
+		case "/invalid-proxy":
+			return nil, ErrInvalidProxyURL
+		case "/canceled":
+			return nil, context.Canceled
+		case "/deadline":
+			return nil, context.DeadlineExceeded
+		case "/timeout":
+			return nil, timeout
+		case "/invalid-manifest":
+			return managerResponse(r, http.StatusOK, strings.NewReader(`{"schema":"fixture-secret"}`)), nil
+		case "/repo.json":
+			return managerResponse(r, http.StatusOK, strings.NewReader(`{"schema":"mangaalpha-repo-v1"}`)), nil
+		default:
+			return managerResponse(r, http.StatusNotFound, strings.NewReader(privateDetail)), nil
+		}
+	})}
+	_, m, _ := newTestManager(t, ManagerOptions{
+		HTTPClient: client, ProxyURLProvider: func(context.Context) string { return proxy },
+	})
+	var log bytes.Buffer
+	m.logger = slog.New(slog.NewTextHandler(&log, nil))
+	for _, tc := range []struct {
+		path   string
+		want   error
+		code   string
+		detail string
+	}{
+		{"/blocked", ErrSSRFBlocked, "SSRF_BLOCKED", "网络安全策略"},
+		{"/invalid-proxy", ErrInvalidProxyURL, "INVALID_PROXY_URL", "代理 URL 无效"},
+		{"/invalid-manifest", ErrInvalidManifest, "INVALID_METADATA_MANIFEST", "repo.json"},
+		{"/canceled", context.Canceled, "CANCELED", "已取消"},
+		{"/deadline", context.DeadlineExceeded, "TIMEOUT", "超时"},
+		{"/timeout", ErrRemoteMetadata, "TIMEOUT", "超时"},
+		{"/missing", ErrRemoteMetadata, "NOT_FOUND", "HTTP 404"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			_, err := m.SubscribeRepo(t.Context(), "https://repo.example.test"+tc.path+"?secret=fixture-secret")
+			if !errors.Is(err, tc.want) || errors.Is(err, ErrRemoteMetadata) != (tc.want == ErrRemoteMetadata) {
+				t.Fatalf("subscribe error = %v, want %v", err, tc.want)
+			}
+			switch tc.path {
+			case "/missing":
+				var statusErr *HTTPStatusError
+				if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+					t.Fatalf("subscribe error did not preserve HTTP 404: %v", err)
+				}
+			case "/timeout":
+				var dnsErr *net.DNSError
+				if !errors.As(err, &dnsErr) || dnsErr != timeout {
+					t.Fatalf("subscribe error did not preserve the timeout cause: %v", err)
+				}
+			}
+			events := rec.Recent(1)
+			if len(events) == 0 {
+				t.Fatal("subscribe diagnostics are missing")
+			}
+			event := events[0]
+			if event.Component != "extmeta" || event.Stage != "extmeta_repo" || event.Action != "subscribe" ||
+				event.Level != diagnostics.LevelWarn || event.Code != tc.code || !strings.Contains(event.Detail, tc.detail) {
+				t.Errorf("unexpected subscribe event: %+v", event)
+			}
+			if tc.path == "/missing" && event.Meta["httpStatus"] != float64(http.StatusNotFound) {
+				t.Errorf("subscribe event missing HTTP status: %+v", event)
+			}
+		})
+	}
+	repo, err := m.SubscribeRepo(t.Context(), "https://repo.example.test/repo.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RefreshRepo(t.Context(), repo.ID); err != nil {
+		t.Fatal(err)
+	}
+	events := rec.Recent(2)
+	if len(events) != 2 || events[0].Action != "subscribe" || events[1].Action != "refresh" ||
+		events[0].Level != diagnostics.LevelInfo || events[1].Level != diagnostics.LevelInfo {
+		t.Errorf("expected concise subscription and refresh success events, got %+v", events)
+	}
+	assertSafeMetadataDiagnostics(t, log.String(), rec.ExportText(30))
+}
+
+func TestManagerSyncFailureDetailsAndDiagnostics(t *testing.T) {
+	rec := testMetadataDiagnostics(t)
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/blocked" {
+			return nil, fmt.Errorf("%w: disallowed IP [fc00::1234] at 127.0.0.1 using /fixture/private.sqlite (fixture-secret)", ErrSSRFBlocked)
+		}
+		return managerResponse(r, http.StatusNotFound, strings.NewReader("fixture-secret")), nil
+	})}
+	store, m, _ := newTestManager(t, ManagerOptions{HTTPClient: client})
+	var log bytes.Buffer
+	m.logger = slog.New(slog.NewTextHandler(&log, nil))
+	for _, tc := range []struct {
+		path, code, detail string
+		httpStatus         any
+	}{
+		{"/blocked", "SSRF_BLOCKED", "网络安全策略", nil},
+		{"/missing", "NOT_FOUND", "HTTP 404", float64(http.StatusNotFound)},
+	} {
+		src := addManagerSource(t, m, database.MetadataSource{
+			Name: "Mapping index", Kind: KindMappingPack, ManifestURL: "https://repo.example.test" + tc.path,
+		})
+		syncManagerFixture(t, m, src, false, "failed")
+		run := m.Syncs()[0]
+		state, err := store.GetMetadataSource(t.Context(), src.ID)
+		if err != nil || state.LastError != run.Error || !strings.Contains(run.Error, tc.detail) {
+			t.Fatalf("sync messages: state=%q run=%q error=%v", state.LastError, run.Error, err)
+		}
+		events := rec.Recent(1)
+		if len(events) == 0 {
+			t.Fatal("sync diagnostics are missing")
+		}
+		event := events[0]
+		if event.Component != "extmeta" || event.Stage != "extmeta_sync" || event.Action != "sync" ||
+			event.Level != diagnostics.LevelError || event.Code != tc.code || event.Detail != run.Error ||
+			event.Meta["httpStatus"] != tc.httpStatus || event.Meta["kind"] != KindMappingPack ||
+			event.Meta["phase"] != "downloading" || event.Meta["skipped"] != false {
+			t.Errorf("unexpected sync event: %+v", event)
+		}
+		if !strings.Contains(log.String(), tc.detail) || !strings.Contains(log.String(), "sourceId="+src.ID) {
+			t.Errorf("sync failure warning is missing error detail or source ID: %s", log.String())
+		}
+		assertSafeMetadataDiagnostics(t, state.LastError, run.Error, log.String(), rec.ExportText(30))
+	}
+}
+
+func assertSafeMetadataDiagnostics(t *testing.T, texts ...string) {
+	t.Helper()
+	for _, output := range texts {
+		for _, secret := range []string{
+			"repo.example.test", "proxy.example.test", "fixture-user", "fixture-secret", "fc00::1234",
+			"127.0.0.1", "/fixture/private.sqlite",
+		} {
+			if strings.Contains(output, secret) {
+				t.Errorf("metadata diagnostics leaked %q in %s", secret, output)
+			}
+		}
+	}
 }
 
 func execManagerFixture(t *testing.T, db *sql.DB, query string, args ...any) {

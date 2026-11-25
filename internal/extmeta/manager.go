@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 var (
@@ -102,11 +104,14 @@ func (m *Manager) client(ctx context.Context, timeout time.Duration) *http.Clien
 	if m.opts.HTTPClient != nil {
 		return m.opts.HTTPClient
 	}
-	var proxy string
+	return NewSafeHTTPClient(m.proxyURL(ctx), timeout)
+}
+
+func (m *Manager) proxyURL(ctx context.Context) string {
 	if m.opts.ProxyURLProvider != nil {
-		proxy = m.opts.ProxyURLProvider(ctx)
+		return m.opts.ProxyURLProvider(ctx)
 	}
-	return NewSafeHTTPClient(proxy, timeout)
+	return ""
 }
 
 func (m *Manager) Close() {
@@ -137,7 +142,25 @@ func (m *Manager) RefreshRepo(ctx context.Context, repoID string) (database.Meta
 	return m.fetchRepo(ctx, repo)
 }
 
-func (m *Manager) fetchRepo(ctx context.Context, repo database.MetadataRepo) (database.MetadataRepo, error) {
+func (m *Manager) fetchRepo(ctx context.Context, repo database.MetadataRepo) (result database.MetadataRepo, err error) {
+	started := time.Now()
+	action := "subscribe"
+	if repo.ID != "" {
+		action = "refresh"
+	}
+	defer func() {
+		level, proxy := diagnostics.LevelInfo, ""
+		if err != nil {
+			level, proxy = diagnostics.LevelWarn, m.proxyURL(ctx)
+		}
+		event := metadataDiagnostic("extmeta_repo", action, level, err, proxy)
+		event.DurationMs = time.Since(started).Milliseconds()
+		if err != nil && m.logger != nil {
+			m.logger.Warn("metadata repository operation failed", "action", action, "code", event.Code, "error", event.Detail)
+		}
+		diagnostics.Default().Record(event)
+	}()
+
 	u, err := validateHTTPURL(repo.URL)
 	if err != nil || u.User != nil {
 		return repo, ErrInvalidConfig
@@ -146,7 +169,13 @@ func (m *Manager) fetchRepo(ctx context.Context, repo database.MetadataRepo) (da
 	defer client.CloseIdleConnections()
 	manifest, err := FetchRepoManifest(ctx, client, repo.URL)
 	if err != nil {
-		return repo, ErrRemoteMetadata
+		switch {
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded),
+			errors.Is(err, ErrSSRFBlocked), errors.Is(err, ErrInvalidProxyURL), errors.Is(err, ErrInvalidManifest):
+			return repo, err
+		default:
+			return repo, fmt.Errorf("%w: %w", ErrRemoteMetadata, err)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -16,6 +16,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 type SyncRun struct {
@@ -68,7 +69,7 @@ func (m *Manager) startSourceSync(ctx context.Context, id string, force, schedul
 		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Hour)
 		defer cancel()
 		skipped, err := m.syncSource(ctx, src, force, run.ID)
-		m.finishSync(src.ID, run.ID, skipped, err)
+		m.finishSync(src, run.ID, skipped, err)
 	})
 	return run, nil
 }
@@ -96,32 +97,44 @@ func (m *Manager) setSyncPhase(id, phase string) {
 	m.updateSync(id, func(run *SyncRun) { run.Phase = phase })
 }
 
-func (m *Manager) finishSync(sourceID, runID string, skipped bool, err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.activeSync, sourceID)
-	checked, message, status := timestamp(), "", "success"
+func (m *Manager) finishSync(src database.MetadataSource, runID string, skipped bool, err error) {
+	checked, message, status, level := timestamp(), DescribeError(err), "success", diagnostics.LevelInfo
 	switch {
 	case errors.Is(err, context.Canceled):
-		status = "canceled"
+		status, level = "canceled", diagnostics.LevelWarn
 	case err != nil:
-		status, message = "failed", "metadata source synchronization failed"
-		if errors.Is(err, ErrInvalidConfig) {
-			message = ErrInvalidConfig.Error()
-		}
-		if m.logger != nil {
-			m.logger.Warn(message, "sourceId", sourceID)
-		}
+		status, level = "failed", diagnostics.LevelError
 	case skipped:
 		status = "skipped"
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, stateErr := m.store.UpdateMetadataSourceSyncState(ctx, sourceID, database.MetadataSourceSyncState{
+
+	var phase string
+	m.mu.Lock()
+	m.updateSync(runID, func(run *SyncRun) { phase = run.Phase })
+	m.mu.Unlock()
+
+	if _, stateErr := m.store.UpdateMetadataSourceSyncState(ctx, src.ID, database.MetadataSourceSyncState{
 		LastCheckedAt: &checked, LastError: &message,
 	}); stateErr != nil && err == nil {
-		status, message = "failed", "could not save metadata sync status"
+		status, level, message = "failed", diagnostics.LevelError, "无法保存元数据源的同步状态。"
+		err = stateErr
 	}
+
+	var proxy string
+	if err != nil {
+		proxy = m.proxyURL(ctx)
+	}
+	event := metadataDiagnostic("extmeta_sync", "sync", level, err, proxy)
+	event.Meta["kind"], event.Meta["phase"], event.Meta["skipped"] = src.Kind, phase, skipped
+	if status == "failed" && m.logger != nil {
+		m.logger.Warn("metadata source synchronization failed", "sourceId", src.ID, "code", event.Code, "error", event.Detail)
+	}
+	diagnostics.Default().Record(event)
+
+	m.mu.Lock()
+	delete(m.activeSync, src.ID)
 	m.updateSync(runID, func(run *SyncRun) {
 		run.Status, run.Error, run.CompletedAt = status, message, checked
 	})
@@ -132,6 +145,7 @@ func (m *Manager) finishSync(sourceID, runID string, skipped bool, err error) {
 		}
 		m.syncs = slices.Delete(m.syncs, index, index+1)
 	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) StartScheduler() {
@@ -510,7 +524,7 @@ func fetchMetadataJSON(ctx context.Context, client *http.Client, rawURL string, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, errors.New("metadata JSON request failed")
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, Op: "fetch metadata JSON"}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {

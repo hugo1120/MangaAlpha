@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
@@ -295,16 +296,21 @@ func (c *CoverService) fetchValidateAndCache(
 	req.Header.Set("Accept", "image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8")
 
 	client := c.client
+	var proxy string
 	if c.proxyURLProvider != nil {
-		client = NewSafeHTTPClient(c.proxyURLProvider(ctx), 20*time.Second)
+		proxy = c.proxyURLProvider(ctx)
+		client = NewSafeHTTPClient(proxy, 20*time.Second)
 		defer client.CloseIdleConnections()
 	}
 	resp, err := client.Do(req)
 	if err != nil {
+		if errors.Is(err, ErrSSRFBlocked) {
+			diagnostics.Default().Record(metadataDiagnostic("extmeta_cover", "fetch", diagnostics.LevelWarn, err, proxy))
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return CoverData{}, err
 		}
-		c.setNegativeCache(negKey, err.Error())
+		c.setNegativeCache(negKey, DescribeError(err))
 		return CoverData{}, err
 	}
 	defer resp.Body.Close()
@@ -312,7 +318,11 @@ func (c *CoverService) fetchValidateAndCache(
 	if isCircuitBreakerStatus(resp.StatusCode) {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		c.tripCircuit(circuitKey)
-		return CoverData{}, fmt.Errorf("%w: upstream returned HTTP %d", ErrCircuitOpen, resp.StatusCode)
+		err := fmt.Errorf("%w: %w", ErrCircuitOpen, &HTTPStatusError{StatusCode: resp.StatusCode, Op: "fetch metadata cover"})
+		event := metadataDiagnostic("extmeta_cover", "fetch", diagnostics.LevelWarn, err, proxy)
+		event.Code = "CIRCUIT_OPEN"
+		diagnostics.Default().Record(event)
+		return CoverData{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))

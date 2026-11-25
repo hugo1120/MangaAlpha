@@ -2,6 +2,7 @@ package diagnostics
 
 import (
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,5 +107,68 @@ func TestWriteStartupFailure(t *testing.T) {
 	events := rec.Recent(10)
 	if len(events) != 1 || events[0].Stage != "startup" || events[0].Level != LevelError {
 		t.Fatalf("unexpected startup failure event: %+v", events)
+	}
+}
+
+func TestClassifySSRFError(t *testing.T) {
+	for _, message := range []string{
+		"SSRF_BLOCKED", "target resolved to a non-public IP", "disallowed IP",
+		"disallowed host", "DNS returned only unspecified addresses",
+	} {
+		if code := ClassifyError(errors.New(message)); code != "SSRF_BLOCKED" {
+			t.Errorf("ClassifyError(%q) = %q, want SSRF_BLOCKED", message, code)
+		}
+	}
+}
+
+func TestClassifyErrorIgnoresURLKeywords(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "sqlite filename in URL does not trigger DB_ERROR",
+			err:  &url.Error{Op: "Get", URL: "https://example.test/source.sqlite", Err: errors.New("http: server gave HTTP response to HTTPS client")},
+			want: "ERROR",
+		},
+		{
+			name: "zip and 404 in URL do not misclassify connection reset",
+			err:  &url.Error{Op: "Get", URL: "https://example.test/404/archive.zip", Err: errors.New("connection reset by peer")},
+			want: "CONN_RESET",
+		},
+		{
+			name: "auth in URL does not hide SSRF_BLOCKED",
+			err:  &url.Error{Op: "Get", URL: "https://example.test/auth/repo.json", Err: errors.New("request blocked by SSRF policy")},
+			want: "SSRF_BLOCKED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ClassifyError(tc.err); got != tc.want {
+				t.Errorf("ClassifyError(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecorderKeepsExtmetaLifecycleWithSafeEnums(t *testing.T) {
+	rec, err := New(t.TempDir(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(Event{Level: LevelInfo, Component: "extmeta", Stage: "extmeta_repo", Action: "subscribe"})
+	rec.Record(Event{
+		Level: LevelInfo, Component: "extmeta", Stage: "extmeta_sync", Action: "sync",
+		Meta: map[string]any{"kind": "offline_sqlite", "phase": "indexing", "skipped": false},
+	})
+	rec.Record(Event{
+		Level: LevelInfo, Component: "extmeta", Stage: "extmeta_sync", Action: "sync",
+		Meta: map[string]any{"kind": "fixture-secret", "phase": "fc00::1", "skipped": true},
+	})
+	events := rec.Recent(10)
+	if len(events) != 3 || events[0].Stage != "extmeta_repo" || events[1].Stage != "extmeta_sync" ||
+		events[1].Meta["kind"] != "offline_sqlite" || events[1].Meta["phase"] != "indexing" ||
+		len(events[2].Meta) != 1 || events[2].Meta["skipped"] != true {
+		t.Fatalf("unexpected concise metadata diagnostics: %+v", events)
 	}
 }

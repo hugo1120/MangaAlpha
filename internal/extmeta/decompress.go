@@ -112,7 +112,7 @@ func CheckRemoteUpdate(
 	}
 
 	if downloadURL == "" {
-		return RemoteUpdateInfo{}, errors.New("either downloadURL or releaseAPIURL must be provided")
+		return RemoteUpdateInfo{}, fmt.Errorf("%w: either downloadURL or releaseAPIURL must be provided", ErrInvalidConfig)
 	}
 	return checkHeadUpdate(ctx, client, downloadURL, prevETag, prevLastMod, prevSize)
 }
@@ -141,7 +141,7 @@ func checkReleaseAPIUpdate(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return RemoteUpdateInfo{}, fmt.Errorf("release API returned HTTP %d", resp.StatusCode)
+		return RemoteUpdateInfo{}, &HTTPStatusError{StatusCode: resp.StatusCode, Op: "fetch release API"}
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, defaultMaxReleaseJSONBytes+1))
@@ -268,6 +268,7 @@ func checkHeadUpdate(
 	resp.Body.Close()
 
 	size := resp.ContentLength
+	op := "check download headers"
 	if resp.StatusCode == http.StatusMethodNotAllowed || resp.StatusCode == http.StatusNotImplemented {
 		rangeReq, rErr := http.NewRequestWithContext(ctx, http.MethodGet, downloadURL, nil)
 		if rErr != nil {
@@ -282,10 +283,11 @@ func checkHeadUpdate(
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
 		size = parseTotalSizeFromHeaders(resp)
+		op = "check download range"
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return RemoteUpdateInfo{}, fmt.Errorf("HEAD %s returned HTTP %d", downloadURL, resp.StatusCode)
+		return RemoteUpdateInfo{}, &HTTPStatusError{StatusCode: resp.StatusCode, Op: op}
 	}
 
 	etag := strings.TrimSpace(resp.Header.Get("ETag"))
@@ -413,7 +415,7 @@ func downloadAndDecompressToFileWithLimit(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return DownloadResult{}, fmt.Errorf("download %s returned HTTP %d", downloadURL, resp.StatusCode)
+		return DownloadResult{}, &HTTPStatusError{StatusCode: resp.StatusCode, Op: "download metadata"}
 	}
 
 	destDir := filepath.Dir(destPath)

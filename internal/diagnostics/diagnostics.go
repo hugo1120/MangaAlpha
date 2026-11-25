@@ -3,6 +3,7 @@ package diagnostics
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -180,7 +182,8 @@ func (r *Recorder) shouldKeep(ev Event) bool {
 	}
 	switch ev.Stage {
 	case "startup", "shutdown", "mode", "lan_server", "scan_start", "scan_done",
-		"archive_fallback", "bangumi_archive", "android_service", "android_lan":
+		"archive_fallback", "bangumi_archive", "android_service", "android_lan",
+		"extmeta_repo", "extmeta_sync":
 		return true
 	default:
 		return false
@@ -389,6 +392,13 @@ var allowedMetaKeys = map[string]bool{
 	"seekable":       true,
 	"retryAfterMs":   true,
 	"httpStatus":     true,
+	"kind":           true,
+	"phase":          true,
+}
+
+var allowedMetaEnums = map[string][]string{
+	"kind":  {"bangumi_archive", "offline_sqlite", "tag_dictionary", "mapping_pack"},
+	"phase": {"downloading", "indexing", "syncing"},
 }
 
 func normalizeEvent(ev Event) Event {
@@ -419,6 +429,12 @@ func normalizeEvent(ev Event) Event {
 		clean := make(map[string]any, len(ev.Meta))
 		for k, v := range ev.Meta {
 			if !allowedMetaKeys[k] {
+				continue
+			}
+			if values, ok := allowedMetaEnums[k]; ok {
+				if token, ok := v.(string); ok && slices.Contains(values, token) {
+					clean[k] = token
+				}
 				continue
 			}
 			switch val := v.(type) {
@@ -492,11 +508,27 @@ func ClassifyError(err error) string {
 		return ""
 	}
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &netErr) && netErr.Timeout() {
 		return "TIMEOUT"
 	}
-	msg := strings.ToLower(err.Error())
+	if errors.Is(err, context.Canceled) {
+		return "CANCELED"
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return "DNS_ERROR"
+	}
+	msg := strings.ToLower(SanitizeText(err.Error()))
 	switch {
+	case strings.Contains(msg, "ssrf"), strings.Contains(msg, "non-public ip"), strings.Contains(msg, "disallowed ip"),
+		strings.Contains(msg, "disallowed host"), strings.Contains(msg, "unspecified addresses"):
+		return "SSRF_BLOCKED"
+	case strings.Contains(msg, "invalid proxy url"):
+		return "INVALID_PROXY_URL"
+	case strings.Contains(msg, "invalid metadata repository manifest"):
+		return "INVALID_METADATA_MANIFEST"
+	case strings.Contains(msg, "invalid metadata configuration"):
+		return "INVALID_METADATA_CONFIG"
 	case strings.Contains(msg, "context canceled"):
 		return "CANCELED"
 	case strings.Contains(msg, "deadline exceeded"), strings.Contains(msg, "timeout"):
@@ -509,6 +541,8 @@ func ClassifyError(err error) string {
 		return "DNS_ERROR"
 	case strings.Contains(msg, "x509"), strings.Contains(msg, "tls"):
 		return "TLS_ERROR"
+	case strings.Contains(msg, "checksum mismatch"), strings.Contains(msg, "sha256 mismatch"):
+		return "CHECKSUM_MISMATCH"
 	case strings.Contains(msg, "401"), strings.Contains(msg, "403"), strings.Contains(msg, "auth"):
 		return "AUTH_FAILED"
 	case strings.Contains(msg, "404"), strings.Contains(msg, "not found"), strings.Contains(msg, "no such file"):

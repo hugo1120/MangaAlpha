@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -49,6 +50,11 @@ var nonPublicIPv6Prefixes = []netip.Prefix{
 	netip.MustParsePrefix("fec0::/10"),      // Deprecated site-local
 }
 
+var transparentProxyFakeIPPrefixes = [...]netip.Prefix{
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("fc00::/18"),
+}
+
 type safeClientOptions struct {
 	allowLoopbackForTest bool
 }
@@ -56,8 +62,9 @@ type safeClientOptions struct {
 // NewSafeHTTPClient builds an *http.Client hardened against SSRF attacks.
 //
 // In direct mode (proxyURL == ""), DialContext resolves every IP for the target
-// host and rejects loopback, RFC1918/ULA private, link-local, unspecified,
-// multicast, CGNAT (100.64.0.0/10), and other non-public ranges before dialing.
+// host before dialing. It skips unspecified DNS placeholders and allows public
+// IPs and the transparent proxy Fake-IP ranges in DNS answers. Literal targets
+// must be public in either mode.
 //
 // When an explicit proxyURL is supplied, only basic scheme/host validation is
 // performed on the proxy URL, and every request/redirect URL is checked for
@@ -214,30 +221,38 @@ func validateTargetURL(u *url.URL, allowLoopback bool) error {
 		}
 		return nil
 	}
-	if !allowLoopback {
-		if !strings.Contains(host, ".") || isLoopbackHostname(host) {
-			return fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
-		}
-		for _, suffix := range []string{"local", "internal", "lan", "home.arpa", "localdomain", "in-addr.arpa", "ip6.arpa"} {
-			if host == suffix || strings.HasSuffix(host, "."+suffix) {
-				return fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
-			}
-		}
+	if !allowLoopback && isDisallowedHostname(host) {
+		return fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
 	}
 	return nil
 }
 
-func isLoopbackHostname(host string) bool {
-	return host == "localhost" ||
-		strings.HasSuffix(host, ".localhost") ||
-		host == "localhost.localdomain"
+func isDisallowedHostname(host string) bool {
+	host = strings.ToLower(host)
+	if !strings.Contains(host, ".") {
+		return true
+	}
+	for _, suffix := range []string{"localhost", "local", "internal", "lan", "home.arpa", "localdomain", "in-addr.arpa", "ip6.arpa"} {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isTransparentProxyFakeIP(addr netip.Addr) bool {
+	return transparentProxyFakeIPPrefixes[0].Contains(addr) || transparentProxyFakeIPPrefixes[1].Contains(addr)
 }
 
 type ipResolver interface {
 	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
-func makeSafeDialContext(dialer *net.Dialer, resolver ipResolver, allowLoopback bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+type contextDialer interface {
+	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+}
+
+func makeSafeDialContext(dialer contextDialer, resolver ipResolver, allowLoopback bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -256,7 +271,7 @@ func makeSafeDialContext(dialer *net.Dialer, resolver ipResolver, allowLoopback 
 			return dialer.DialContext(ctx, network, net.JoinHostPort(parsed.Unmap().String(), port))
 		}
 
-		if !allowLoopback && isLoopbackHostname(strings.ToLower(host)) {
+		if !allowLoopback && isDisallowedHostname(host) {
 			return nil, fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
 		}
 
@@ -269,18 +284,46 @@ func makeSafeDialContext(dialer *net.Dialer, resolver ipResolver, allowLoopback 
 		}
 
 		validated := make([]netip.Addr, 0, len(resolved))
+		var hasFakeIPv6 bool
 		for _, ipAddr := range resolved {
 			a, ok := netip.AddrFromSlice(ipAddr.IP)
 			if !ok {
 				return nil, fmt.Errorf("%w: invalid resolved IP for %q", ErrSSRFBlocked, host)
 			}
 			if ipAddr.Zone != "" {
+				if !allowLoopback {
+					return nil, fmt.Errorf("%w: scoped IPv6 address", ErrSSRFBlocked)
+				}
 				a = a.WithZone(ipAddr.Zone)
 			}
-			if !isPublicAddr(a, allowLoopback) {
+			a = a.Unmap()
+			if a.IsUnspecified() {
+				continue
+			}
+			fakeIP := isTransparentProxyFakeIP(a)
+			if !isPublicAddr(a, allowLoopback) && !fakeIP {
 				return nil, fmt.Errorf("%w: host %q resolved to non-public IP %s", ErrSSRFBlocked, host, a.String())
 			}
-			validated = append(validated, a.Unmap())
+			if fakeIP && a.Is6() {
+				hasFakeIPv6 = true
+			}
+			validated = append(validated, a)
+		}
+		if len(validated) == 0 {
+			return nil, fmt.Errorf("%w: DNS returned only unspecified addresses", ErrSSRFBlocked)
+		}
+		if hasFakeIPv6 && len(validated) > 1 {
+			// Preserve the relative order within each group and try Fake-IPv6 last.
+			fakeIPv6 := transparentProxyFakeIPPrefixes[1]
+			slices.SortStableFunc(validated, func(a, b netip.Addr) int {
+				if fakeIPv6.Contains(a) == fakeIPv6.Contains(b) {
+					return 0
+				}
+				if fakeIPv6.Contains(a) {
+					return 1
+				}
+				return -1
+			})
 		}
 
 		var lastErr error

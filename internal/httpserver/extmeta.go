@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -50,10 +51,17 @@ func (s *Server) requireMetadata(next http.Handler) http.Handler {
 }
 
 func (s *Server) metadataError(w http.ResponseWriter, err error) {
+	var netErr net.Error
 	switch {
 	case errors.Is(err, sql.ErrNoRows), errors.Is(err, extmeta.ErrEntryNotFound):
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Metadata item not found.")
-	case errors.Is(err, extmeta.ErrInvalidConfig), errors.Is(err, extmeta.ErrSSRFBlocked):
+	case errors.Is(err, extmeta.ErrSSRFBlocked):
+		writeError(w, http.StatusBadRequest, "METADATA_SSRF_BLOCKED", extmeta.DescribeError(err))
+	case errors.Is(err, extmeta.ErrInvalidProxyURL):
+		writeError(w, http.StatusBadRequest, "INVALID_PROXY_URL", extmeta.DescribeError(err))
+	case errors.Is(err, extmeta.ErrInvalidManifest):
+		writeError(w, http.StatusBadRequest, "INVALID_METADATA_MANIFEST", extmeta.DescribeError(err))
+	case errors.Is(err, extmeta.ErrInvalidConfig):
 		writeError(w, http.StatusBadRequest, "INVALID_METADATA_CONFIG", "Invalid metadata configuration.")
 	case errors.Is(err, extmeta.ErrNoReadySources):
 		writeError(w, http.StatusBadRequest, "NO_READY_METADATA_SOURCES", err.Error())
@@ -61,12 +69,14 @@ func (s *Server) metadataError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "METADATA_BUSY", "A metadata task is already running.")
 	case errors.Is(err, extmeta.ErrUnavailable), errors.Is(err, extmeta.ErrCircuitOpen):
 		writeError(w, http.StatusServiceUnavailable, "METADATA_UNAVAILABLE", "Metadata source is unavailable.")
-	case errors.Is(err, extmeta.ErrRemoteMetadata), errors.Is(err, extmeta.ErrNegativeCached):
-		writeError(w, http.StatusBadGateway, "METADATA_UPSTREAM_FAILED", "Could not fetch upstream metadata.")
 	case errors.Is(err, context.Canceled):
 		writeError(w, 499, "REQUEST_CANCELED", "Request canceled.")
-	case errors.Is(err, context.DeadlineExceeded):
-		writeError(w, http.StatusGatewayTimeout, "REQUEST_TIMEOUT", "Request timed out.")
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &netErr) && netErr.Timeout():
+		writeError(w, http.StatusGatewayTimeout, "REQUEST_TIMEOUT", extmeta.DescribeError(err))
+	case errors.Is(err, extmeta.ErrRemoteMetadata):
+		writeError(w, http.StatusBadGateway, "METADATA_UPSTREAM_FAILED", extmeta.DescribeError(err))
+	case errors.Is(err, extmeta.ErrNegativeCached):
+		writeError(w, http.StatusBadGateway, "METADATA_UPSTREAM_FAILED", "Could not fetch upstream metadata.")
 	default:
 		writeError(w, http.StatusInternalServerError, "METADATA_FAILED", "Metadata operation failed.")
 	}

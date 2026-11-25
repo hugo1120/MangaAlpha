@@ -5,8 +5,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,6 +22,87 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/extmeta"
 )
+
+func TestMetadataSubscribeErrorResponses(t *testing.T) {
+	srv, store, bgm, _ := setupV27TestServer(t, "")
+	ctx := t.Context()
+	if _, err := store.ClaimAdmin(ctx, "fixture-owner", "FixturePassword123!"); err != nil {
+		t.Fatal(err)
+	}
+	key, _, err := store.CreateAPIKey(ctx, "fixture admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	safeClient := extmeta.NewSafeHTTPClient("", time.Second)
+	t.Cleanup(safeClient.CloseIdleConnections)
+	client := &http.Client{Transport: bangumiTestTransport(func(r *http.Request) (*http.Response, error) {
+		w := httptest.NewRecorder()
+		switch r.URL.Path {
+		case "/blocked":
+			return safeClient.Transport.RoundTrip(r)
+		case "/invalid-proxy":
+			return nil, extmeta.ErrInvalidProxyURL
+		case "/invalid-manifest":
+			_, _ = io.WriteString(w, `{"schema":"fixture-secret"}`)
+		case "/timeout":
+			return nil, &net.DNSError{Err: "fixture-secret", IsTimeout: true}
+		case "/deadline":
+			return nil, fmt.Errorf("upstream: %w", context.DeadlineExceeded)
+		case "/dns":
+			return nil, &net.DNSError{Err: "fixture-secret", Name: r.URL.Hostname()}
+		case "/tls":
+			return nil, fmt.Errorf("tls: fixture-secret")
+		case "/reset":
+			return nil, fmt.Errorf("connection reset by peer: fixture-secret")
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+		return w.Result(), nil
+	})}
+	manager, err := extmeta.NewManager(store, bgm, nil, srv.runtime.DataDir, nil, extmeta.ManagerOptions{HTTPClient: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(manager.Close)
+	srv.WithMetadata(manager)
+	handler := srv.Handler()
+	for _, tc := range []struct {
+		path, code, message string
+		status              int
+	}{
+		{"/blocked", "METADATA_SSRF_BLOCKED", "配置显式代理", http.StatusBadRequest},
+		{"/invalid-proxy", "INVALID_PROXY_URL", "代理 URL 无效", http.StatusBadRequest},
+		{"/invalid-manifest", "INVALID_METADATA_MANIFEST", "repo.json", http.StatusBadRequest},
+		{"/missing", "METADATA_UPSTREAM_FAILED", "HTTP 404", http.StatusBadGateway},
+		{"/timeout", "REQUEST_TIMEOUT", "超时", http.StatusGatewayTimeout},
+		{"/deadline", "REQUEST_TIMEOUT", "超时", http.StatusGatewayTimeout},
+		{"/dns", "METADATA_UPSTREAM_FAILED", "DNS", http.StatusBadGateway},
+		{"/tls", "METADATA_UPSTREAM_FAILED", "TLS", http.StatusBadGateway},
+		{"/reset", "METADATA_UPSTREAM_FAILED", "连接中断", http.StatusBadGateway},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			host := "repo.example.test"
+			if tc.path == "/blocked" {
+				host = "198.18.0.42"
+			}
+			payload := fmt.Sprintf(`{"url":"http://%s%s?secret=fixture-secret"}`, host, tc.path)
+			r := httptest.NewRequest(http.MethodPost, "/admin/api/metadata/repos", strings.NewReader(payload))
+			r.Header.Set("X-API-Key", key)
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			body := decodeMetadataFixture[struct {
+				Code    string `json:"error"`
+				Message string `json:"message"`
+			}](t, w)
+			if w.Code != tc.status || body.Code != tc.code || !strings.Contains(body.Message, tc.message) {
+				t.Errorf("HTTP %d, body %s; want HTTP %d with %s and %q", w.Code, w.Body, tc.status, tc.code, tc.message)
+			}
+			if strings.Contains(body.Message, host) || strings.Contains(body.Message, "fixture-secret") {
+				t.Errorf("response leaked upstream information: %q", body.Message)
+			}
+		})
+	}
+}
 
 func TestMetadataScrapeRejectsEmptyMappingSource(t *testing.T) {
 	srv, store, bgm, _ := setupV27TestServer(t, "")

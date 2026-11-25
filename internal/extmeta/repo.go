@@ -30,9 +30,22 @@ const (
 )
 
 var (
+	// ErrInvalidManifest identifies invalid repository manifest content.
+	ErrInvalidManifest = errors.New("invalid metadata repository manifest")
+
 	validSourceIDRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 	repoUserAgent   = "MangaAlpha/3.2"
 )
+
+// HTTPStatusError reports an unexpected upstream HTTP status for a metadata operation.
+type HTTPStatusError struct {
+	StatusCode int
+	Op         string
+}
+
+func (e *HTTPStatusError) Error() string {
+	return fmt.Sprintf("%s returned HTTP %d", e.Op, e.StatusCode)
+}
 
 // RepoManifest describes a Mihon-style declarative external metadata repository.
 type RepoManifest struct {
@@ -92,6 +105,14 @@ type RepoSource struct {
 
 // ParseRepoManifest parses and validates a mangaalpha-repo-v1 JSON payload.
 func ParseRepoManifest(data []byte) (*RepoManifest, error) {
+	manifest, err := parseRepoManifest(data)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidManifest, err)
+	}
+	return manifest, nil
+}
+
+func parseRepoManifest(data []byte) (*RepoManifest, error) {
 	if len(data) == 0 {
 		return nil, errors.New("empty repo manifest")
 	}
@@ -196,15 +217,12 @@ func FetchRepoManifest(ctx context.Context, client *http.Client, rawURL string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("fetch repo manifest returned HTTP %d", resp.StatusCode)
+		return nil, &HTTPStatusError{StatusCode: resp.StatusCode, Op: "fetch repo manifest"}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, MaxRepoManifestBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read repo manifest: %w", err)
-	}
-	if len(body) > MaxRepoManifestBytes {
-		return nil, fmt.Errorf("repo manifest exceeds %d bytes limit", MaxRepoManifestBytes)
 	}
 	return ParseRepoManifest(body)
 }

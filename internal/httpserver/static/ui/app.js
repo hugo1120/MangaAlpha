@@ -70,6 +70,11 @@
     adminTab: 'overview',
     bgmProxyProbeHTML: '',
     updateStatus: null,
+    extSourceNames: {},
+    extMetaGuideOpen: false,
+    extMetaRepoDraft: null,
+    extMetaBatchDraft: null,
+    extMetaExportDraft: null,
   };
 
   function isAdminUser() {
@@ -1430,6 +1435,10 @@
     const startTarget = pickStartBook(books);
     const coverSrc = rawMeta.coverSource || 'auto';
     const bgmID = rawMeta.bgmSubjectId || 0;
+    const extSourceID = rawMeta.extSourceId || '';
+    const extEntryID = rawMeta.extEntryId || '';
+    const hasExtBind = Boolean(extSourceID && extEntryID);
+    const extSourceName = detail.extSourceName || rawMeta.extSourceName || (state.extSourceNames && state.extSourceNames[extSourceID]) || extSourceID;
     const bgmScore = typeof rawMeta.bgmScore === 'number' && rawMeta.bgmScore > 0 ? rawMeta.bgmScore.toFixed(1) : '';
     const authors = (rawMeta.authors || []);
     const genres = (meta.genres || []);
@@ -1470,7 +1479,13 @@
             ${meta.publisher ? `<a href="/libraries?publisher=${encodeURIComponent(meta.publisher)}" data-nav class="badge">${esc(meta.publisher)}</a>` : ''}
             ${bgmID > 0
               ? `<a href="https://bgm.tv/subject/${bgmID}" target="_blank" rel="noopener noreferrer" class="badge badge-bgm" title="若打开提示“数据库中没有查询您所指定的条目”，说明该条目在 Bangumi 网页端受登录保护，请先在浏览器登录 bgm.tv 账号后再访问">Bangumi #${bgmID}${bgmScore ? ` · ★ ${bgmScore}` : ''} ↗</a>`
-              : `<span class="badge">${rawMeta.scrapeStatus === 'unmatched' ? 'Bangumi 未命中' : '尚未匹配 Bangumi'}</span>`}
+              : ''}
+            ${hasExtBind
+              ? `<span class="badge badge-accent" title="已绑定扩展数据源 ${esc(extSourceName)} · 条目 #${esc(extEntryID)}${rawMeta.matchOrigin ? ` · 来源：${esc(rawMeta.matchOrigin)}` : ''}">扩展源：${esc(extSourceName)} #${esc(extEntryID)}</span>`
+              : ''}
+            ${bgmID <= 0 && !hasExtBind
+              ? `<span class="badge">${rawMeta.scrapeStatus === 'unmatched' ? '元数据未命中' : '尚未匹配元数据'}</span>`
+              : ''}
             ${bgmID > 0 ? renderSeriesTrackerBadge(detail.tracker) : ''}
           </div>
 
@@ -1490,7 +1505,8 @@
             ${startTarget ? `<a href="/reader/series/${encodeURIComponent(seriesID)}/book/${encodeURIComponent(startTarget.book.id)}?page=${startTarget.page}" class="btn btn-primary btn-lg btn-cta-read" title="${esc(startTarget.fullLabel)}"><span class="btn-part-fixed">▶\u00a0${esc(startTarget.prefix)}</span>${startTarget.middle ? `<span class="btn-part-ellipsis">${esc(startTarget.middle)}</span>` : ''}${startTarget.suffix ? `<span class="btn-part-fixed">${esc(startTarget.suffix)}</span>` : ''}</a>` : ''}
             ${admin ? `<button type="button" class="btn" id="series-generate-cover" data-maint="series_thumbnail" data-force="false"
               ${!books.length || maintJobs.some((j) => j.operation === 'series_thumbnail' && ['queued','running'].includes(j.status)) ? 'disabled' : ''}>生成首卷封面</button>
-            <button type="button" class="btn btn-bgm" id="btn-open-bgm">Bangumi 刮削 / 匹配</button>
+            <button type="button" class="btn btn-bgm" id="btn-open-bgm">元数据匹配 / 绑定</button>
+            ${hasExtBind ? `<button type="button" class="btn btn-sm btn-danger" id="btn-clear-ext-meta">解除扩展源绑定</button>` : ''}
             <button type="button" class="btn" id="btn-edit-meta">编辑元数据</button>` : ''}
             <button type="button" class="btn btn-sm" id="btn-series-collections">+ 收藏夹</button>
             <button type="button" class="btn btn-sm" id="btn-mark-series-read">全部标为已读</button>
@@ -1609,6 +1625,24 @@
 
     const btnOpenBgm = document.getElementById('btn-open-bgm');
     if (btnOpenBgm) btnOpenBgm.onclick = () => openBangumiMatchModal(seriesID, detail);
+    const btnClearExtMeta = document.getElementById('btn-clear-ext-meta');
+    if (btnClearExtMeta) {
+      btnClearExtMeta.onclick = async () => {
+        if (!(await confirmModal('确认解除当前作品的扩展数据源绑定？', { title: '解除扩展源绑定', confirmText: '确认解除' }))) return;
+        if (!btnClearExtMeta.isConnected) return;
+        btnClearExtMeta.disabled = true;
+        try {
+          await api(`/admin/api/series/${encodeURIComponent(seriesID)}/metadata/bind`, { method: 'DELETE' });
+          state.coverVer = Date.now();
+          state.taxonomies.loaded = false;
+          toast('已解除扩展源绑定');
+          renderSeriesDetail(seriesID);
+        } catch (err) {
+          if (btnClearExtMeta.isConnected) btnClearExtMeta.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    }
     const retryTrackerBtn = document.getElementById('btn-retry-bgm-tracker');
     if (retryTrackerBtn) {
       retryTrackerBtn.onclick = async () => {
@@ -1842,37 +1876,74 @@
 
   function openBangumiMatchModal(seriesID, detail) {
     const rawMeta = detail.rawMeta || {};
+    const hasExtBind = Boolean(rawMeta.extSourceId && rawMeta.extEntryId);
+    const defaultHint = '支持直接粘贴 Subject ID（如 24596）或 https://bgm.tv/subject/... 链接（部分受限条目需登录 bgm.tv 才能在网页端打开）。';
+    const extDefaultHint = '支持输入作品关键词、外部条目 ID 或规范链接（将查询本地离线索引并自动应用关联标签词典）。';
     openModal({
-      title: `Bangumi 元数据匹配 · ${detail.originalName}`,
+      title: `元数据匹配 / 绑定 · ${detail.originalName}`,
       subheadHTML: `
+        <div id="bgm-source-switcher-wrap" class="extmeta-source-switcher" style="display:none">
+          <label for="bgm-source-select" style="font-size:12.5px;font-weight:600;color:var(--text-secondary);flex-shrink:0">数据源：</label>
+          <select id="bgm-source-select">
+            <option value="bangumi" selected>Bangumi（内置在线 + 离线索引）</option>
+          </select>
+        </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px">
           <input type="text" id="bgm-search-q" value="${esc(detail.originalName)}" placeholder="输入漫画标题关键词、Bangumi 条目 ID 或 bgm.tv 链接" style="flex:1 1 200px;min-width:0;height:38px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
           <button type="button" class="btn btn-primary" id="bgm-search-btn">搜索候选</button>
           <button type="button" class="btn btn-bgm" id="bgm-auto-btn">自动清洗匹配</button>
           ${rawMeta.bgmSubjectId ? `<button type="button" class="btn btn-danger" id="bgm-clear-btn">解除绑定 (#${rawMeta.bgmSubjectId})</button>` : ''}
+          ${hasExtBind ? `<button type="button" class="btn btn-danger" id="extmeta-clear-btn">解除扩展源绑定</button>` : ''}
         </div>
-        <div id="bgm-parsed-hint" class="bgm-parsed-hint">支持直接粘贴 Subject ID（如 24596）或 https://bgm.tv/subject/... 链接（部分受限条目需登录 bgm.tv 才能在网页端打开）。</div>
+        <div id="bgm-parsed-hint" class="bgm-parsed-hint">${defaultHint}</div>
       `,
       bodyHTML: `
-        <div id="bgm-candidates-box"><div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div></div>
+        <div id="bgm-candidates-box"><div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索候选条目…</p></div></div>
       `,
       onMount: () => {
         const searchInput = document.getElementById('bgm-search-q');
         const box = document.getElementById('bgm-candidates-box');
         const hint = document.getElementById('bgm-parsed-hint');
-        const defaultHint = hint.textContent;
+        const sourceWrap = document.getElementById('bgm-source-switcher-wrap');
+        const sourceSelect = document.getElementById('bgm-source-select');
         const openRouteSeq = routeSeq;
         let searchID = 0;
         let mutating = false;
+        let activeSource = 'bangumi';
         const autoBtn = document.getElementById('bgm-auto-btn');
         const clearBtn = document.getElementById('bgm-clear-btn');
+        const clearExtBtn = document.getElementById('extmeta-clear-btn');
+        const searchBtn = document.getElementById('bgm-search-btn');
+
         const setMutating = (busy) => {
           mutating = busy;
           if (autoBtn) autoBtn.disabled = busy;
           if (clearBtn) clearBtn.disabled = busy;
-          box.querySelectorAll('button[data-bind-bgm]').forEach((b) => { b.disabled = busy; });
+          if (clearExtBtn) clearExtBtn.disabled = busy;
+          if (sourceSelect) sourceSelect.disabled = busy;
+          box.querySelectorAll('button[data-bind-bgm],button[data-bind-ext-entry]').forEach((b) => { b.disabled = busy; });
         };
-        const renderCandidates = (cands, noteHTML = '') => {
+
+        const populateExternalSources = (ov) => {
+          const allSources = (ov && Array.isArray(ov.sources)) ? ov.sources : [];
+          if (typeof state === 'object' && state) {
+            const nameMap = Object.assign({}, state.extSourceNames || {});
+            allSources.forEach((s) => { if (s && s.id && s.name) nameMap[s.id] = s.name; });
+            state.extSourceNames = nameMap;
+          }
+          const readyOffline = allSources.filter((s) => s && s.kind === 'offline_sqlite' && s.ready);
+          if (!sourceSelect || !sourceWrap || readyOffline.length === 0) return;
+          const prevVal = sourceSelect.value || 'bangumi';
+          sourceSelect.innerHTML = `<option value="bangumi">Bangumi（内置在线 + 离线索引）</option>` + readyOffline.map((s) => {
+            const note = [s.schemaType || '', s.enabled === false ? '未启用' : ''].filter(Boolean).join(' · ');
+            return `<option value="${esc(s.id)}">${esc(s.name)}${note ? ` (${esc(note)})` : ''}</option>`;
+          }).join('');
+          if (readyOffline.some((s) => s.id === prevVal)) sourceSelect.value = prevVal;
+          else sourceSelect.value = 'bangumi';
+          sourceWrap.style.display = '';
+        };
+
+        const renderBangumiCandidates = (cands, noteHTML = '') => {
           if (cands.length === 0) {
             box.innerHTML = noteHTML + `<div class="empty-box">未找到匹配的 Bangumi 书籍条目，请尝试缩短关键词或直接输入 Bangumi Subject ID。</div>`;
             return;
@@ -1932,64 +2003,163 @@
             };
           });
         };
+
+        const renderExternalCandidates = (sourceId, cands) => {
+          if (!cands || cands.length === 0) {
+            box.innerHTML = `<div class="empty-box">在该扩展数据源中未找到匹配条目，请尝试修改关键词或直接粘贴外部条目 ID / 规范链接。</div>`;
+            return;
+          }
+          box.innerHTML = cands.map((c) => {
+            const cSrcID = c.sourceId || sourceId;
+            const cEntryID = String(c.entryId || '');
+            const imgURL = `/admin/api/metadata/sources/${encodeURIComponent(cSrcID)}/entries/${encodeURIComponent(cEntryID)}/cover${c.coverUrl ? `?u=${encodeURIComponent(c.coverUrl)}` : ''}`;
+            const authorsList = Array.isArray(c.authors)
+              ? c.authors.map((a) => (typeof a === 'string' ? a : (a && a.name) || '')).filter(Boolean)
+              : [];
+            const tagsList = Array.isArray(c.tags) ? c.tags.filter(Boolean) : [];
+            const rawScore = Number(c.score || 0);
+            const scoreBadge = rawScore > 0
+              ? (rawScore <= 1 ? `匹配度 ${Math.round(rawScore * 100)}%` : `匹配度 ${rawScore.toFixed(2)}`)
+              : '';
+            return `
+              <div class="bgm-candidate">
+                <img loading="lazy" src="${esc(imgURL)}" alt="" onerror="this.style.visibility='hidden'">
+                <div style="flex:1;min-width:0">
+                  <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+                    <strong style="font-size:15px;overflow-wrap:anywhere">${esc(c.title || c.titleAlt || cEntryID)}</strong>
+                    <span class="badge badge-accent">#${esc(cEntryID)}</span>
+                    ${c.category ? `<span class="badge">${esc(c.category)}</span>` : ''}
+                    ${c.isNsfw ? `<span class="badge badge-danger">NSFW</span>` : ''}
+                    ${Number(c.rating || 0) > 0 ? `<span class="badge">★ ${Number(c.rating).toFixed(1)}</span>` : ''}
+                    ${scoreBadge ? `<span class="badge badge-success">${esc(scoreBadge)}</span>` : ''}
+                    ${c.matchReason ? `<span class="badge">${esc(c.matchReason)}</span>` : ''}
+                  </div>
+                  ${c.titleAlt && c.title && c.titleAlt !== c.title ? `<div style="font-size:12px;color:var(--text-muted);margin-top:2px;overflow-wrap:anywhere">原名：${esc(c.titleAlt)}</div>` : ''}
+                  ${authorsList.length > 0 ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:3px">作者：${esc(authorsList.join(' / '))}</div>` : ''}
+                  ${tagsList.length > 0 ? `
+                    <div class="extmeta-cand-tags">
+                      ${tagsList.slice(0, 14).map((t) => `<span class="extmeta-cand-tag" title="${esc(t)}">${esc(t)}</span>`).join('')}
+                      ${tagsList.length > 14 ? `<span class="extmeta-cand-tag">+${tagsList.length - 14}</span>` : ''}
+                    </div>` : ''}
+                  ${c.summary ? `<div style="font-size:12px;color:var(--text-muted);margin-top:5px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${esc(c.summary)}</div>` : ''}
+                </div>
+                <div class="bgm-candidate-actions">
+                  <button type="button" class="btn btn-primary btn-sm" data-bind-ext-src="${esc(cSrcID)}" data-bind-ext-entry="${esc(cEntryID)}">绑定此条目</button>
+                </div>
+              </div>`;
+          }).join('');
+
+          box.querySelectorAll('button[data-bind-ext-entry]').forEach((btn) => {
+            btn.disabled = mutating;
+            btn.onclick = async () => {
+              if (mutating) return;
+              const srcID = btn.getAttribute('data-bind-ext-src') || sourceId;
+              const entryID = btn.getAttribute('data-bind-ext-entry') || '';
+              if (!srcID || !entryID) return;
+              setMutating(true);
+              try {
+                await api(`/admin/api/series/${encodeURIComponent(seriesID)}/metadata/bind`, {
+                  method: 'POST',
+                  body: { sourceId: srcID, entryId: entryID, origin: 'manual' },
+                });
+                state.coverVer = Date.now();
+                state.taxonomies.loaded = false;
+                toast(`已绑定扩展条目 #${entryID}`);
+                if (box.isConnected && openRouteSeq === routeSeq) {
+                  closeModal();
+                  renderSeriesDetail(seriesID);
+                }
+              } catch (err) {
+                toast(err.message, 'error');
+                if (box.isConnected) setMutating(false);
+              }
+            };
+          });
+        };
+
         const doSearch = async (qVal) => {
           const id = ++searchID;
-          box.innerHTML = `<div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>正在搜索 Bangumi…</p></div>`;
+          const targetSource = activeSource;
+          box.innerHTML = `<div class="boot-splash" style="min-height:140px"><div class="spinner"></div><p>${targetSource === 'bangumi' ? '正在搜索 Bangumi…' : '正在检索扩展数据源…'}</p></div>`;
           try {
-            const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/candidates?q=${encodeURIComponent(qVal)}`);
+            if (targetSource === 'bangumi') {
+              const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/candidates?q=${encodeURIComponent(qVal)}`);
+              if (id !== searchID || !box.isConnected) return;
+              const parsed = res.parsed || {};
+              hint.textContent = parsed.candidates && parsed.candidates.length > 0
+                ? `清洗候选词：${parsed.candidates.join(' / ')}${parsed.authors && parsed.authors.length ? ` · 识别作者：${parsed.authors.join('、')}` : ''}${parsed.publisher ? ` · 版本/出版社：${parsed.publisher}` : ''}`
+                : defaultHint;
+              hint.title = hint.textContent;
+              renderBangumiCandidates(res.candidates || []);
+              return;
+            }
+            const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/metadata/candidates?sourceId=${encodeURIComponent(targetSource)}&q=${encodeURIComponent(qVal)}`);
             if (id !== searchID || !box.isConnected) return;
-            const parsed = res.parsed || {};
-            hint.textContent = parsed.candidates && parsed.candidates.length > 0
-              ? `清洗候选词：${parsed.candidates.join(' / ')}${parsed.authors && parsed.authors.length ? ` · 识别作者：${parsed.authors.join('、')}` : ''}${parsed.publisher ? ` · 版本/出版社：${parsed.publisher}` : ''}`
-              : defaultHint;
-            hint.title = hint.textContent;
-            renderCandidates(res.candidates || []);
+            hint.textContent = extDefaultHint;
+            hint.title = extDefaultHint;
+            renderExternalCandidates(res.sourceId || targetSource, res.candidates || []);
           } catch (err) {
             if (id !== searchID || !box.isConnected) return;
             box.innerHTML = `<div class="empty-box" style="color:var(--danger)">${esc(err.message)}</div>`;
           }
         };
 
-        document.getElementById('bgm-search-btn').onclick = () => doSearch(searchInput.value.trim());
+        if (sourceSelect) {
+          sourceSelect.onchange = () => {
+            activeSource = sourceSelect.value || 'bangumi';
+            const isBgm = activeSource === 'bangumi';
+            if (autoBtn) autoBtn.style.display = isBgm ? '' : 'none';
+            searchInput.placeholder = isBgm
+              ? '输入漫画标题关键词、Bangumi 条目 ID 或 bgm.tv 链接'
+              : '输入作品关键词、外部条目 ID 或规范链接';
+            hint.textContent = isBgm ? defaultHint : extDefaultHint;
+            hint.title = hint.textContent;
+            doSearch(isBgm ? '' : searchInput.value.trim());
+          };
+        }
+
+        if (searchBtn) searchBtn.onclick = () => doSearch(searchInput.value.trim());
         searchInput.addEventListener('keydown', (e) => {
           if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
           e.preventDefault();
           doSearch(searchInput.value.trim());
         });
-        autoBtn.onclick = async () => {
-          if (mutating) return;
-          const id = ++searchID;
-          setMutating(true);
-          try {
-            const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/auto`, { method: 'POST', body: {} });
-            if (res.matched) {
-              state.coverVer = Date.now();
-              state.taxonomies.loaded = false;
-              toast('自动匹配成功！');
-              if (box.isConnected && openRouteSeq === routeSeq) {
-                closeModal();
-                renderSeriesDetail(seriesID);
+        if (autoBtn) {
+          autoBtn.onclick = async () => {
+            if (mutating || activeSource !== 'bangumi') return;
+            const id = ++searchID;
+            setMutating(true);
+            try {
+              const res = await api(`/admin/api/series/${encodeURIComponent(seriesID)}/bangumi/auto`, { method: 'POST', body: {} });
+              if (res.matched) {
+                state.coverVer = Date.now();
+                state.taxonomies.loaded = false;
+                toast('自动匹配成功！');
+                if (box.isConnected && openRouteSeq === routeSeq) {
+                  closeModal();
+                  renderSeriesDetail(seriesID);
+                }
+                return;
               }
-              return;
+              if (id !== searchID || !box.isConnected) return;
+              const cands = res.candidates || [];
+              const threshold = Number(res.threshold || 0.72);
+              if (cands.length > 0) {
+                const best = Math.round(Number(cands[0].confidence || 0) * 100);
+                const note = `<div class="empty-box" style="margin-bottom:10px;color:var(--text-secondary)">自动匹配未通过：最高 ${best}% 低于阈值 ${Math.round(threshold * 100)}%。下面是评分最高的 ${cands.length} 个候选，展开“评分明细”可以看到每一项加减分。</div>`;
+                renderBangumiCandidates(cands, note);
+                toast('自动匹配置信度不足，已列出评分最高的候选', 'error');
+              } else {
+                box.innerHTML = `<div class="empty-box" style="color:var(--danger)">自动匹配没有找到任何候选：可能是标题清洗后为空，或 Bangumi 本地索引与在线搜索都没有命中。</div>`;
+                toast('自动匹配没有找到候选', 'error');
+              }
+            } catch (err) {
+              if (id === searchID) toast(err.message, 'error');
+            } finally {
+              if (box.isConnected) setMutating(false);
             }
-            if (id !== searchID || !box.isConnected) return;
-            const cands = res.candidates || [];
-            const threshold = Number(res.threshold || 0.72);
-            if (cands.length > 0) {
-              const best = Math.round(Number(cands[0].confidence || 0) * 100);
-              const note = `<div class="empty-box" style="margin-bottom:10px;color:var(--text-secondary)">自动匹配未通过：最高 ${best}% 低于阈值 ${Math.round(threshold * 100)}%。下面是评分最高的 ${cands.length} 个候选，展开“评分明细”可以看到每一项加减分。</div>`;
-              renderCandidates(cands, note);
-              toast('自动匹配置信度不足，已列出评分最高的候选', 'error');
-            } else {
-              box.innerHTML = `<div class="empty-box" style="color:var(--danger)">自动匹配没有找到任何候选：可能是标题清洗后为空，或 Bangumi 本地索引与在线搜索都没有命中。</div>`;
-              toast('自动匹配没有找到候选', 'error');
-            }
-          } catch (err) {
-            if (id === searchID) toast(err.message, 'error');
-          } finally {
-            if (box.isConnected) setMutating(false);
-          }
-        };
+          };
+        }
         if (clearBtn) {
           clearBtn.onclick = async () => {
             if (mutating) return;
@@ -2013,6 +2183,44 @@
             }
           };
         }
+        if (clearExtBtn) {
+          clearExtBtn.onclick = async () => {
+            if (mutating) return;
+            const confirmed = await confirmModal('确认解除当前作品的扩展数据源绑定？', {
+              title: '解除扩展源绑定',
+              confirmText: '确认解除',
+            });
+            if (!confirmed || mutating || !box.isConnected || openRouteSeq !== routeSeq) return;
+            setMutating(true);
+            try {
+              await api(`/admin/api/series/${encodeURIComponent(seriesID)}/metadata/bind`, { method: 'DELETE' });
+              state.coverVer = Date.now();
+              state.taxonomies.loaded = false;
+              toast('已解除扩展源绑定');
+              if (box.isConnected && openRouteSeq === routeSeq) {
+                closeModal();
+                renderSeriesDetail(seriesID);
+              }
+            } catch (err) {
+              toast(err.message, 'error');
+              if (box.isConnected) setMutating(false);
+            }
+          };
+        }
+
+        if (detail && detail.metadataOverview) {
+          populateExternalSources(detail.metadataOverview);
+        } else if (detail && Array.isArray(detail.metadataSources)) {
+          populateExternalSources({ sources: detail.metadataSources });
+        } else {
+          api('/admin/api/metadata/overview')
+            .then((ov) => {
+              if (!box.isConnected || openRouteSeq !== routeSeq) return;
+              populateExternalSources(ov);
+            })
+            .catch(() => {});
+        }
+
         doSearch('');
       },
     });
@@ -2290,7 +2498,7 @@
       navigate(pk ? `/account?presetKey=${encodeURIComponent(pk)}` : '/account', true);
       return;
     }
-    const tab = requestedTab;
+    const tab = requestedTab === 'metadata' ? 'bangumi' : requestedTab;
     state.adminTab = tab;
     document.title = '管理后台 · MangaAlpha';
 
@@ -2298,7 +2506,7 @@
       ['overview', '概览与连接'],
       ['sources', '存储源'],
       ['libraries', '书库管理'],
-      ['bangumi', 'Bangumi 刮削中心'],
+      ['bangumi', '元数据刮削'],
       ['jobs', '后台任务'],
       ['settings', '缓存与设置'],
       ['users', '用户管理'],
@@ -3580,22 +3788,565 @@
 
   // --- Admin Bangumi Scraper Center ---
 
+  const DEFAULT_RECOMMENDED_META_REPO_URL = 'https://raw.githubusercontent.com/BlackMuseCode/mangaalpha-metadata-repo/main/repo.json';
+
+  function extSafeHttpURL(raw) {
+    const val = String(raw || '').trim();
+    if (!/^https?:\/\/\S+$/i.test(val)) return '';
+    return val;
+  }
+
+  function extSourceKindMeta(kind) {
+    switch (kind) {
+      case 'offline_sqlite': return { label: '离线图库', cls: 'badge-accent' };
+      case 'tag_dictionary': return { label: '标签词典', cls: 'badge-success' };
+      case 'mapping_pack': return { label: '映射包', cls: 'badge-warn' };
+      case 'bangumi_archive': return { label: 'Bangumi 源', cls: 'badge-bgm' };
+      default: return { label: kind || '扩展源', cls: '' };
+    }
+  }
+
+  function extTagDisplayModeLabel(mode) {
+    switch ((mode || 'zh').toLowerCase()) {
+      case 'bilingual': return '中英双语';
+      case 'raw': return '原始标签';
+      default: return '仅中文';
+    }
+  }
+
+  function extAutoUpdateLabel(mode) {
+    switch ((mode || 'manual').toLowerCase()) {
+      case 'weekly': return '每周自动';
+      case 'monthly': return '每月自动';
+      default: return '手动更新';
+    }
+  }
+
+  function extNormalizeChain(raw) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    const out = [];
+    raw.forEach((item) => {
+      const id = typeof item === 'string' ? item.trim() : String((item && item.sourceId) || '').trim();
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    });
+    return out;
+  }
+
+  function extDeriveRepoPRURL(recommendedRepoUrl) {
+    const raw = String(recommendedRepoUrl || '').trim();
+    const m = raw.match(/^https?:\/\/raw\.githubusercontent\.com\/([^/]+)\/([^/]+)\//i);
+    if (m) return `https://github.com/${m[1]}/${m[2]}`;
+    return 'https://github.com/BlackMuseCode/mangaalpha-metadata-repo';
+  }
+
+  function extTriggerBlobDownload(filename, content) {
+    if (typeof Blob === 'undefined' || typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') {
+      return false;
+    }
+    const blob = content instanceof Blob ? content : new Blob([String(content || '')], { type: 'application/x-ndjson;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 1500);
+    return true;
+  }
+
+  function openExtMetaSourceModal(src, tagDictSources, onSaved) {
+    const dicts = (tagDictSources || []).slice();
+    if (src.tagDictSourceId && !dicts.some((d) => d.id === src.tagDictSourceId)) {
+      dicts.push({ id: src.tagDictSourceId, name: src.tagDictSourceId });
+    }
+    const kindInfo = extSourceKindMeta(src.kind);
+    openModal({
+      title: `配置数据源 · ${src.name}`,
+      maxWidth: '580px',
+      bodyHTML: `
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+          <span class="badge ${kindInfo.cls}">${esc(kindInfo.label)}</span>
+          ${src.schemaType ? `<span class="badge">${esc(src.schemaType)}</span>` : ''}
+          <span class="badge">${src.ready ? '已就绪' : '尚未就绪'}</span>
+        </div>
+        <div class="field">
+          <label class="check-row">
+            <input type="checkbox" id="ems-enabled" ${src.enabled ? 'checked' : ''}>
+            <span>启用此数据源</span>
+          </label>
+        </div>
+        <div class="field">
+          <label for="ems-download-url">离线包下载地址 (Download URL)</label>
+          <input type="url" id="ems-download-url" value="${esc(src.downloadUrl || '')}" placeholder="https://... (.sqlite / .zst / .gz / .zip / .ndjson.gz)">
+        </div>
+        <div class="field">
+          <label for="ems-local-path">服务器本地文件路径（可选，留空由同步下载管理）</label>
+          <input type="text" id="ems-local-path" value="${esc(src.localPath || '')}" placeholder="/data/metadata/custom.sqlite">
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="ems-tag-dict">关联标签词典</label>
+            <select id="ems-tag-dict">
+              <option value="">不使用翻译词典</option>
+              ${dicts.map((d) => `<option value="${esc(d.id)}" ${src.tagDictSourceId === d.id ? 'selected' : ''}>${esc(d.name)}${d.ready === false ? ' (未就绪)' : ''}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="ems-tag-mode">标签展示语言模式</label>
+            <select id="ems-tag-mode">
+              <option value="zh" ${(src.tagDisplayMode || 'zh') === 'zh' ? 'selected' : ''}>仅中文 (zh)</option>
+              <option value="bilingual" ${src.tagDisplayMode === 'bilingual' ? 'selected' : ''}>中英双语 (bilingual)</option>
+              <option value="raw" ${src.tagDisplayMode === 'raw' ? 'selected' : ''}>原始标签 (raw)</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="ems-auto-update">自动检查更新频率</label>
+          <select id="ems-auto-update">
+            <option value="manual" ${(src.autoUpdate || 'manual') === 'manual' ? 'selected' : ''}>手动更新 (manual)</option>
+            <option value="weekly" ${src.autoUpdate === 'weekly' ? 'selected' : ''}>每周自动更新 (weekly)</option>
+            <option value="monthly" ${src.autoUpdate === 'monthly' ? 'selected' : ''}>每月自动更新 (monthly)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="ems-online-url">在线 API 补全地址（可选，受防封限速与熔断器保护）</label>
+          <input type="url" id="ems-online-url" value="${esc(src.onlineApiUrl || '')}" placeholder="https://api.example.invalid/...">
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="check-row">
+            <input type="checkbox" id="ems-online-enabled" ${src.onlineEnabled ? 'checked' : ''}>
+            <span>允许在显式开启在线补全时使用该源的在线 API</span>
+          </label>
+        </div>
+      `,
+      footHTML: `<button type="button" class="btn btn-primary" id="ems-save-btn">保存配置</button>`,
+      onMount: () => {
+        document.getElementById('ems-save-btn').onclick = async () => {
+          const btn = document.getElementById('ems-save-btn');
+          btn.disabled = true;
+          try {
+            await api(`/admin/api/metadata/sources/${encodeURIComponent(src.id)}`, {
+              method: 'PUT',
+              body: {
+                enabled: Boolean(document.getElementById('ems-enabled').checked),
+                tagDictSourceId: document.getElementById('ems-tag-dict').value,
+                tagDisplayMode: document.getElementById('ems-tag-mode').value,
+                autoUpdate: document.getElementById('ems-auto-update').value,
+                localPath: document.getElementById('ems-local-path').value.trim(),
+                downloadUrl: document.getElementById('ems-download-url').value.trim(),
+                onlineApiUrl: document.getElementById('ems-online-url').value.trim(),
+                onlineEnabled: Boolean(document.getElementById('ems-online-enabled').checked),
+              },
+            });
+            toast('数据源配置已更新');
+            closeModal();
+            if (onSaved) onSaved();
+          } catch (err) {
+            btn.disabled = false;
+            toast(err.message, 'error');
+          }
+        };
+      },
+    });
+  }
+
+  function openExtMetaAddSourceModal(tagDictSources, onSaved) {
+    const dicts = (tagDictSources || []).slice();
+    openModal({
+      title: '手动添加自定义数据源',
+      maxWidth: '580px',
+      bodyHTML: `
+        <div class="grid-2">
+          <div class="field">
+            <label for="emas-name">数据源名称</label>
+            <input type="text" id="emas-name" placeholder="例如：本地社区离线图库">
+          </div>
+          <div class="field">
+            <label for="emas-kind">数据源类型 (kind)</label>
+            <select id="emas-kind">
+              <option value="offline_sqlite">离线图库 (offline_sqlite)</option>
+              <option value="tag_dictionary">标签词典 (tag_dictionary)</option>
+              <option value="mapping_pack">映射包 (mapping_pack)</option>
+              <option value="bangumi_archive">Bangumi 源 (bangumi_archive)</option>
+            </select>
+          </div>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="emas-schema">数据结构规范 (schemaType)</label>
+            <select id="emas-schema">
+              <option value="">自动探测（推荐）</option>
+              <option value="mangaalpha_meta_v1">mangaalpha_meta_v1（单表标准）</option>
+              <option value="gallery_v1">gallery_v1（四表图库兼容）</option>
+              <option value="tag_translation_text_v1">tag_translation_text_v1（标签词典）</option>
+              <option value="mangaalpha_mapping_v1">mangaalpha_mapping_v1（NDJSON 映射包）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="emas-auto-update">自动更新频率</label>
+            <select id="emas-auto-update">
+              <option value="manual" selected>手动更新 (manual)</option>
+              <option value="weekly">每周自动更新 (weekly)</option>
+              <option value="monthly">每月自动更新 (monthly)</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="emas-download-url">离线包下载链接（可选）</label>
+          <input type="url" id="emas-download-url" placeholder="https://... (.sqlite / .zst / .gz / .zip / .ndjson.gz)">
+        </div>
+        <div class="field">
+          <label for="emas-local-path">服务器本地文件路径（可选）</label>
+          <input type="text" id="emas-local-path" placeholder="/data/metadata/my-meta.sqlite">
+        </div>
+        <div class="field">
+          <label for="emas-online-url">在线 API 补全地址（可选）</label>
+          <input type="url" id="emas-online-url" placeholder="https://api.example.invalid/...">
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label for="emas-tag-dict">关联标签词典</label>
+            <select id="emas-tag-dict">
+              <option value="">不使用翻译词典</option>
+              ${dicts.map((d) => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="emas-tag-mode">标签展示模式</label>
+            <select id="emas-tag-mode">
+              <option value="zh" selected>仅中文 (zh)</option>
+              <option value="bilingual">中英双语 (bilingual)</option>
+              <option value="raw">原始标签 (raw)</option>
+            </select>
+          </div>
+        </div>
+        <div class="field" style="margin-bottom:0">
+          <label class="check-row">
+            <input type="checkbox" id="emas-enabled" checked>
+            <span>创建后立即启用</span>
+          </label>
+        </div>
+      `,
+      footHTML: `<button type="button" class="btn btn-primary" id="emas-create-btn">添加数据源</button>`,
+      onMount: () => {
+        document.getElementById('emas-create-btn').onclick = async () => {
+          const name = document.getElementById('emas-name').value.trim();
+          if (!name) {
+            toast('请输入数据源名称', 'error');
+            return;
+          }
+          const btn = document.getElementById('emas-create-btn');
+          btn.disabled = true;
+          try {
+            await api('/admin/api/metadata/sources', {
+              method: 'POST',
+              body: {
+                name,
+                kind: document.getElementById('emas-kind').value,
+                schemaType: document.getElementById('emas-schema').value,
+                downloadUrl: document.getElementById('emas-download-url').value.trim(),
+                localPath: document.getElementById('emas-local-path').value.trim(),
+                onlineApiUrl: document.getElementById('emas-online-url').value.trim(),
+                tagDictSourceId: document.getElementById('emas-tag-dict').value,
+                tagDisplayMode: document.getElementById('emas-tag-mode').value,
+                autoUpdate: document.getElementById('emas-auto-update').value,
+                enabled: Boolean(document.getElementById('emas-enabled').checked),
+              },
+            });
+            toast('自定义数据源已添加');
+            closeModal();
+            if (onSaved) onSaved();
+          } catch (err) {
+            btn.disabled = false;
+            toast(err.message, 'error');
+          }
+        };
+      },
+    });
+  }
+
+  function openLibraryChainModal(lib, chainCandidates, currentChainIDs, onSaved) {
+    const candidateMap = new Map((chainCandidates || []).map((s) => [s.id, s]));
+    let selected = extNormalizeChain(currentChainIDs);
+    const itemsList = (chainCandidates || []).slice();
+    selected.forEach((id) => {
+      if (!candidateMap.has(id)) {
+        const placeholder = { id, name: id === 'bangumi' ? '内置 Bangumi 源' : id, kind: id === 'bangumi' ? 'bangumi_archive' : 'offline_sqlite', ready: true, enabled: true };
+        candidateMap.set(id, placeholder);
+        itemsList.push(placeholder);
+      }
+    });
+
+    openModal({
+      title: `调整书库多源顺延链 · ${lib.name}`,
+      maxWidth: '580px',
+      bodyHTML: `
+        <p style="margin:0 0 10px;font-size:12.5px;color:var(--text-secondary);line-height:1.6">
+          勾选参与该书库刮削的离线元数据/Bangumi 源，并通过上下按钮调整优先级（<strong>#1 → #2 → ...</strong>）。
+          <br>离线源全部未命中时自动由已启用的社区映射包兜底；若全部取消勾选则恢复默认使用内置 Bangumi 源。
+        </p>
+        ${itemsList.length === 0
+          ? `<div class="empty-box">暂无可用的离线源或 Bangumi 源，请先在上方市场订阅或手动添加。</div>`
+          : `<div id="mchain-picker" class="union-layer-list"></div>`}
+      `,
+      footHTML: `<button type="button" class="btn btn-primary" id="mchain-save">保存顺延链</button>`,
+      onMount: () => {
+        const picker = document.getElementById('mchain-picker');
+        const paint = () => {
+          if (!picker) return;
+          const ordered = [
+            ...selected.filter((id) => candidateMap.has(id)).map((id) => ({ src: candidateMap.get(id), checked: true })),
+            ...itemsList.filter((s) => !selected.includes(s.id)).map((s) => ({ src: s, checked: false })),
+          ];
+          picker.innerHTML = ordered.map(({ src, checked }) => {
+            const idx = selected.indexOf(src.id);
+            const km = extSourceKindMeta(src.kind);
+            return `
+              <div class="union-layer-item">
+                <label class="check-row" style="margin:0;flex:1;min-width:0">
+                  <input type="checkbox" data-mchain-id="${esc(src.id)}" ${checked ? 'checked' : ''}>
+                  <span style="min-width:0;overflow-wrap:anywhere">${checked ? `<strong>#${idx + 1}</strong> ` : ''}${esc(src.name)}</span>
+                  <span class="badge ${km.cls}">${esc(km.label)}</span>
+                  ${src.ready === false ? `<span class="badge badge-warn">未就绪</span>` : ''}
+                </label>
+                ${checked ? `
+                  <div style="display:flex;gap:4px">
+                    <button type="button" class="btn btn-sm" data-mchain-move="${esc(src.id)}" data-dir="-1" ${idx === 0 ? 'disabled' : ''}>↑</button>
+                    <button type="button" class="btn btn-sm" data-mchain-move="${esc(src.id)}" data-dir="1" ${idx === selected.length - 1 ? 'disabled' : ''}>↓</button>
+                  </div>` : ''}
+              </div>`;
+          }).join('');
+
+          picker.querySelectorAll('input[data-mchain-id]').forEach((cb) => {
+            cb.onchange = () => {
+              const id = cb.getAttribute('data-mchain-id');
+              if (cb.checked) {
+                if (!selected.includes(id)) selected.push(id);
+              } else {
+                selected = selected.filter((x) => x !== id);
+              }
+              paint();
+            };
+          });
+          picker.querySelectorAll('button[data-mchain-move]').forEach((btn) => {
+            btn.onclick = () => {
+              const id = btn.getAttribute('data-mchain-move');
+              const dir = Number(btn.getAttribute('data-dir'));
+              const idx = selected.indexOf(id);
+              const swap = idx + dir;
+              if (idx < 0 || swap < 0 || swap >= selected.length) return;
+              [selected[idx], selected[swap]] = [selected[swap], selected[idx]];
+              paint();
+            };
+          });
+        };
+        paint();
+
+        document.getElementById('mchain-save').onclick = async () => {
+          const btn = document.getElementById('mchain-save');
+          btn.disabled = true;
+          try {
+            await api(`/admin/api/libraries/${encodeURIComponent(lib.id)}/metadata-sources`, {
+              method: 'PUT',
+              body: { sourceIds: selected.slice() },
+            });
+            toast(`已保存「${lib.name}」的元数据顺延链`);
+            closeModal();
+            if (onSaved) onSaved();
+          } catch (err) {
+            btn.disabled = false;
+            toast(err.message, 'error');
+          }
+        };
+      },
+    });
+  }
+
+  function openMappingExportPreviewModal(exportPayload, previewRes, repoPRUrl) {
+    const res = previewRes || {};
+    const count = Number(res.count || 0);
+    const excludedNsfw = Number(res.excludedNsfw || 0);
+    const skippedPrivacy = Number(res.skippedPrivacy || 0);
+    const ndjsonText = typeof res.ndjson === 'string' ? res.ndjson : '';
+    let sampleRows = Array.isArray(res.sample) ? res.sample.slice(0, 30) : [];
+    if (sampleRows.length === 0 && ndjsonText) {
+      sampleRows = ndjsonText.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 30);
+    }
+    const parsedSample = sampleRows.map((item) => {
+      if (item && typeof item === 'object') return item;
+      try { return JSON.parse(String(item)); } catch (_) { return { key: String(item) }; }
+    });
+    const rawPreviewLines = ndjsonText
+      ? ndjsonText.split('\n').filter((l) => l.trim()).slice(0, 30).join('\n')
+      : parsedSample.map((r) => JSON.stringify(r)).join('\n');
+
+    openModal({
+      title: '脱敏映射包导出预览（mangaalpha_mapping_v1）',
+      maxWidth: '820px',
+      bodyHTML: `
+        <div class="extmeta-export-preview-meta">
+          <span class="badge badge-success">可导出脱敏条数：${count.toLocaleString()}</span>
+          <span class="badge">已排除 NSFW：${excludedNsfw.toLocaleString()}</span>
+          <span class="badge ${skippedPrivacy > 0 ? 'badge-warn' : ''}">隐私规则拦截：${skippedPrivacy.toLocaleString()}</span>
+        </div>
+        <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-secondary);line-height:1.6">
+          导出引擎已自动剔除本地磁盘路径、私有 IP、凭据与 URL；请抽检下方前 ${parsedSample.length} 条样本，确认不包含私人目录名或敏感信息后再下载提交 PR。
+        </p>
+        ${parsedSample.length === 0
+          ? `<div class="empty-box">暂无符合筛选条件的可导出脱敏映射记录。</div>`
+          : `
+            <div class="table-wrap" style="margin-bottom:12px">
+              <table class="data-table">
+                <thead><tr><th>主键 (key)</th><th>原始键 (rawKey)</th><th>作者</th><th>目标源</th><th>目标 ID</th><th>来源</th><th>分级</th></tr></thead>
+                <tbody>
+                  ${parsedSample.map((r) => `
+                    <tr>
+                      <td class="cell-wrap">${esc(r.key || '')}</td>
+                      <td class="cell-wrap">${esc(r.rawKey || '—')}</td>
+                      <td>${esc(r.author || '—')}</td>
+                      <td><span class="badge">${esc(r.targetSource || '')}</span></td>
+                      <td><code>${esc(r.targetId || '')}</code></td>
+                      <td><span class="badge">${esc(r.origin || '—')}</span></td>
+                      <td>${r.isNsfw ? `<span class="badge badge-danger">NSFW</span>` : `<span class="badge">常规</span>`}</td>
+                    </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+            <details>
+              <summary style="cursor:pointer;font-size:12.5px;color:var(--text-secondary);margin-bottom:6px">查看原始 NDJSON 文本（前 30 行）</summary>
+              <pre class="extmeta-ndjson-preview">${esc(rawPreviewLines)}</pre>
+            </details>
+          `}
+        <div style="margin-top:12px;font-size:12px;color:var(--text-muted)">
+          共享方式：下载 <code>.ndjson</code> 后，前往社区元数据仓库提交 Pull Request（详见 <code>docs/METADATA_SOURCES.md</code>）。
+        </div>
+      `,
+      footHTML: `
+        <a href="${esc(extSafeHttpURL(repoPRUrl) || 'https://github.com/BlackMuseCode/mangaalpha-metadata-repo')}" target="_blank" rel="noopener noreferrer" class="btn">前往社区仓库提 PR ↗</a>
+        <button type="button" class="btn btn-primary" id="extmeta-export-download-btn" ${count <= 0 && !ndjsonText ? 'disabled' : ''}>下载 .ndjson</button>
+      `,
+      onMount: () => {
+        const dlBtn = document.getElementById('extmeta-export-download-btn');
+        if (!dlBtn) return;
+        dlBtn.onclick = async () => {
+          dlBtn.disabled = true;
+          try {
+            if (ndjsonText) {
+              if (!extTriggerBlobDownload('mangaalpha-mappings.ndjson', ndjsonText)) {
+                throw new Error('当前环境不支持浏览器 Blob 下载');
+              }
+              toast(`已导出 ${count} 条脱敏映射 (.ndjson)`);
+              return;
+            }
+            const uid = (typeof state === 'object' && state && state.auth && state.auth.userId) || '';
+            const headers = { 'Content-Type': 'application/json', 'X-FK115-UI': '1' };
+            if (uid) headers['X-FK115-User-Id'] = uid;
+            const resp = await fetch('/admin/api/metadata/mappings/export', {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers,
+              body: JSON.stringify(Object.assign({}, exportPayload, { preview: false })),
+            });
+            if (!resp.ok) throw new Error(`导出下载失败 (${resp.status})`);
+            const blob = await resp.blob();
+            if (!extTriggerBlobDownload('mangaalpha-mappings.ndjson', blob)) {
+              throw new Error('当前环境不支持浏览器 Blob 下载');
+            }
+            toast('脱敏映射包已开始下载');
+          } catch (err) {
+            toast(err.message, 'error');
+          } finally {
+            if (dlBtn.isConnected) dlBtn.disabled = false;
+          }
+        };
+      },
+    });
+  }
+
   async function renderAdminBangumi(body) {
-    const [st, runs, libs, tracker] = await Promise.all([
+    const [st, runs, libs, tracker, extOverview, extScrapeRuns] = await Promise.all([
       api('/admin/api/bangumi/status'),
       api('/admin/api/bangumi/runs?limit=20'),
       api('/admin/api/libraries'),
       api('/admin/api/bangumi/tracker?limit=0').catch(() => ({})),
+      api('/admin/api/metadata/overview').catch(() => ({})),
+      api('/admin/api/metadata/scrape-runs').catch(() => []),
     ]);
-    paintAdminBangumi(body, st, runs || [], libs || [], tracker || {});
+    paintAdminBangumi(body, st, runs || [], libs || [], tracker || {}, extOverview || {}, extScrapeRuns || []);
   }
 
-  function paintAdminBangumi(body, st, runs, libs, tracker) {
+  function paintAdminBangumi(body, st, runs, libs, tracker, extOverview = {}, extScrapeRuns = []) {
     const arch = st.archive || {};
     const archSrc = st.archiveSource || { source: 'zh_cn', customUrl: '', metaUrl: '' };
     const defaultDowForSrc = archSrc.source === 'official' ? 3 : 4;
     const sched = st.archiveSchedule || { enabled: false, frequency: 'weekly', dayOfWeek: defaultDowForSrc, dayOfMonth: 1, timeOfDay: '06:00' };
     const tr = tracker || {};
+    const ov = extOverview || {};
+    const recommendedRepoUrl = ov.recommendedRepoUrl || DEFAULT_RECOMMENDED_META_REPO_URL;
+    const repos = Array.isArray(ov.repos) ? ov.repos : [];
+    const extSources = Array.isArray(ov.sources) ? ov.sources : [];
+    const libraryChains = (ov.libraryChains && typeof ov.libraryChains === 'object') ? ov.libraryChains : {};
+    const activeSyncs = Array.isArray(ov.activeSyncs) ? ov.activeSyncs : [];
+    const onlineEnrich = ov.onlineEnrichStatus || null;
+    const scrapeRuns = Array.isArray(extScrapeRuns) ? extScrapeRuns : ((extScrapeRuns && Array.isArray(extScrapeRuns.runs)) ? extScrapeRuns.runs : []);
+
+    if (typeof state === 'object' && state) {
+      const nameMap = Object.assign({}, state.extSourceNames || {});
+      extSources.forEach((s) => { if (s && s.id && s.name) nameMap[s.id] = s.name; });
+      state.extSourceNames = nameMap;
+    }
+
+    const activeSyncBySource = new Map();
+    activeSyncs.forEach((job) => {
+      if (job && job.sourceId && (job.status === 'running' || job.status === 'queued')) {
+        activeSyncBySource.set(job.sourceId, job);
+      }
+    });
+    const sourceByID = new Map(extSources.map((s) => [s.id, s]));
+    const tagDictSources = extSources.filter((s) => s.kind === 'tag_dictionary');
+    const chainCandidates = extSources.filter((s) => s.kind === 'offline_sqlite' || s.kind === 'bangumi_archive');
+    const physicalLibs = (libs || []).filter((l) => l.providerType !== 'union');
+    const selectableLibs = (libs || []).filter((l) => l.enabled !== false && !l.unionParentId);
+
+    const prevRepoEl = document.getElementById('extmeta-repo-url');
+    const editingRepo = prevRepoEl && document.activeElement === prevRepoEl;
+    const repoDraftVal = prevRepoEl ? prevRepoEl.value : ((typeof state === 'object' && state && typeof state.extMetaRepoDraft === 'string') ? state.extMetaRepoDraft : '');
+    const repoSelStart = editingRepo ? prevRepoEl.selectionStart : null;
+    const repoSelEnd = editingRepo ? prevRepoEl.selectionEnd : null;
+
+    const prevBatchLib = document.getElementById('extmeta-batch-lib');
+    const prevBatchMode = document.getElementById('extmeta-batch-mode');
+    const prevBatchOnline = document.getElementById('extmeta-batch-online');
+    const batchDraft = {
+      libraryId: prevBatchLib ? prevBatchLib.value : ((state && state.extMetaBatchDraft && state.extMetaBatchDraft.libraryId) || ''),
+      mode: prevBatchMode ? prevBatchMode.value : ((state && state.extMetaBatchDraft && state.extMetaBatchDraft.mode) || 'incremental'),
+      allowOnline: prevBatchOnline ? Boolean(prevBatchOnline.checked) : Boolean(state && state.extMetaBatchDraft && state.extMetaBatchDraft.allowOnline),
+    };
+
+    const prevGuideEl = document.getElementById('extmeta-guide-details');
+    const guideOpen = prevGuideEl ? Boolean(prevGuideEl.open) : Boolean(state && state.extMetaGuideOpen);
+
+    const prevExportAllLibsEl = document.getElementById('extmeta-export-all-libs');
+    const prevExportIncludeNsfwEl = document.getElementById('extmeta-export-include-nsfw');
+    const prevExportOriginsEls = Array.from(document.querySelectorAll('input[data-extmeta-export-origin]'));
+    const prevExportLibEls = Array.from(document.querySelectorAll('input[data-extmeta-export-lib]'));
+    const exportDraft = {
+      allLibs: prevExportAllLibsEl ? Boolean(prevExportAllLibsEl.checked) : (state && state.extMetaExportDraft ? Boolean(state.extMetaExportDraft.allLibs) : true),
+      libraryIds: prevExportLibEls.length > 0
+        ? prevExportLibEls.filter((c) => c.checked).map((c) => c.value)
+        : ((state && state.extMetaExportDraft && Array.isArray(state.extMetaExportDraft.libraryIds)) ? state.extMetaExportDraft.libraryIds : []),
+      origins: prevExportOriginsEls.length > 0
+        ? prevExportOriginsEls.filter((c) => c.checked).map((c) => c.value)
+        : ((state && state.extMetaExportDraft && Array.isArray(state.extMetaExportDraft.origins)) ? state.extMetaExportDraft.origins : ['manual', 'agent']),
+      includeNsfw: prevExportIncludeNsfwEl ? Boolean(prevExportIncludeNsfwEl.checked) : Boolean(state && state.extMetaExportDraft && state.extMetaExportDraft.includeNsfw),
+    };
+
     const dlPct = arch.totalBytes > 0 ? Math.min(100, Math.round((arch.downloadedBytes / arch.totalBytes) * 100)) : 0;
     const prevInput = document.getElementById('bgm-proxy-url');
     const editingProxy = prevInput && document.activeElement === prevInput;
@@ -3656,12 +4407,30 @@
         <div class="stat-box"><div class="k">自动未命中</div><div class="v" style="color:var(--warn)">${Number(st.unmatchedCount || 0).toLocaleString()}</div></div>
       </div>
 
+      <details class="card extmeta-guide-card" id="extmeta-guide-details" ${guideOpen ? 'open' : ''}>
+        <summary class="extmeta-guide-summary">
+          <span class="extmeta-guide-title">
+            <span class="extmeta-guide-caret">▶</span>
+            <span>新手引导：多源元数据刮削、市场订阅与顺延链配置说明</span>
+          </span>
+          <span class="badge">快速上手</span>
+        </summary>
+        <div class="extmeta-guide-body">
+          <ol class="extmeta-guide-list">
+            <li><strong>内置 Bangumi 源</strong>：在下方「引擎一：Bangumi 离线索引库」拉取中文简介增强镜像或官方原版快照，即可毫秒级完成常规漫画刮削，并支持 <code>api.bgm.tv</code> 实时搜索与 AI Agent 协助。</li>
+            <li><strong>订阅元数据市场 (<code>repo.json</code>)</strong>：在「元数据市场与源管理」输入仓库地址（或点击「填入社区推荐仓库地址」预填，确认后点「订阅仓库」），按需启用并下载扩展离线 SQLite 图库、标签中文翻译词典或社区脱敏映射包。</li>
+            <li><strong>配置书库顺延优先级链</strong>：在「书库多源顺延优先级链」为每个物理书库勾选并排序 <code>#1 → #2 → ...</code>；未配置时默认使用内置 Bangumi，所有离线源均未命中时自动由已启用的社区映射包兜底。</li>
+            <li><strong>纯离线默认 + 低速在线补全防封</strong>：多源批量刮削默认仅读取本地离线 SQLite 与映射包（零外部限流风险）；仅当显式开启「允许低速在线补全」时，才对未命中条目启用单线程限速补全与自动熔断冷却。</li>
+          </ol>
+        </div>
+      </details>
+
       <div class="card">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px">
           <div>
             <h3 style="margin:0 0 4px">NSFW 作品前台显示开关</h3>
             <div style="font-size:12.5px;color:var(--text-secondary)">
-              系统正常匹配 Bangumi <code>nsfw: true</code> 条目及含成人目录特征的作品（非 <code>nsfw: true</code> 的普通受限标签作品不受影响）。默认关闭以在前台书架与 Komga 客户端中自动隐藏 NSFW 作品（当前未隐藏书库中共识别 <strong>${Number(st.nsfwCount || 0).toLocaleString()}</strong> 部 NSFW 作品）。
+              系统正常匹配 Bangumi <code>nsfw: true</code> 条目、扩展源 NSFW 条目及含成人目录特征的作品（非 <code>nsfw: true</code> 的普通受限标签作品不受影响）。默认关闭以在前台书架与 Komga 客户端中自动隐藏 NSFW 作品（当前未隐藏书库中共识别 <strong>${Number(st.nsfwCount || 0).toLocaleString()}</strong> 部 NSFW 作品）。
             </div>
           </div>
           <label class="check-row" style="font-weight:600;color:var(--text)">
@@ -3673,11 +4442,11 @@
 
       <div class="card">
         <div class="section-head" style="margin-bottom:8px">
-          <h3>Bangumi 专用网络代理设置</h3>
+          <h3>网络代理设置（Bangumi 与扩展元数据通用）</h3>
           <span class="badge ${st.proxyUrl ? 'badge-success' : ''}">${st.proxyUrl ? '已启用代理' : '当前为直连'}</span>
         </div>
         <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 12px">
-          统一加速 GitHub 离线快照下载（中文简介增强版 / <code>bangumi/Archive</code>）、软件版本更新检测与下载、<code>api.bgm.tv</code> 检索与 <code>lain.bgm.tv</code> 封面抓取。<strong>仅作用于 Bangumi 与 GitHub 相关请求，绝不影响 115 网盘与 WebDAV 流量。</strong>
+          统一加速 GitHub 离线快照与元数据市场下载（中文简介增强版 / <code>bangumi/Archive</code> / 扩展源仓库）、软件版本更新检测与下载、<code>api.bgm.tv</code> 检索与封面抓取。<strong>仅作用于元数据与 GitHub 相关请求，绝不影响 115 网盘与 WebDAV 流量。</strong>
         </p>
         <div class="inline-action-bar">
           <input type="text" id="bgm-proxy-url" value="${esc(proxyInputVal)}" placeholder="留空直连；支持 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080" style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
@@ -3686,6 +4455,288 @@
           ${st.proxyUrl ? `<button type="button" class="btn btn-danger" id="bgm-proxy-clear">清空改回直连</button>` : ''}
         </div>
         <div id="bgm-proxy-probe-result" style="margin-top:10px;font-size:12.5px">${state.bgmProxyProbeHTML || ''}</div>
+      </div>
+
+      <div class="card" id="extmeta-market-card">
+        <div class="section-head" style="margin-bottom:8px">
+          <h3>元数据市场与源管理（Mihon 风格）</h3>
+          <button type="button" class="btn btn-sm btn-primary" id="extmeta-source-add-btn">+ 手动添加自定义源</button>
+        </div>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 10px">
+          通过标准 <code>mangaalpha-repo-v1</code> 仓库清单订阅社区离线图库、标签翻译词典与脱敏映射包，也可手动接入服务器本地 SQLite 文件或兼容在线 API。
+        </p>
+        <div class="inline-action-bar">
+          <input type="url" id="extmeta-repo-url" value="${esc(repoDraftVal)}" placeholder="输入元数据仓库 repo.json 地址（https://.../repo.json）" style="height:36px;padding:0 11px;border-radius:8px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+          <button type="button" class="btn btn-primary" id="extmeta-repo-subscribe-btn">订阅仓库</button>
+        </div>
+        <div class="extmeta-rec-row">
+          <button type="button" class="btn btn-sm btn-rec-fill" id="extmeta-repo-fill-rec">填入社区推荐仓库地址</button>
+          <span class="field-hint">点击仅预填地址，确认无误后再点击「订阅仓库」（不自动发起请求）。</span>
+        </div>
+
+        <div class="extmeta-subdivider">
+          <div style="font-size:13px;font-weight:600;margin-bottom:8px">已订阅仓库（${repos.length}）</div>
+          ${repos.length === 0
+            ? `<div class="empty-box" style="padding:18px">暂未订阅外部元数据仓库。</div>`
+            : `<div class="extmeta-repo-list">
+                ${repos.map((r) => {
+                  const safeHome = extSafeHttpURL(r.homepage);
+                  return `
+                    <div class="extmeta-repo-item">
+                      <div class="extmeta-repo-info">
+                        <div class="extmeta-source-title-row">
+                          <strong>${esc(r.name || r.url)}</strong>
+                          ${r.repoVersion ? `<span class="badge badge-accent">${esc(r.repoVersion)}</span>` : ''}
+                          ${r.enabled === false ? `<span class="badge badge-warn">已停用</span>` : ''}
+                        </div>
+                        ${r.description ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:3px">${esc(r.description)}</div>` : ''}
+                        <div class="extmeta-repo-url"><code>${esc(r.url)}</code></div>
+                        <div class="extmeta-source-meta">
+                          <span>上次同步：${fmtTime(r.lastSyncedAt)}</span>
+                          ${safeHome ? `<a href="${esc(safeHome)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">仓库主页 ↗</a>` : ''}
+                        </div>
+                        ${r.lastError ? `<div class="extmeta-source-err">同步错误：${esc(r.lastError)}</div>` : ''}
+                      </div>
+                      <div class="extmeta-repo-actions">
+                        <button type="button" class="btn btn-sm" data-extmeta-repo-refresh="${esc(r.id)}">刷新</button>
+                        <button type="button" class="btn btn-sm btn-danger" data-extmeta-repo-del="${esc(r.id)}" data-extmeta-repo-name="${esc(r.name || r.url)}">删除</button>
+                      </div>
+                    </div>`;
+                }).join('')}
+              </div>`}
+        </div>
+
+        <div class="extmeta-subdivider" style="margin-bottom:0">
+          <div class="section-head" style="margin-bottom:8px">
+            <span style="font-size:13px;font-weight:600">已配置数据源（${extSources.length}）</span>
+            <span class="badge">${extSources.filter((s) => s.ready).length} 个已就绪</span>
+          </div>
+          ${extSources.length === 0
+            ? `<div class="empty-box" style="padding:18px">暂无数据源，请订阅仓库或点击右上角「+ 手动添加自定义源」。</div>`
+            : `<div class="extmeta-source-list">
+                ${extSources.map((s) => {
+                  const km = extSourceKindMeta(s.kind);
+                  const syncJob = activeSyncBySource.get(s.id);
+                  const syncPct = syncJob && syncJob.totalBytes > 0
+                    ? Math.min(100, Math.round((Number(syncJob.downloadedBytes || 0) / Number(syncJob.totalBytes)) * 100))
+                    : 35;
+                  const tagDictName = s.tagDictSourceId
+                    ? ((sourceByID.get(s.tagDictSourceId) && sourceByID.get(s.tagDictSourceId).name) || s.tagDictSourceId)
+                    : '';
+                  return `
+                    <div class="extmeta-source-card">
+                      <div class="extmeta-source-head">
+                        <div class="extmeta-source-info">
+                          <div class="extmeta-source-title-row">
+                            <strong>${esc(s.name)}</strong>
+                            <span class="badge ${km.cls}">${esc(km.label)}</span>
+                            ${s.schemaType ? `<span class="badge">${esc(s.schemaType)}</span>` : ''}
+                            <span class="badge ${s.ready ? 'badge-success' : 'badge-warn'}">${s.ready ? '已就绪' : '未就绪'}</span>
+                            <span class="badge ${s.enabled ? 'badge-accent' : ''}">${s.enabled ? '已启用' : '已停用'}</span>
+                            ${s.onlineEnabled ? `<span class="badge badge-warn">在线补全已开</span>` : ''}
+                          </div>
+                          ${s.description ? `<div style="font-size:12px;color:var(--text-secondary);margin-top:4px">${esc(s.description)}</div>` : ''}
+                          <div class="extmeta-source-meta">
+                            <span>条目数：<strong>${Number(s.entryCount || 0).toLocaleString()}</strong></span>
+                            ${Number(s.fileSize || 0) > 0 ? `<span>体积：${fmtBytes(s.fileSize)}</span>` : ''}
+                            <span>更新频率：${esc(extAutoUpdateLabel(s.autoUpdate))}</span>
+                            <span>上次更新：${fmtTime(s.lastUpdatedAt)}</span>
+                            ${tagDictName ? `<span>词典：${esc(tagDictName)}（${esc(extTagDisplayModeLabel(s.tagDisplayMode))}）</span>` : ''}
+                          </div>
+                          ${(s.localPath || s.downloadUrl || s.onlineApiUrl) ? `
+                            <div class="extmeta-source-meta">
+                              ${s.localPath ? `<span>本地路径：<code>${esc(s.localPath)}</code></span>` : ''}
+                              ${s.downloadUrl ? `<span>下载地址：<code>${esc(s.downloadUrl)}</code></span>` : ''}
+                              ${s.onlineApiUrl ? `<span>在线 API：<code>${esc(s.onlineApiUrl)}</code></span>` : ''}
+                            </div>` : ''}
+                          ${syncJob ? `
+                            <div class="extmeta-sync-box">
+                              <div style="font-size:12px;color:var(--accent);margin-bottom:4px">
+                                同步中：${esc(syncJob.phase || syncJob.status)}
+                                ${syncJob.totalBytes > 0 ? ` · ${fmtBytes(syncJob.downloadedBytes)} / ${fmtBytes(syncJob.totalBytes)} (${syncPct}%)` : ''}
+                                ${Number(syncJob.indexedEntries || 0) > 0 ? ` · 已建索引 ${Number(syncJob.indexedEntries).toLocaleString()} 条` : ''}
+                              </div>
+                              <div class="progress-track"><span style="width:${syncPct}%"></span></div>
+                            </div>` : ''}
+                          ${s.lastError ? `<div class="extmeta-source-err">最近错误：${esc(s.lastError)}</div>` : ''}
+                        </div>
+                        <div class="extmeta-source-actions">
+                          <label class="check-row" style="margin-right:4px">
+                            <input type="checkbox" data-extmeta-src-toggle="${esc(s.id)}" ${s.enabled ? 'checked' : ''}>
+                            <span>启用</span>
+                          </label>
+                          <button type="button" class="btn btn-sm btn-primary" data-extmeta-src-sync="${esc(s.id)}" data-force="false" ${syncJob ? 'disabled' : ''}>${s.ready ? '检查更新' : '立即下载'}</button>
+                          <button type="button" class="btn btn-sm" data-extmeta-src-sync="${esc(s.id)}" data-force="true" ${syncJob ? 'disabled' : ''}>强制重下</button>
+                          <button type="button" class="btn btn-sm" data-extmeta-src-edit="${esc(s.id)}">配置</button>
+                          <button type="button" class="btn btn-sm btn-danger" data-extmeta-src-del="${esc(s.id)}" data-extmeta-src-name="${esc(s.name)}">删除</button>
+                        </div>
+                      </div>
+                    </div>`;
+                }).join('')}
+              </div>`}
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card" id="extmeta-chains-card">
+          <h3>书库多源顺延优先级链</h3>
+          <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
+            每个物理书库默认使用内置 Bangumi 源；可自定义多个离线源按 <code>#1 → #2 → ...</code> 顺序匹配，<strong>离线源全部未命中时自动由已启用的社区映射包兜底</strong>。
+          </p>
+          ${physicalLibs.length === 0
+            ? `<div class="empty-box" style="padding:18px">暂无物理书库。</div>`
+            : `<div class="extmeta-chain-list">
+                ${physicalLibs.map((l) => {
+                  const chainIDs = extNormalizeChain(libraryChains[l.id]);
+                  return `
+                    <div class="extmeta-chain-row">
+                      <div class="extmeta-chain-info">
+                        <div class="extmeta-source-title-row">
+                          <strong>${esc(l.name)}</strong>
+                          <span class="badge">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
+                          ${l.unionParentId ? `<span class="badge">联合子库</span>` : ''}
+                          ${l.enabled === false ? `<span class="badge badge-warn">已隐藏</span>` : ''}
+                        </div>
+                        <div class="extmeta-chain-steps">
+                          ${chainIDs.length === 0
+                            ? `<span class="badge badge-bgm">默认：内置 Bangumi 源</span>`
+                            : chainIDs.map((sid, idx) => {
+                                const src = sourceByID.get(sid);
+                                const label = (src && src.name) || (sid === 'bangumi' ? '内置 Bangumi 源' : sid);
+                                return `${idx > 0 ? `<span class="extmeta-chain-arrow">→</span>` : ''}<span class="badge badge-accent">#${idx + 1} ${esc(label)}</span>`;
+                              }).join('')}
+                        </div>
+                      </div>
+                      <div class="extmeta-chain-actions">
+                        <button type="button" class="btn btn-sm" data-extmeta-chain-edit="${esc(l.id)}">调整顺延链</button>
+                      </div>
+                    </div>`;
+                }).join('')}
+              </div>`}
+        </div>
+
+        <div class="card" id="extmeta-batch-card">
+          <h3>多源批量刮削</h3>
+          <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
+            按各书库配置的顺延链依次匹配本地离线索引与社区映射包，不会覆盖已手动绑定或锁定的字段。
+          </p>
+          <div class="field">
+            <label for="extmeta-batch-lib">选择目标书库</label>
+            <select id="extmeta-batch-lib">
+              <option value="" ${batchDraft.libraryId === '' ? 'selected' : ''}>全部未隐藏书库</option>
+              ${selectableLibs.map((l) => `<option value="${esc(l.id)}" ${batchDraft.libraryId === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="extmeta-batch-mode">刮削范围模式</label>
+            <select id="extmeta-batch-mode">
+              <option value="incremental" ${batchDraft.mode === 'incremental' ? 'selected' : ''}>增量刮削（仅处理尚未刮削的新作品）</option>
+              <option value="retry_unmatched" ${batchDraft.mode === 'retry_unmatched' ? 'selected' : ''}>重试未命中（处理未命中与新作品）</option>
+              <option value="force" ${batchDraft.mode === 'force' ? 'selected' : ''}>全量强制重刮（保留手动绑定与锁定字段）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="check-row">
+              <input type="checkbox" id="extmeta-batch-online" ${batchDraft.allowOnline ? 'checked' : ''}>
+              <span>允许低速在线补全（单线程防封熔断）</span>
+            </label>
+            <div class="field-hint">默认关闭（纯离线极速匹配）；仅当开启后，对离线未命中作品才调用已启用在线 API 的数据源，单线程限速并在 403/429/503 时自动熔断冷却。</div>
+          </div>
+          <button type="button" class="btn btn-primary" id="extmeta-batch-start">开始多源批量刮削</button>
+          ${onlineEnrich && (onlineEnrich.running || onlineEnrich.circuitOpen || onlineEnrich.lastError || (Number(onlineEnrich.processed || 0) + Number(onlineEnrich.matched || 0) + Number(onlineEnrich.failed || 0)) > 0) ? `
+            <div class="extmeta-enrich-banner">
+              <span class="badge ${onlineEnrich.circuitOpen ? 'badge-danger' : onlineEnrich.running ? 'badge-accent' : ''}">
+                ${onlineEnrich.circuitOpen ? '在线补全已熔断保护' : onlineEnrich.running ? '在线补全运行中' : '在线补全状态'}
+              </span>
+              <span>已处理 ${Number(onlineEnrich.processed || 0)} · 命中 ${Number(onlineEnrich.matched || 0)} · 失败 ${Number(onlineEnrich.failed || 0)}</span>
+              ${onlineEnrich.cooldownUntil ? `<span class="badge badge-warn">冷却至：${fmtTime(onlineEnrich.cooldownUntil)}</span>` : ''}
+              ${onlineEnrich.lastError ? `<span style="color:var(--danger)">${esc(onlineEnrich.lastError)}</span>` : ''}
+            </div>` : ''}
+        </div>
+      </div>
+
+      <div class="card" id="extmeta-runs-card">
+        <div class="section-head">
+          <h3>多源刮削任务记录</h3>
+          <button type="button" class="btn btn-sm" id="extmeta-runs-refresh">刷新</button>
+        </div>
+        ${scrapeRuns.length === 0
+          ? `<div class="empty-box">暂无多源批量刮削任务记录。</div>`
+          : `<div class="table-wrap"><table class="data-table">
+              <thead><tr><th>目标</th><th>模式 / 网络</th><th>状态</th><th>进度</th><th>命中 / 未命中 / 跳过</th><th>当前处理 / 开始时间</th><th>操作</th></tr></thead>
+              <tbody>
+                ${scrapeRuns.map((r) => {
+                  const rid = r.id || r.runId || '';
+                  const total = Number(r.totalSeries || 0);
+                  const proc = Number(r.processedSeries || 0);
+                  const pct = total > 0 ? Math.min(100, Math.round((proc / total) * 100)) : 0;
+                  const active = r.status === 'queued' || r.status === 'running';
+                  const errText = r.error || (Array.isArray(r.errors) && r.errors[0]) || '';
+                  return `
+                    <tr>
+                      <td><strong>${esc(r.libraryName || r.libraryId || '全部未隐藏书库')}</strong></td>
+                      <td>
+                        <span class="badge">${esc(r.mode || 'incremental')}</span>
+                        ${r.allowOnline ? `<span class="badge badge-warn">含在线补全</span>` : `<span class="badge">纯离线</span>`}
+                      </td>
+                      <td><span class="badge ${(r.status === 'completed' || r.status === 'success') ? 'badge-success' : r.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(r.status)}</span></td>
+                      <td style="min-width:140px">
+                        <div style="font-size:12px">${proc} / ${total} (${pct}%)</div>
+                        <div class="progress-track" style="margin-top:3px"><span style="width:${pct}%"></span></div>
+                      </td>
+                      <td><span style="color:var(--success)">${Number(r.matchedCount || 0)}</span> / <span style="color:var(--warn)">${Number(r.unmatchedCount || 0)}</span> / ${Number(r.skippedCount || 0)}</td>
+                      <td class="cell-wrap" style="font-size:12px;color:var(--text-muted)">
+                        <div>${esc(r.currentSeries || fmtTime(r.startedAt || r.createdAt))}</div>
+                        ${errText ? `<div style="color:var(--danger)">${esc(errText)}</div>` : ''}
+                      </td>
+                      <td>${active && rid ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-extmeta-run="${esc(rid)}">取消</button>` : ''}</td>
+                    </tr>`;
+                }).join('')}
+              </tbody>
+            </table></div>`}
+      </div>
+
+      <div class="card" id="extmeta-export-card">
+        <div class="section-head" style="margin-bottom:8px">
+          <h3>社区脱敏映射包导出（mangaalpha_mapping_v1）</h3>
+          <a href="${esc(extSafeHttpURL(extDeriveRepoPRURL(recommendedRepoUrl)))}" target="_blank" rel="noopener noreferrer" class="btn btn-sm">前往社区仓库提 PR ↗</a>
+        </div>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 12px">
+          将手动校对或 AI Agent 确认的高质量作品绑定导出为脱敏 <code>.ndjson</code> 映射包（仅含清洗标题、作者、目标源与条目 ID，自动过滤本地路径、IP、Token 与 URL），供自己备份或向社区仓库提 PR 共建共享。
+        </p>
+        <div class="field">
+          <label>导出书库范围</label>
+          <div class="extmeta-export-checks">
+            <label class="check-row">
+              <input type="checkbox" id="extmeta-export-all-libs" ${exportDraft.allLibs ? 'checked' : ''}>
+              <span><strong>全部书库</strong></span>
+            </label>
+            ${physicalLibs.map((l) => `
+              <label class="check-row">
+                <input type="checkbox" data-extmeta-export-lib="${esc(l.id)}" value="${esc(l.id)}" ${!exportDraft.allLibs && exportDraft.libraryIds.includes(l.id) ? 'checked' : ''}>
+                <span>${esc(l.name)}</span>
+              </label>`).join('')}
+          </div>
+        </div>
+        <div class="field">
+          <label>包含的绑定来源</label>
+          <div class="extmeta-export-checks">
+            <label class="check-row"><input type="checkbox" data-extmeta-export-origin="manual" value="manual" ${exportDraft.origins.includes('manual') ? 'checked' : ''}><span>手动绑定 (manual)</span></label>
+            <label class="check-row"><input type="checkbox" data-extmeta-export-origin="agent" value="agent" ${exportDraft.origins.includes('agent') ? 'checked' : ''}><span>AI Agent 绑定 (agent)</span></label>
+            <label class="check-row"><input type="checkbox" data-extmeta-export-origin="auto" value="auto" ${exportDraft.origins.includes('auto') ? 'checked' : ''}><span>自动刮削命中 (auto)</span></label>
+            <label class="check-row"><input type="checkbox" data-extmeta-export-origin="mapping" value="mapping" ${exportDraft.origins.includes('mapping') ? 'checked' : ''}><span>社区映射命中 (mapping)</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <label class="check-row">
+            <input type="checkbox" id="extmeta-export-include-nsfw" ${exportDraft.includeNsfw ? 'checked' : ''}>
+            <span>包含 NSFW 条目（默认严格排除；公开共享前请先核对社区仓库收录规范）</span>
+          </label>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+          <button type="button" class="btn btn-primary" id="extmeta-export-preview-btn">预览脱敏结果</button>
+          <span class="field-hint">将先在弹窗展示脱敏条数、已排除 NSFW 数与前 30 条样本，确认无误后再下载 <code>.ndjson</code>。</span>
+        </div>
       </div>
 
       <div class="grid-2">
@@ -3758,7 +4809,7 @@
         </div>
 
         <div class="card">
-          <h3>启动批量自动刮削</h3>
+          <h3>启动 Bangumi 批量自动刮削</h3>
           <p style="font-size:12.5px;color:var(--text-secondary)">
             支持 <code>[标题][作者]</code> 与 <code>[作者][标题]</code> 双序识别、通用子目录（如 <code>台版</code>/<code>特别篇</code>）自动回溯父目录并追加后缀、繁简异体字归一与作者交叉打分，不会覆盖已手动绑定或锁定的字段。
           </p>
@@ -3766,7 +4817,7 @@
             <label>选择目标书库</label>
             <select id="bgm-batch-lib">
               <option value="">全部未隐藏书库</option>
-              ${(libs || []).filter((l) => l.enabled !== false && !l.unionParentId).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
+              ${selectableLibs.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
             </select>
           </div>
           <div class="field">
@@ -3832,7 +4883,7 @@
 
       <div class="card">
         <div class="section-head">
-          <h3>刮削任务记录</h3>
+          <h3>Bangumi 刮削任务记录</h3>
           <button type="button" class="btn btn-sm" id="bgm-refresh-btn">刷新</button>
         </div>
         ${runs.length === 0
@@ -3870,6 +4921,286 @@
         }
       }
     }
+    if (editingRepo) {
+      const restoredRepo = document.getElementById('extmeta-repo-url');
+      if (restoredRepo) {
+        restoredRepo.focus();
+        if (repoSelStart !== null && repoSelEnd !== null) {
+          try { restoredRepo.setSelectionRange(repoSelStart, repoSelEnd); } catch (_) {}
+        }
+      }
+    }
+
+    const guideDetailsEl = document.getElementById('extmeta-guide-details');
+    if (guideDetailsEl) {
+      guideDetailsEl.ontoggle = () => {
+        if (typeof state === 'object' && state) state.extMetaGuideOpen = Boolean(guideDetailsEl.open);
+      };
+    }
+
+    const repoInputEl = document.getElementById('extmeta-repo-url');
+    if (repoInputEl) {
+      repoInputEl.oninput = () => {
+        if (typeof state === 'object' && state) state.extMetaRepoDraft = repoInputEl.value;
+      };
+    }
+    const fillRecBtn = document.getElementById('extmeta-repo-fill-rec');
+    if (fillRecBtn && repoInputEl) {
+      fillRecBtn.onclick = () => {
+        repoInputEl.value = recommendedRepoUrl;
+        if (typeof state === 'object' && state) state.extMetaRepoDraft = recommendedRepoUrl;
+        toast('已填入社区推荐仓库地址，请确认后点击「订阅仓库」');
+      };
+    }
+    const repoSubBtn = document.getElementById('extmeta-repo-subscribe-btn');
+    if (repoSubBtn && repoInputEl) {
+      repoSubBtn.onclick = async () => {
+        const url = repoInputEl.value.trim();
+        if (!url) {
+          toast('请输入元数据仓库 repo.json 地址', 'error');
+          return;
+        }
+        repoSubBtn.disabled = true;
+        try {
+          await api('/admin/api/metadata/repos', { method: 'POST', body: { url } });
+          if (typeof state === 'object' && state) state.extMetaRepoDraft = '';
+          toast('仓库订阅成功');
+          renderAdminBangumi(body);
+        } catch (err) {
+          repoSubBtn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    }
+
+    body.querySelectorAll('button[data-extmeta-repo-refresh]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-extmeta-repo-refresh');
+        btn.disabled = true;
+        try {
+          await api(`/admin/api/metadata/repos/${encodeURIComponent(id)}/refresh`, { method: 'POST' });
+          toast('仓库已刷新');
+          renderAdminBangumi(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+    body.querySelectorAll('button[data-extmeta-repo-del]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-extmeta-repo-del');
+        const name = btn.getAttribute('data-extmeta-repo-name') || id;
+        if (!(await confirmModal(`确认删除订阅仓库「${name}」？该仓库下的订阅源及书库链引用将一并移除。`, { title: '删除元数据仓库', confirmText: '确认删除' }))) return;
+        if (!btn.isConnected) return;
+        btn.disabled = true;
+        try {
+          await api(`/admin/api/metadata/repos/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          toast('已删除订阅仓库');
+          renderAdminBangumi(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+
+    const addSourceBtn = document.getElementById('extmeta-source-add-btn');
+    if (addSourceBtn) {
+      addSourceBtn.onclick = () => openExtMetaAddSourceModal(tagDictSources, () => renderAdminBangumi(body));
+    }
+
+    body.querySelectorAll('input[data-extmeta-src-toggle]').forEach((cb) => {
+      cb.onchange = async () => {
+        const id = cb.getAttribute('data-extmeta-src-toggle');
+        const src = sourceByID.get(id);
+        if (!src) return;
+        const nextEnabled = Boolean(cb.checked);
+        cb.disabled = true;
+        try {
+          await api(`/admin/api/metadata/sources/${encodeURIComponent(id)}`, {
+            method: 'PUT',
+            body: {
+              enabled: nextEnabled,
+              tagDictSourceId: src.tagDictSourceId || '',
+              tagDisplayMode: src.tagDisplayMode || 'zh',
+              autoUpdate: src.autoUpdate || 'manual',
+              localPath: src.localPath || '',
+              downloadUrl: src.downloadUrl || '',
+              onlineApiUrl: src.onlineApiUrl || '',
+              onlineEnabled: Boolean(src.onlineEnabled),
+            },
+          });
+          toast(nextEnabled ? `已启用数据源「${src.name}」` : `已停用数据源「${src.name}」`);
+          renderAdminBangumi(body);
+        } catch (err) {
+          cb.checked = !nextEnabled;
+          cb.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+
+    body.querySelectorAll('button[data-extmeta-src-sync]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-extmeta-src-sync');
+        const force = btn.getAttribute('data-force') === 'true';
+        btn.disabled = true;
+        try {
+          await api(`/admin/api/metadata/sources/${encodeURIComponent(id)}/sync`, { method: 'POST', body: { force } });
+          toast(force ? '已开始强制重下并重建索引' : '已开始检查并同步数据源');
+          renderAdminBangumi(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+
+    body.querySelectorAll('button[data-extmeta-src-edit]').forEach((btn) => {
+      btn.onclick = () => {
+        const src = sourceByID.get(btn.getAttribute('data-extmeta-src-edit'));
+        if (src) openExtMetaSourceModal(src, tagDictSources, () => renderAdminBangumi(body));
+      };
+    });
+
+    body.querySelectorAll('button[data-extmeta-src-del]').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.getAttribute('data-extmeta-src-del');
+        const name = btn.getAttribute('data-extmeta-src-name') || id;
+        if (!(await confirmModal(`确认删除数据源「${name}」？`, { title: '删除数据源', confirmText: '确认删除' }))) return;
+        if (!btn.isConnected) return;
+        btn.disabled = true;
+        try {
+          await api(`/admin/api/metadata/sources/${encodeURIComponent(id)}`, { method: 'DELETE' });
+          toast('数据源已删除');
+          renderAdminBangumi(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+
+    const libMap = new Map((libs || []).map((l) => [l.id, l]));
+    body.querySelectorAll('button[data-extmeta-chain-edit]').forEach((btn) => {
+      btn.onclick = () => {
+        const libID = btn.getAttribute('data-extmeta-chain-edit');
+        const lib = libMap.get(libID);
+        if (!lib) return;
+        openLibraryChainModal(lib, chainCandidates, libraryChains[libID], () => renderAdminBangumi(body));
+      };
+    });
+
+    const extBatchLibEl = document.getElementById('extmeta-batch-lib');
+    const extBatchModeEl = document.getElementById('extmeta-batch-mode');
+    const extBatchOnlineEl = document.getElementById('extmeta-batch-online');
+    const syncBatchDraft = () => {
+      if (typeof state === 'object' && state) {
+        state.extMetaBatchDraft = {
+          libraryId: extBatchLibEl ? extBatchLibEl.value : '',
+          mode: extBatchModeEl ? extBatchModeEl.value : 'incremental',
+          allowOnline: extBatchOnlineEl ? Boolean(extBatchOnlineEl.checked) : false,
+        };
+      }
+    };
+    if (extBatchLibEl) extBatchLibEl.onchange = syncBatchDraft;
+    if (extBatchModeEl) extBatchModeEl.onchange = syncBatchDraft;
+    if (extBatchOnlineEl) extBatchOnlineEl.onchange = syncBatchDraft;
+
+    const extBatchStartBtn = document.getElementById('extmeta-batch-start');
+    if (extBatchStartBtn) {
+      extBatchStartBtn.onclick = async () => {
+        syncBatchDraft();
+        const libraryId = extBatchLibEl ? extBatchLibEl.value : '';
+        const mode = extBatchModeEl ? extBatchModeEl.value : 'incremental';
+        const allowOnline = extBatchOnlineEl ? Boolean(extBatchOnlineEl.checked) : false;
+        extBatchStartBtn.disabled = true;
+        try {
+          await api('/admin/api/metadata/scrape', {
+            method: 'POST',
+            body: { libraryId, mode, allowOnline },
+          });
+          toast('多源批量刮削任务已启动');
+          renderAdminBangumi(body);
+        } catch (err) {
+          extBatchStartBtn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    }
+
+    const extRunsRefreshBtn = document.getElementById('extmeta-runs-refresh');
+    if (extRunsRefreshBtn) extRunsRefreshBtn.onclick = () => renderAdminBangumi(body);
+    body.querySelectorAll('button[data-cancel-extmeta-run]').forEach((btn) => {
+      btn.onclick = async () => {
+        const rid = btn.getAttribute('data-cancel-extmeta-run');
+        btn.disabled = true;
+        try {
+          await api(`/admin/api/metadata/scrape-runs/${encodeURIComponent(rid)}/cancel`, { method: 'POST' });
+          toast('已发送取消请求');
+          renderAdminBangumi(body);
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
+      };
+    });
+
+    const expAllLibsEl = document.getElementById('extmeta-export-all-libs');
+    const expIncludeNsfwEl = document.getElementById('extmeta-export-include-nsfw');
+    const expLibCbs = Array.from(body.querySelectorAll('input[data-extmeta-export-lib]'));
+    const expOriginCbs = Array.from(body.querySelectorAll('input[data-extmeta-export-origin]'));
+    const syncExportDraft = () => {
+      if (typeof state === 'object' && state) {
+        state.extMetaExportDraft = {
+          allLibs: expAllLibsEl ? Boolean(expAllLibsEl.checked) : true,
+          libraryIds: expLibCbs.filter((c) => c.checked).map((c) => c.value),
+          origins: expOriginCbs.filter((c) => c.checked).map((c) => c.value),
+          includeNsfw: expIncludeNsfwEl ? Boolean(expIncludeNsfwEl.checked) : false,
+        };
+      }
+    };
+    if (expAllLibsEl) {
+      expAllLibsEl.onchange = () => {
+        if (expAllLibsEl.checked) expLibCbs.forEach((c) => { c.checked = false; });
+        syncExportDraft();
+      };
+    }
+    expLibCbs.forEach((cb) => {
+      cb.onchange = () => {
+        if (cb.checked && expAllLibsEl) expAllLibsEl.checked = false;
+        if (!expLibCbs.some((c) => c.checked) && expAllLibsEl) expAllLibsEl.checked = true;
+        syncExportDraft();
+      };
+    });
+    expOriginCbs.forEach((cb) => { cb.onchange = syncExportDraft; });
+    if (expIncludeNsfwEl) expIncludeNsfwEl.onchange = syncExportDraft;
+
+    const expPreviewBtn = document.getElementById('extmeta-export-preview-btn');
+    if (expPreviewBtn) {
+      expPreviewBtn.onclick = async () => {
+        syncExportDraft();
+        const allLibs = expAllLibsEl ? Boolean(expAllLibsEl.checked) : true;
+        const libraryIds = allLibs ? [] : expLibCbs.filter((c) => c.checked).map((c) => c.value);
+        const origins = expOriginCbs.filter((c) => c.checked).map((c) => c.value);
+        const includeNsfw = expIncludeNsfwEl ? Boolean(expIncludeNsfwEl.checked) : false;
+        if (origins.length === 0) {
+          toast('请至少勾选一种绑定来源', 'error');
+          return;
+        }
+        const payload = { libraryIds, origins, includeNsfw, preview: true };
+        expPreviewBtn.disabled = true;
+        try {
+          const previewRes = await api('/admin/api/metadata/mappings/export', { method: 'POST', body: payload });
+          openMappingExportPreviewModal(payload, previewRes, extDeriveRepoPRURL(recommendedRepoUrl));
+        } catch (err) {
+          toast(err.message, 'error');
+        } finally {
+          if (expPreviewBtn.isConnected) expPreviewBtn.disabled = false;
+        }
+      };
+    }
 
     document.getElementById('bgm-show-nsfw').onchange = async (e) => {
       const showNsfw = e.target.checked;
@@ -3888,7 +5219,7 @@
       const proxyUrl = document.getElementById('bgm-proxy-url').value.trim();
       try {
         await api('/admin/api/bangumi/config', { method: 'PUT', body: { proxyUrl } });
-        toast(proxyUrl ? 'Bangumi 代理已保存并立即生效' : '已切换为直连模式');
+        toast(proxyUrl ? '代理已保存并立即生效' : '已切换为直连模式');
         renderAdminBangumi(body);
       } catch (err) { toast(err.message, 'error'); }
     };
@@ -4087,7 +5418,11 @@
       };
     });
 
-    const hasActive = Boolean(arch.updating) || runs.some((r) => r.status === 'queued' || r.status === 'running');
+    const hasActive = Boolean(arch.updating)
+      || runs.some((r) => r.status === 'queued' || r.status === 'running')
+      || activeSyncs.some((j) => j.status === 'queued' || j.status === 'running')
+      || scrapeRuns.some((r) => r.status === 'queued' || r.status === 'running')
+      || Boolean(onlineEnrich && onlineEnrich.running);
     if (hasActive) {
       schedulePoll(async () => {
         if (location.pathname !== '/admin' || state.adminTab !== 'bangumi') return;
@@ -4266,7 +5601,7 @@
           <div>
             <h3 style="margin:0 0 4px">软件版本与更新检测</h3>
             <div style="font-size:12.5px;color:var(--text-secondary)">
-              默认每 24 小时后台静默检查一次 GitHub Releases（自动复用「Bangumi 刮削中心」配置的网络代理；未配置则直连）。服务端/桌面端提供更新提示、变更日志与对应平台下载/Docker 更新命令，不强行原地替换程序；Android 客户端可在「手机端设置」中校验 SHA256 后直接安装。
+              默认每 24 小时后台静默检查一次 GitHub Releases（自动复用「元数据刮削」页配置的网络代理；未配置则直连）。服务端/桌面端提供更新提示、变更日志与对应平台下载/Docker 更新命令，不强行原地替换程序；Android 客户端可在「手机端设置」中校验 SHA256 后直接安装。
             </div>
           </div>
           <label class="check-row" style="font-weight:600;color:var(--text)">
@@ -4284,7 +5619,7 @@
             : (upd.latestVersion ? `<span class="badge badge-success">已是最新版本 (${esc(upd.latestVersion)})</span>` : `<span class="badge">尚未检查</span>`)}
           ${upd.checkedAt ? `<span style="font-size:12px;color:var(--text-muted)">最近检查：${fmtTime(upd.checkedAt)}</span>` : ''}
         </div>
-        ${upd.lastError ? `<div style="font-size:12.5px;color:var(--danger);margin-bottom:10px">最近检查失败：${esc(upd.lastError)}（若无法直连 GitHub，可在「Bangumi 刮削中心」配置网络代理）</div>` : ''}
+        ${upd.lastError ? `<div style="font-size:12.5px;color:var(--danger);margin-bottom:10px">最近检查失败：${esc(upd.lastError)}（若无法直连 GitHub，可在「元数据刮削」页配置网络代理）</div>` : ''}
         ${upd.inDocker && upd.dockerCommand ? `
           <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
             <div class="code-box" style="flex:1 1 200px;min-width:0;max-width:100%">${esc(upd.dockerCommand)}</div>
@@ -6532,7 +7867,7 @@
           ` : `
             <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
               <a href="/account" data-nav class="btn btn-primary">查看 / 管理 API Key</a>
-              <a href="/admin?tab=bangumi" data-nav class="btn">返回 Bangumi 刮削中心</a>
+              <a href="/admin?tab=bangumi" data-nav class="btn">返回元数据刮削</a>
             </div>
           `}
           <div id="agent-auth-result" style="margin-top:14px"></div>
@@ -6605,7 +7940,7 @@
           <h2 style="margin:0 0 8px">授权请求不可用</h2>
           <p style="font-size:13px;color:var(--text-secondary);margin:0 0 16px">${esc(err.message || '授权请求不存在或已过期，请让 AI Agent 重新发起申请。')}</p>
           <a href="/account" data-nav class="btn btn-primary">前往「账号设置」</a>
-          <a href="/admin?tab=bangumi" data-nav class="btn" style="margin-left:8px">返回 Bangumi 刮削中心</a>
+          <a href="/admin?tab=bangumi" data-nav class="btn" style="margin-left:8px">返回元数据刮削</a>
         </div>`;
     }
   }

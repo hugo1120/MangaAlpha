@@ -1,0 +1,325 @@
+# 开放元数据数据源规范 (`docs/METADATA_SOURCES.md`)
+
+本文档定义 **MangaAlpha** 外部元数据市场、离线索引库、标签翻译词典、社区脱敏映射包与归档内嵌元数据的开放技术规范与安全保护机制，面向数据源维护者、词典/映射贡献者及第三方工具开发者。
+
+---
+
+## 1. 概述与设计原则
+
+1. **纯离线优先**：大规模批量刮削默认仅读取本地 SQLite（及随库构建的只读 Sidecar FTS5 + SHA-1 索引）与本地社区映射包，避免触发上游站点 API 限流或封禁。
+2. **多源顺延链（Per-Library Priority Chain）**：每个物理书库可独立配置 `sourceIds` 优先级顺序（默认使用内置 Bangumi）；按 `#1 → #2 → ...` 顺序尝试匹配，若全部离线源未命中，则自动由已启用的社区映射包兜底。
+3. **仅按需低速在线补全**：仅当管理员显式开启全局允许与书库级低速在线补全开关时，才对未命中条目执行单线程限速补全，并内置指数退避熔断保护。
+4. **隐私与社区共建**：所有导出至社区的映射包必须经过严格脱敏校验（剥离本地路径、私有 IP、Token 与 URL），默认严格排除 NSFW 条目。
+
+---
+
+## 2. 仓库清单规范：`mangaalpha-repo-v1`
+
+MangaAlpha 采用与 Mihon 仓库清单类似的声明式 `repo.json` 规范。管理后台提供「填入社区推荐仓库地址」快捷预填功能（默认指向 `https://raw.githubusercontent.com/BlackMuseCode/mangaalpha-metadata-repo/main/repo.json`），需管理员确认后才会订阅拉取。
+
+- **体积上限**：`4 MiB`（`4194304` 字节）
+- **JSON 编码**：UTF-8，`Content-Type: application/json`
+
+### 2.1 顶层字段
+
+| 字段名 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `schema` | `string` | 是 | 固定为 `"mangaalpha-repo-v1"` |
+| `name` | `string` | 否 | 仓库显示名称 |
+| `description` | `string` | 否 | 仓库简介 |
+| `homepage` | `string` | 否 | 仓库主页 URL（仅允许 `http://` 或 `https://`） |
+| `updatedAt` | `string` | 否 | 清单更新时间（建议 RFC3339） |
+| `sources` | `RepoSource[]` | 是 | 数据源声明数组 |
+
+### 2.2 `sources[]` 字段定义
+
+| 字段名 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `id` | `string` | 是 | 源唯一 ID；仅允许 `[a-zA-Z0-9._-]`，长度 `1..128`，禁止 `.` / `..` 及仓库内重复 |
+| `kind` | `string` | 是 | 源类型：`bangumi_archive` / `offline_sqlite` / `tag_dictionary` / `mapping_pack` |
+| `schema` | `string` | 否 | 数据格式标识，如 `mangaalpha_meta_v1`、`gallery_v1`、`tag_translation_text_v1`、`mangaalpha_mapping_v1`（`offline_sqlite` 留空时自动探测） |
+| `name` | `string` | 是 | 源显示名称 |
+| `description` | `string` | 否 | 源描述信息 |
+| `manifestUrl` | `string` | 否 | 清单地址（如 `bangumi_archive` 的 `aux/latest.json`，需 `http/https`） |
+| `downloadUrl` | `string` | 否 | 离线包直链 URL（支持 `.zst`/`.zstd`、`.gz`/`.gzip`、`.zip` 或裸文件，需 `http/https`） |
+| `releaseApiUrl` | `string` | 否 | GitHub Release API（或同构 JSON）端点，用于滚动 Tag（如 `nightly`）基于 `updated_at` 与 `size` 检测更新 |
+| `assetName` | `string` | 否 | 配合 `releaseApiUrl` 匹配指定发布资产文件名 |
+| `compression` | `string` | 否 | 压缩格式：`auto`（或留空，按 URL 后缀识别）、`zst`/`zstd`、`gz`/`gzip`、`zip`、`none`/`raw` |
+| `sizeHintBytes` | `int64` | 否 | 预估文件大小（字节，非负整数） |
+| `defaultTagDictId` | `string` | 否 | 默认关联的 `tag_dictionary` 源 `id` |
+| `nsfwRule` | `string` | 否 | NSFW 判定规则提示（如 `non_h_safe`、`non_h_exempt`） |
+| `autoUpdateDefault` | `bool` | 否 | 默认是否开启自动更新 |
+| `homepage` | `string` | 否 | 源项目主页 URL（需 `http/https`） |
+| `contributeUrl` | `string` | 否 | 映射贡献 / PR / Issue 链接 URL（需 `http/https`） |
+| `default` | `bool` | 否 | 是否标记为默认推荐源 |
+
+### 2.3 完整示例
+
+```json
+{
+  "schema": "mangaalpha-repo-v1",
+  "name": "社区开放元数据仓库",
+  "description": "提供离线索引库、标签中文词典与脱敏映射包",
+  "homepage": "https://github.com/BlackMuseCode/mangaalpha-metadata-repo",
+  "updatedAt": "2026-11-25T00:00:00Z",
+  "sources": [
+    {
+      "id": "bgm-zh",
+      "kind": "bangumi_archive",
+      "name": "Bangumi 中文简介增强镜像",
+      "manifestUrl": "https://example.invalid/bgm/latest.json",
+      "autoUpdateDefault": true,
+      "default": true
+    },
+    {
+      "id": "open-meta-v1",
+      "kind": "offline_sqlite",
+      "schema": "mangaalpha_meta_v1",
+      "name": "社区开放漫画离线库",
+      "downloadUrl": "https://example.invalid/open-meta.sqlite.zst",
+      "releaseApiUrl": "https://api.example.invalid/repos/org/repo/releases/latest",
+      "assetName": "open-meta.sqlite.zst",
+      "compression": "zst",
+      "sizeHintBytes": 52428800,
+      "defaultTagDictId": "zh-tags-v1",
+      "nsfwRule": "non_h_safe"
+    },
+    {
+      "id": "zh-tags-v1",
+      "kind": "tag_dictionary",
+      "schema": "tag_translation_text_v1",
+      "name": "标签中文翻译词典",
+      "downloadUrl": "https://example.invalid/db.text.json.gz",
+      "compression": "gz"
+    },
+    {
+      "id": "community-mappings-v1",
+      "kind": "mapping_pack",
+      "schema": "mangaalpha_mapping_v1",
+      "name": "社区脱敏映射包",
+      "downloadUrl": "https://example.invalid/mappings.ndjson.gz",
+      "compression": "gz",
+      "contributeUrl": "https://github.com/BlackMuseCode/mangaalpha-metadata-repo/pulls"
+    }
+  ]
+}
+```
+
+---
+
+## 3. 官方极简社区 SQLite 单表标准：`mangaalpha_meta_v1`
+
+`mangaalpha_meta_v1` 面向开源社区与个人自建静态书目索引，只需一张 `entries` 表即可完整接入 MangaAlpha。
+
+### 3.1 建表 SQL 示例
+
+```sql
+CREATE TABLE entries (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  title_alt TEXT DEFAULT '',
+  authors TEXT DEFAULT '[]',
+  summary TEXT DEFAULT '',
+  tags TEXT DEFAULT '[]',
+  category TEXT DEFAULT '',
+  cover_url TEXT DEFAULT '',
+  rating REAL DEFAULT 0,
+  is_nsfw INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER DEFAULT 0,
+  extra_json TEXT DEFAULT '{}'
+);
+```
+
+### 3.2 字段语义与兼容性说明
+
+- `id`：条目唯一主键（字符串，如 `"m-1024"` 或数字字符串）。
+- `title` / `title_alt`：主标题与副标题（原名 / 别名），均参与 Sidecar FTS5 与繁简/日文异体字折叠索引。
+- `authors` / `tags`：支持 JSON 字符串数组（推荐，如 `["作者A","作者B"]`），也兼容 `,`、`;`、`|`、`\n` 分隔文本，读取时自动清洗去重。
+- `category`：作品分类文本（如 `"Manga"`、`"Doujinshi"`、`"Non-H"` 等）。
+- `cover_url`：封面 URL；若包含 40 位十六进制 SHA-1 摘要（如 `/xx/yy/<40hex>-...` 或 `<40hex>.jpg`），Sidecar 会自动提取并写入 `thumb_sha1` 索引。
+- `is_nsfw`：`0` 表示常规作品，非 `0` 表示 NSFW。
+- `updated_at`：Unix 秒级时间戳。
+- `extra_json`：可选 JSON 对象，可存放 `token`、`source_url`（或 `sourceUrl`）等扩展信息。
+
+### 3.3 流式解压与只读 Sidecar 机制
+
+- 下载同步支持 **纯 Go 流式解压**（`.zst`/`.zstd`、`gzip`、`.zip` 自动提取首个 `.sqlite`/`.sqlite3`/`.db` 并跳过 `__MACOSX/`，以及未压缩 `.sqlite`），解压输出受 **8 GiB** 安全上限约束，采用临时文件校验后原子替换，失败绝不破坏旧库。
+- 服务端严格以 `mode=ro&immutable=1&_pragma=query_only(1)` 只读打开上游 SQLite，绝不修改上游文件；并在旁边构建伴随 Sidecar 索引（`ext_meta`、`ext_entries`、`ext_fts` FTS5 虚表），实现 `< 5ms` 标题召回与 SHA-1 指纹反查。
+
+---
+
+## 4. 通用四表图库 SQLite 兼容规范：`gallery_v1`
+
+`gallery_v1` 兼容开源社区广泛存在的四表归档图库离线数据库结构（由 `sqlite_master` 检测存在 `gallery` 表时自动识别，或显式配置 `schemaType = "gallery_v1"`）。
+
+### 4.1 标准四表结构
+
+```sql
+CREATE TABLE gallery (
+  gid INTEGER PRIMARY KEY,
+  token TEXT,
+  title TEXT,
+  title_jpn TEXT,
+  category TEXT,
+  thumb TEXT,
+  uploader TEXT,
+  posted INTEGER,
+  filecount INTEGER,
+  filesize INTEGER,
+  expunged INTEGER,
+  removed INTEGER,
+  replaced INTEGER,
+  rating REAL,
+  root_gid INTEGER
+);
+
+CREATE TABLE tag (
+  id INTEGER PRIMARY KEY,
+  name TEXT NOT NULL
+);
+
+CREATE TABLE gid_tid (
+  gid INTEGER NOT NULL,
+  tid INTEGER NOT NULL,
+  PRIMARY KEY (gid, tid)
+);
+
+CREATE TABLE gallery_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT
+);
+```
+
+### 4.2 标签拆分与作者提取规则
+
+`tag.name` 通常采用 `namespace:tag` 形式（通过 `gid_tid` 关联）：
+- `artist:<name>` 与 `group:<name>`：自动提取并去重归入作品 `authors` 列表，不再混入普通标签；
+- 其余 `namespace:tag`（如 `female:...`、`parody:...`、`language:...`、`other:...`）：保留在 `tags` 列表中，并可由关联的 `tag_dictionary` 按展示模式翻译。
+
+### 4.3 严格的 NSFW 分类规则
+
+为确保前台默认隐藏 NSFW 策略不发生漏判，`gallery_v1` 采用保守安全判定：
+- **仅当 `gallery.category` 去除首尾空白并忽略大小写后严格等于 `"Non-H"` 时，判定 `isNsfw = false`**；
+- 其他所有分类（包含 `Manga`、`Doujinshi`、`Artist CG`、`Game CG`、`Image Set`、`Cosplay`、`Western`、`Misc` 或空值）**一律默认标记 `isNsfw = true`**。
+
+---
+
+## 5. 离线标签翻译词典：`tag_translation_text_v1`
+
+支持纯文本 JSON（`db.text.json`）或 Gzip 压缩（`db.text.json.gz`），解压上限为 `64 MiB`。
+
+### 5.1 文件格式
+
+```json
+{
+  "data": [
+    {
+      "namespace": "female",
+      "data": {
+        "glasses": { "name": "眼镜" },
+        "schoolgirl uniform": { "name": "水手服" }
+      }
+    },
+    {
+      "namespace": "other",
+      "data": {
+        "full color": { "name": "全彩" }
+      }
+    }
+  ]
+}
+```
+
+### 5.2 查找与显示模式 (`tagDisplayMode`)
+
+1. 带命名空间的标签（如 `female:glasses`）：精确按 `namespace` + 小写 `tag` 查表；
+2. 无命名空间的裸标签（如 `full color`）：从非 `rows` 命名空间的汇总映射表中兜底查找。
+3. 支持三种展示模式：
+   - `zh`（默认）：命中则返回中文译名（如 `眼镜`），未收录保留原标签；
+   - `bilingual`：命中且译名与原文不同时返回 `中文 (原文)`（如 `眼镜 (female:glasses)`）；
+   - `raw`：始终保留原始标签。
+
+---
+
+## 6. 社区脱敏映射包：`mangaalpha_mapping_v1`
+
+`mangaalpha_mapping_v1` 是轻量级换行分隔 JSON（`.ndjson` 或 `.ndjson.gz`，流式上限 `64 MiB`），用于在多个用户间安全共享“目录/作品名 → 目标元数据 ID”的人工校对成果。
+
+### 6.1 单行记录字段
+
+导入时兼容 camelCase 与 snake_case 字段，导出统一输出标准 camelCase：
+
+```json
+{"schema":"mangaalpha_mapping_v1","key":"水星领航员","rawKey":"[天野梢] ARIA Vol.01","author":"天野梢","targetSource":"bangumi","targetId":"539","isNsfw":false,"origin":"manual"}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `schema` | `string` | 是 | 固定为 `"mangaalpha_mapping_v1"` |
+| `key` | `string` | 是 | 清洗归一后的核心作品名（参与 `ExactTitleKey` 索引） |
+| `rawKey` | `string` | 否 | 原始目录名或副标题键（同时参与 `SearchKey` 与 `ExactTitleKey` 索引） |
+| `author` | `string` | 否 | 作者名，用于同标题消歧 |
+| `targetSource` | `string` | 是 | 目标源标识：`"bangumi"`、`"gallery_v1"` 或 `"mangaalpha_meta_v1"` |
+| `targetId` | `string` | 是 | 目标条目 ID |
+| `isNsfw` | `bool` | 否 | 是否 NSFW；导出时默认严格排除 |
+| `origin` | `string` | 否 | 绑定来源标识，如 `"manual"`、`"agent"`、`"auto"` |
+
+### 6.2 四级双键匹配与作者消歧逻辑
+
+映射索引（`MappingIndex.Lookup`）严格按以下优先级查询：
+1. **`normKey + normAuthor`**：主键与作者同时命中；
+2. **`normKey`（无作者冲突）**：调用方指定作者时仅匹配无作者记录，未指定作者时要求全部同名记录指向同一目标（或存在唯一的无作者记录）；
+3. **`normRawKey + normAuthor`**：回退匹配 `rawKey`（同时覆盖去噪键与精确键）与作者；
+4. **`normRawKey`（无作者冲突）**：`rawKey` 无作者冲突回退。
+
+若同一作品名存在多条不同作者映射到不同 `targetId` 的冲突记录，系统拒绝盲目猜测，确保不串书。
+
+### 6.3 脱敏红线规则
+
+导入与导出均强制执行以下脱敏过滤，凡命中任一条的记录将被自动丢弃：
+- 含有控制字符；
+- 含有 URL Scheme（`http://`、`https://`、`ftp://`、`dav://`、`davs://`、`smb://`、`file://`、`socks5://`、`magnet:?` 等）；
+- 含有 Windows 盘符/UNC 路径（如 `C:\...`、`D:/...`、`\\nas\...`）或常见 Unix 系统路径（如 `/home/...`、`/users/...`、`/mnt/...`、`/share/...`、`/var/...` 等）；
+- 含有合法 IPv4 或 IPv6 地址字面量；
+- 含有 JWT 字符串或凭据关键字（如 `fk115_`、`Bearer `、`access_token`、`refresh_token`、`downurl`、`password=`、`api_key=`、`ghp_`、`github_pat_` 等）。
+
+### 6.4 导出与社区仓库提 PR 共建流程
+
+1. 进入管理后台「元数据刮削 → 社区脱敏映射包导出」；
+2. 选择要导出的书库范围，保留默认勾选的绑定来源（`manual` 与 `agent`，人工与 AI 审核准确度最高）；
+3. 保持「包含 NSFW 条目」处于未勾选状态（若需贡献特定合规分类请先确认目标仓库规则）；
+4. 点击 **「预览脱敏结果」**，核对可导出条数、已排除 NSFW 数、隐私规则拦截数，并人工抽检前 30 条样本确认无私人目录名称或敏感信息；
+5. 点击 **「下载 .ndjson」** 保存到本地；
+6. Fork 目标社区元数据仓库（如 `BlackMuseCode/mangaalpha-metadata-repo`），按仓库目录结构放入或追加 `.ndjson` 文件，提交 Pull Request 即可与社区共享。
+
+---
+
+## 7. 包内嵌入式元数据支持（`ComicInfo.xml` / `galleryinfo.txt`）
+
+对单文件安全上限为 `512 KiB`（自动剥离 UTF-8 BOM）：
+
+1. **`ComicInfo.xml`**：
+   - 使用标准 `encoding/xml` 严格模式解析，天然免疫外部实体注入（XXE）；
+   - 读取 `<Title>`、`<Series>`、`<Summary>`、`<Genre>`、`<Tags>`，并聚合去重 `<Writer>`、`<Penciller>`、`<Inker>`、`<Colorist>`、`<Letterer>`、`<CoverArtist>`、`<Editor>`、`<Translator>` 作为作者列表；
+   - 读取 `<Web>`（仅接受 `http/https` URL），自动提取末端数字 ID 或标准 `/subject/<id>` / `/g/<id>/<token>` 条目 ID；
+   - `<AgeRating>` 为 `Adults Only 18+`、`18+`、`R18`、`R18+`、`X` 或 `Explicit`（忽略大小写）时标记 `isNsfw = true`。
+2. **`galleryinfo.txt`**：
+   - 支持键值行解析：`Title`、`Japanese Title`/`title_jpn`、`Series`、`Artist`/`Author`/`Group`/`Circle`、`Tags`/`Tag`（按 `artist:` / `group:` 拆分作者）、`Category`（沿用 `Non-H` 规则判定 NSFW）、`URL`/`Source`、`GID`/`Gallery ID`，以及 `Uploader Comment` / `Comment` / `Summary` 多行简介。
+
+---
+
+## 8. 安全、SSRF 防护与限流熔断机制
+
+1. **防 SSRF 网络客户端**：
+   - 仓库拉取、离线包下载、在线补全与外部封面代理统一使用安全 HTTP 客户端：
+     - 仅允许 `http://` 与 `https://` 协议；
+     - 直连模式下在 TCP 拨号阶段检查解析出的**全部** IP 地址，拒绝回环（`127.0.0.0/8`、`::1`）、RFC1918/ULA 私网、链路本地（`169.254.0.0/16`、`fe80::/10`）、CGNAT（`100.64.0.0/10`）、组播及保留网段，阻断 DNS Rebinding 攻击；
+     - 代理模式支持 `http` / `https` / `socks5` / `socks5h`，同样禁止目标请求指向内网/保留 IP；
+     - 重定向最多允许 5 跳且逐跳复检目标地址安全性；跨域或 HTTPS 降级 HTTP 时自动剥离 `Authorization`、`Proxy-Authorization` 与 `Cookie` 请求头。
+2. **封面抓取限流、校验与路径隔离**：
+   - 并发上限 `2`、令牌桶默认速率 `1 req/s`（burst `2`）、`singleflight` 合并重复并发请求；
+   - 单张封面体积上限 `10 MiB`，强制校验 JPEG / PNG / WebP / GIF 文件头魔数（拒绝 HTML 错误页冒充图片）；
+   - 磁盘缓存路径经哈希清洗与相对路径校验，严格锁定在 `<DataDir>/thumbnails/extmeta/` 目录内。
+3. **负缓存与自动熔断器**：
+   - 404 或非图片魔数等失败写入 **5 分钟** 负缓存，避免短时间反复请求失效地址；
+   - 上游返回 HTTP `403`、`429` 或 `503` 时自动打开熔断器并按指数退避进入冷却：**`30s → 60s → 180s → 10m`（封顶）**，冷却期内直接拦截请求直到恢复 `200 OK` 后自动复位。

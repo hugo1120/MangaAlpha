@@ -12,6 +12,11 @@ import (
 
 type ScrapedMetadata struct {
 	SubjectID       int64
+	ExtSourceID     string
+	ExtEntryID      string
+	ExtCoverURL     string
+	ExtCoverPath    string
+	MatchOrigin     string
 	Confidence      float64
 	CoverURL        string
 	Score           *float64
@@ -33,6 +38,10 @@ type ScrapedMetadata struct {
 }
 
 type SeriesMetadataPatch struct {
+	ExtSourceID         *string           `json:"extSourceId"`
+	ExtEntryID          *string           `json:"extEntryId"`
+	ExtCoverURL         *string           `json:"extCoverUrl"`
+	MatchOrigin         *string           `json:"matchOrigin"`
 	Status              *string           `json:"status"`
 	StatusLock          *bool             `json:"statusLock"`
 	Title               *string           `json:"title"`
@@ -92,7 +101,8 @@ func defaultSeriesMetadata(series Series) SeriesMetadata {
 }
 
 const seriesMetadataColumns = `
-series_id,bgm_subject_id,scrape_status,scrape_confidence,scrape_synced_at,
+series_id,bgm_subject_id,ext_source_id,ext_entry_id,ext_cover_url,ext_cover_path,match_origin,
+scrape_status,scrape_confidence,scrape_synced_at,
 cover_source,bgm_cover_url,bgm_cover_path,bgm_score,bgm_rank,
 status,status_lock,title,title_lock,title_sort,title_sort_lock,
 summary,summary_lock,reading_direction,reading_direction_lock,
@@ -139,7 +149,8 @@ func scanSeriesMetadataRow(scanner interface{ Scan(...any) error }) (SeriesMetad
 		updatedAt          string
 	)
 	err := scanner.Scan(
-		&m.SeriesID, &bgmID, &m.ScrapeStatus, &m.ScrapeConfidence, &syncedAt,
+		&m.SeriesID, &bgmID, &m.ExtSourceID, &m.ExtEntryID, &m.ExtCoverURL, &m.ExtCoverPath, &m.MatchOrigin,
+		&m.ScrapeStatus, &m.ScrapeConfidence, &syncedAt,
 		&m.CoverSource, &m.BgmCoverURL, &m.BgmCoverPath, &bgmScore, &bgmRank,
 		&m.Status, &statusLock, &m.Title, &titleLock, &m.TitleSort, &titleSortLock,
 		&m.Summary, &summaryLock, &m.ReadingDirection, &readingDirLock,
@@ -318,8 +329,36 @@ func (s *Store) ApplyScrapedMetadata(
 	if current.BgmSubjectID != nil {
 		prevSubjectID = *current.BgmSubjectID
 	}
-	subj := incoming.SubjectID
-	current.BgmSubjectID = &subj
+	extSourceID := strings.TrimSpace(incoming.ExtSourceID)
+	extEntryID := strings.TrimSpace(incoming.ExtEntryID)
+	extCoverURL := strings.TrimSpace(incoming.ExtCoverURL)
+	extCoverPath := strings.TrimSpace(incoming.ExtCoverPath)
+	matchOrigin := strings.TrimSpace(incoming.MatchOrigin)
+
+	if incoming.SubjectID > 0 || extSourceID == "" {
+		subj := incoming.SubjectID
+		current.BgmSubjectID = &subj
+	}
+	if extSourceID != "" {
+		if current.ExtSourceID != extSourceID || current.ExtEntryID != extEntryID ||
+			(extCoverURL != "" && current.ExtCoverURL != extCoverURL) {
+			current.ExtCoverPath = ""
+		}
+		current.ExtSourceID = extSourceID
+		current.ExtEntryID = extEntryID
+	}
+	if extCoverURL != "" {
+		if current.ExtCoverURL != extCoverURL {
+			current.ExtCoverPath = ""
+		}
+		current.ExtCoverURL = extCoverURL
+	}
+	if extCoverPath != "" {
+		current.ExtCoverPath = extCoverPath
+	}
+	if matchOrigin != "" {
+		current.MatchOrigin = matchOrigin
+	}
 	current.ScrapeStatus = ScrapeStatusMatched
 	current.ScrapeConfidence = incoming.Confidence
 	now := nowText()
@@ -442,6 +481,9 @@ func (s *Store) ClearSeriesBangumiBinding(ctx context.Context, series Series) (S
 	current.BgmCoverPath = ""
 	current.BgmScore = nil
 	current.BgmRank = nil
+	if current.ExtSourceID == "" {
+		current.MatchOrigin = ""
+	}
 	if !current.NSFWLock {
 		current.IsNSFW = false
 	}
@@ -465,6 +507,30 @@ func (s *Store) PatchSeriesMetadata(
 	current, err := s.SeriesMetadataByID(ctx, series)
 	if err != nil {
 		return SeriesMetadata{}, err
+	}
+	if patch.ExtSourceID != nil {
+		nextSource := strings.TrimSpace(*patch.ExtSourceID)
+		if current.ExtSourceID != nextSource {
+			current.ExtCoverPath = ""
+		}
+		current.ExtSourceID = nextSource
+	}
+	if patch.ExtEntryID != nil {
+		nextEntry := strings.TrimSpace(*patch.ExtEntryID)
+		if current.ExtEntryID != nextEntry {
+			current.ExtCoverPath = ""
+		}
+		current.ExtEntryID = nextEntry
+	}
+	if patch.ExtCoverURL != nil {
+		nextURL := strings.TrimSpace(*patch.ExtCoverURL)
+		if current.ExtCoverURL != nextURL {
+			current.ExtCoverPath = ""
+		}
+		current.ExtCoverURL = nextURL
+	}
+	if patch.MatchOrigin != nil {
+		current.MatchOrigin = strings.TrimSpace(*patch.MatchOrigin)
 	}
 	if patch.Status != nil {
 		current.Status = normalizeSeriesStatus(*patch.Status)
@@ -615,6 +681,58 @@ WHERE series_id=? AND bgm_subject_id=? AND bgm_cover_path<>?`,
 	return err
 }
 
+func (s *Store) SetSeriesExtCoverPath(ctx context.Context, seriesID, filePath string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE series_metadata SET ext_cover_path=?,updated_at=? WHERE series_id=?`,
+		strings.TrimSpace(filePath), nowText(), seriesID)
+	return err
+}
+
+func (s *Store) SaveSeriesMetadata(ctx context.Context, m SeriesMetadata) error {
+	if m.CoverSource == "" {
+		m.CoverSource = CoverSourceAuto
+	}
+	if m.Status == "" {
+		m.Status = "ONGOING"
+	}
+	if m.ReadingDirection == "" {
+		m.ReadingDirection = "LEFT_TO_RIGHT"
+	}
+	if m.ScrapeStatus == "" {
+		m.ScrapeStatus = ScrapeStatusNone
+	}
+	return s.saveSeriesMetadata(ctx, m, nowText())
+}
+
+func (s *Store) ClearSeriesExternalBinding(ctx context.Context, series Series) (SeriesMetadata, error) {
+	current, err := s.SeriesMetadataByID(ctx, series)
+	if err != nil {
+		return SeriesMetadata{}, err
+	}
+	current.ExtSourceID = ""
+	current.ExtEntryID = ""
+	current.ExtCoverURL = ""
+	current.ExtCoverPath = ""
+	if current.BgmSubjectID == nil || *current.BgmSubjectID <= 0 {
+		current.ScrapeStatus = ScrapeStatusNone
+		current.ScrapeConfidence = 0
+		current.MatchOrigin = ""
+		if !current.NSFWLock {
+			current.IsNSFW = false
+		}
+		if !current.TitleLock {
+			current.Title = series.Name
+		}
+		if !current.TitleSortLock {
+			current.TitleSort = series.Name
+		}
+	}
+	if err := s.saveSeriesMetadata(ctx, current, nowText()); err != nil {
+		return SeriesMetadata{}, err
+	}
+	return s.SeriesMetadataByID(ctx, series)
+}
+
 func (s *Store) saveSeriesMetadata(ctx context.Context, m SeriesMetadata, now string) error {
 	genresJSON, _ := json.Marshal(cleanStringSlice(m.Genres))
 	tagsJSON, _ := json.Marshal(cleanStringSlice(m.Tags))
@@ -633,7 +751,8 @@ func (s *Store) saveSeriesMetadata(ctx context.Context, m SeriesMetadata, now st
 INSERT INTO series_metadata(
  `+seriesMetadataColumns+`
 ) VALUES(
- ?,?,?,?,?,
+ ?,?,?,?,?,?,?,
+ ?,?,?,
  ?,?,?,?,?,
  ?,?,?,?,?,?,
  ?,?,?,?,
@@ -646,6 +765,11 @@ INSERT INTO series_metadata(
 )
 ON CONFLICT(series_id) DO UPDATE SET
  bgm_subject_id=excluded.bgm_subject_id,
+ ext_source_id=excluded.ext_source_id,
+ ext_entry_id=excluded.ext_entry_id,
+ ext_cover_url=excluded.ext_cover_url,
+ ext_cover_path=excluded.ext_cover_path,
+ match_origin=excluded.match_origin,
  scrape_status=excluded.scrape_status,
  scrape_confidence=excluded.scrape_confidence,
  scrape_synced_at=excluded.scrape_synced_at,
@@ -672,7 +796,10 @@ ON CONFLICT(series_id) DO UPDATE SET
  sharing_labels_json=excluded.sharing_labels_json,sharing_labels_lock=excluded.sharing_labels_lock,
  is_nsfw=excluded.is_nsfw,nsfw_lock=excluded.nsfw_lock,
  updated_at=excluded.updated_at`,
-		m.SeriesID, nullableInt64Ptr(m.BgmSubjectID), m.ScrapeStatus, m.ScrapeConfidence, nullableStringPtr(m.ScrapeSyncedAt),
+		m.SeriesID, nullableInt64Ptr(m.BgmSubjectID),
+		strings.TrimSpace(m.ExtSourceID), strings.TrimSpace(m.ExtEntryID),
+		strings.TrimSpace(m.ExtCoverURL), strings.TrimSpace(m.ExtCoverPath), strings.TrimSpace(m.MatchOrigin),
+		m.ScrapeStatus, m.ScrapeConfidence, nullableStringPtr(m.ScrapeSyncedAt),
 		m.CoverSource, m.BgmCoverURL, m.BgmCoverPath, nullableFloat64Ptr(m.BgmScore), nullableIntPtr(m.BgmRank),
 		m.Status, boolInt(m.StatusLock), m.Title, boolInt(m.TitleLock), m.TitleSort, boolInt(m.TitleSortLock),
 		m.Summary, boolInt(m.SummaryLock), m.ReadingDirection, boolInt(m.ReadingDirLock),

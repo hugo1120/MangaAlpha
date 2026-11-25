@@ -1428,8 +1428,13 @@ SELECT union_series_id, source_series_id FROM (
   SELECT uss.union_series_id, uss.source_series_id,
          ROW_NUMBER() OVER (
            PARTITION BY uss.union_series_id
-           ORDER BY CASE WHEN sm.scrape_status='matched' THEN 0 WHEN sm.title<>'' OR sm.summary<>'' THEN 1 ELSE 2 END ASC,
-                    uss.priority ASC
+           ORDER BY CASE
+             WHEN sm.scrape_status='matched' THEN 0
+             WHEN sm.ext_source_id<>'' AND sm.ext_entry_id<>'' THEN 0
+             WHEN sm.title<>'' OR sm.summary<>'' THEN 1
+             ELSE 2
+           END ASC,
+           uss.priority ASC
          ) AS rn
   FROM union_series_sources uss
   JOIN series us ON us.id=uss.union_series_id AND us.library_id=?
@@ -1450,7 +1455,8 @@ SELECT union_series_id, source_series_id FROM (
 
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO series_metadata(
- series_id,bgm_subject_id,scrape_status,scrape_confidence,scrape_synced_at,
+ series_id,bgm_subject_id,ext_source_id,ext_entry_id,ext_cover_url,ext_cover_path,match_origin,
+ scrape_status,scrape_confidence,scrape_synced_at,
  cover_source,bgm_cover_url,bgm_cover_path,bgm_score,bgm_rank,
  status,status_lock,title,title_lock,title_sort,title_sort_lock,
  summary,summary_lock,reading_direction,reading_direction_lock,
@@ -1462,7 +1468,8 @@ INSERT INTO series_metadata(
  sharing_labels_json,sharing_labels_lock,is_nsfw,nsfw_lock,updated_at
 )
 SELECT
- p.union_series_id,sm.bgm_subject_id,sm.scrape_status,sm.scrape_confidence,sm.scrape_synced_at,
+ p.union_series_id,sm.bgm_subject_id,sm.ext_source_id,sm.ext_entry_id,sm.ext_cover_url,sm.ext_cover_path,sm.match_origin,
+ sm.scrape_status,sm.scrape_confidence,sm.scrape_synced_at,
  sm.cover_source,sm.bgm_cover_url,sm.bgm_cover_path,sm.bgm_score,sm.bgm_rank,
  sm.status,sm.status_lock,sm.title,sm.title_lock,sm.title_sort,sm.title_sort_lock,
  sm.summary,sm.summary_lock,sm.reading_direction,sm.reading_direction_lock,

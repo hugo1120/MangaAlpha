@@ -276,6 +276,11 @@ CREATE TABLE IF NOT EXISTS series_metadata (
   sharing_labels_lock INTEGER NOT NULL DEFAULT 0,
   is_nsfw INTEGER NOT NULL DEFAULT 0,
   nsfw_lock INTEGER NOT NULL DEFAULT 0,
+  ext_source_id TEXT NOT NULL DEFAULT '',
+  ext_entry_id TEXT NOT NULL DEFAULT '',
+  ext_cover_url TEXT NOT NULL DEFAULT '',
+  ext_cover_path TEXT NOT NULL DEFAULT '',
+  match_origin TEXT NOT NULL DEFAULT '',
   updated_at TEXT NOT NULL,
   FOREIGN KEY(series_id) REFERENCES series(id) ON DELETE CASCADE
 );
@@ -629,4 +634,68 @@ CREATE TABLE IF NOT EXISTS archive_password_bindings (
 CREATE INDEX IF NOT EXISTS idx_apb_password ON archive_password_bindings(password_id);
 CREATE INDEX IF NOT EXISTS idx_apb_series ON archive_password_bindings(series_id);
 CREATE INDEX IF NOT EXISTS idx_apb_folder ON archive_password_bindings(library_id, parent_cid);
+
+CREATE TABLE IF NOT EXISTS metadata_repos (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  url TEXT NOT NULL UNIQUE,
+  schema_version TEXT NOT NULL DEFAULT 'mangaalpha-repo-v1',
+  repo_version TEXT NOT NULL DEFAULT '',
+  description TEXT NOT NULL DEFAULT '',
+  homepage TEXT NOT NULL DEFAULT '',
+  raw_json TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_synced_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS metadata_sources (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL DEFAULT '',
+  source_key TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL,
+  schema_type TEXT NOT NULL DEFAULT '',
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  download_url TEXT NOT NULL DEFAULT '',
+  manifest_url TEXT NOT NULL DEFAULT '',
+  release_api_url TEXT NOT NULL DEFAULT '',
+  asset_name TEXT NOT NULL DEFAULT '',
+  compression TEXT NOT NULL DEFAULT '',
+  local_path TEXT NOT NULL DEFAULT '',
+  sidecar_path TEXT NOT NULL DEFAULT '',
+  tag_dict_source_id TEXT NOT NULL DEFAULT '',
+  tag_display_mode TEXT NOT NULL DEFAULT 'zh',
+  nsfw_rule TEXT NOT NULL DEFAULT 'non_h_safe',
+  auto_update TEXT NOT NULL DEFAULT 'manual',
+  online_api_url TEXT NOT NULL DEFAULT '',
+  online_enabled INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  ready INTEGER NOT NULL DEFAULT 0,
+  entry_count INTEGER NOT NULL DEFAULT 0,
+  file_size INTEGER NOT NULL DEFAULT 0,
+  remote_etag TEXT NOT NULL DEFAULT '',
+  remote_last_mod TEXT NOT NULL DEFAULT '',
+  remote_updated_at TEXT NOT NULL DEFAULT '',
+  local_sha256 TEXT NOT NULL DEFAULT '',
+  last_checked_at TEXT NOT NULL DEFAULT '',
+  last_updated_at TEXT NOT NULL DEFAULT '',
+  last_error TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_metadata_sources_repo ON metadata_sources(repo_id);
+CREATE INDEX IF NOT EXISTS idx_metadata_sources_kind ON metadata_sources(kind);
+
+CREATE TABLE IF NOT EXISTS library_metadata_sources (
+  library_id TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  PRIMARY KEY(library_id, source_id)
+);
+CREATE INDEX IF NOT EXISTS idx_lib_meta_sources_prio ON library_metadata_sources(library_id, priority);
+CREATE INDEX IF NOT EXISTS idx_lib_meta_sources_source ON library_metadata_sources(source_id);
 `

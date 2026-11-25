@@ -178,6 +178,11 @@ type AlternateTitle struct {
 type SeriesMetadata struct {
 	SeriesID            string           `json:"seriesId"`
 	BgmSubjectID        *int64           `json:"bgmSubjectId,omitempty"`
+	ExtSourceID         string           `json:"extSourceId,omitempty"`
+	ExtEntryID          string           `json:"extEntryId,omitempty"`
+	ExtCoverURL         string           `json:"extCoverUrl,omitempty"`
+	ExtCoverPath        string           `json:"-"`
+	MatchOrigin         string           `json:"matchOrigin,omitempty"`
 	ScrapeStatus        string           `json:"scrapeStatus"`
 	ScrapeConfidence    float64          `json:"scrapeConfidence"`
 	ScrapeSyncedAt      *string          `json:"scrapeSyncedAt,omitempty"`

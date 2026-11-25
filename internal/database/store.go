@@ -573,6 +573,9 @@ WHERE union_series_id IN (SELECT id FROM series WHERE library_id=?)`, id); err !
 	if _, err := tx.ExecContext(ctx, `DELETE FROM series WHERE library_id=?`, id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM library_metadata_sources WHERE library_id=?`, id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM libraries WHERE id=?`, id); err != nil {
 		return err
 	}

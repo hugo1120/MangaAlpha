@@ -69,6 +69,7 @@ func (s *Server) adminRoutes(r chi.Router) {
 	// Administrator-only management routes
 	r.Group(func(ar chi.Router) {
 		ar.Use(s.requireAdmin)
+		s.metadataRoutes(ar)
 
 		// Multi-user management
 		ar.Get("/users", s.adminListUsers)
@@ -789,6 +790,9 @@ SELECT count(*) FROM scan_runs WHERE library_id=? AND status IN ('queued','runni
 }
 
 func (s *Server) cancelLibraryJobs(ctx context.Context, libraryID string) {
+	if s.metadata != nil {
+		s.metadata.CancelLibrary(libraryID)
+	}
 	if s.scanner != nil {
 		s.scanner.CancelLibrary(ctx, libraryID)
 	}
@@ -1729,7 +1733,7 @@ func (s *Server) bindSeriesBangumi(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "INVALID_SUBJECT", "subjectId must be positive.")
 		return
 	}
-	meta, err := s.bangumi.BindSubject(r.Context(), series, req.SubjectID)
+	meta, err := s.bangumi.BindSubjectWithOrigin(r.Context(), series, req.SubjectID, "manual")
 	if err != nil {
 		if errors.Is(err, bangumi.ErrNSFWBlocked) {
 			writeError(w, http.StatusUnprocessableEntity, "NSFW_BLOCKED", "不支持绑定 NSFW 条目。")

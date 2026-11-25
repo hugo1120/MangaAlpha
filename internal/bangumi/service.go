@@ -61,11 +61,12 @@ type Service struct {
 	schedDone chan struct{}
 	nowFunc   func() time.Time
 
-	mu               sync.Mutex
-	queued           map[string]string
-	activeRunID      string
-	activeStop       context.CancelFunc
-	coverInvalidator func()
+	mu                    sync.Mutex
+	queued                map[string]string
+	activeRunID           string
+	activeStop            context.CancelFunc
+	coverInvalidator      func()
+	metadataArchiveClient func(context.Context) *http.Client
 }
 
 type scrapeJob struct {
@@ -292,7 +293,59 @@ func (s *Service) StartArchiveUpdate() (ArchiveStatus, error) {
 }
 
 func (s *Service) StartArchiveUpdateWithOptions(force bool) (ArchiveStatus, error) {
-	return s.archive.StartOnlineUpdateWithOptions(force)
+	if !s.metadataManagesArchive(s.ctx) {
+		return s.archive.StartOnlineUpdateWithOptions(force)
+	}
+	s.mu.Lock()
+	factory := s.metadataArchiveClient
+	s.mu.Unlock()
+	if factory == nil {
+		return s.ArchiveStatus(), errors.New("metadata archive transport is unavailable")
+	}
+	ctx, status, err := s.archive.beginOnlineUpdate(s.ctx)
+	if err == nil {
+		metaURL := s.archive.MetaURL()
+		go func() {
+			client := factory(ctx)
+			defer client.CloseIdleConnections()
+			_ = s.archive.runOnlineUpdate(ctx, force, metaURL, client)
+		}()
+	}
+	return status, err
+}
+
+const settingArchiveMetadataManaged = "bangumi_archive_metadata_managed"
+
+// SetMetadataArchiveClient supplies the protected transport for a manifest
+// configured through the metadata manager, including later manual updates.
+func (s *Service) SetMetadataArchiveClient(factory func(context.Context) *http.Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.metadataArchiveClient = factory
+}
+
+func (s *Service) metadataManagesArchive(ctx context.Context) bool {
+	managed, _ := s.store.GetSetting(ctx, settingArchiveMetadataManaged)
+	return managed == "true"
+}
+
+// UpdateArchiveFromSource uses the caller's vetted transport for both the manifest
+// and its download URL. The configured source is changed after a successful update.
+func (s *Service) UpdateArchiveFromSource(ctx context.Context, source, customURL string, force bool, client *http.Client) (ArchiveStatus, error) {
+	cfg, err := ResolveArchiveSource(source, customURL)
+	if err != nil {
+		return s.ArchiveStatus(), err
+	}
+	updateCtx, st, err := s.archive.beginOnlineUpdate(ctx)
+	if err != nil {
+		return st, err
+	}
+	force = force || s.archive.MetaURL() != cfg.MetaURL
+	if err := s.archive.runOnlineUpdate(updateCtx, force, cfg.MetaURL, client); err != nil {
+		return s.ArchiveStatus(), err
+	}
+	_, err = s.setArchiveSource(ctx, source, customURL, true)
+	return s.ArchiveStatus(), err
 }
 
 func (s *Service) CancelArchiveUpdate() bool {
@@ -359,10 +412,19 @@ func (s *Service) ArchiveSource(ctx context.Context) ArchiveSourceConfig {
 }
 
 func (s *Service) SetArchiveSource(ctx context.Context, source, customURL string) (ArchiveSourceConfig, error) {
+	return s.setArchiveSource(ctx, source, customURL, false)
+}
+
+func (s *Service) setArchiveSource(ctx context.Context, source, customURL string, managed bool) (ArchiveSourceConfig, error) {
 	oldSource := s.ArchiveSource(ctx).Source
 	cfg, err := ResolveArchiveSource(source, customURL)
 	if err != nil {
 		return ArchiveSourceConfig{}, err
+	}
+	if managed {
+		if err := s.store.SetSetting(ctx, settingArchiveMetadataManaged, "true"); err != nil {
+			return ArchiveSourceConfig{}, err
+		}
 	}
 	if err := s.store.SetSetting(ctx, SettingArchiveSource, cfg.Source); err != nil {
 		return ArchiveSourceConfig{}, err
@@ -373,6 +435,11 @@ func (s *Service) SetArchiveSource(ctx context.Context, source, customURL string
 		}
 	}
 	s.archive.SetMetaURL(cfg.MetaURL)
+	if !managed && s.metadataManagesArchive(ctx) {
+		if err := s.store.SetSetting(ctx, settingArchiveMetadataManaged, "false"); err != nil {
+			return ArchiveSourceConfig{}, err
+		}
+	}
 	s.adaptDefaultArchiveScheduleOnSourceChange(ctx, oldSource, cfg.Source)
 	return cfg, nil
 }
@@ -492,6 +559,10 @@ func (s *Service) BindSubject(
 	series database.Series,
 	subjectID int64,
 ) (database.SeriesMetadata, error) {
+	return s.BindSubjectWithOrigin(ctx, series, subjectID, "manual")
+}
+
+func (s *Service) BindSubjectWithOrigin(ctx context.Context, series database.Series, subjectID int64, origin string) (database.SeriesMetadata, error) {
 	ctx, err := s.catalogContext(ctx, series.ID)
 	if err != nil {
 		return database.SeriesMetadata{}, err
@@ -510,11 +581,39 @@ func (s *Service) BindSubject(
 	cand.Confidence = 1.0
 	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
 	scraped := ToScrapedMetadataWithQuery(series.Name, parsed, cand)
+	scraped.MatchOrigin = origin
 	meta, err := s.store.ApplyScrapedMetadata(ctx, series, scraped)
 	if err == nil {
 		s.invalidateCoverFailures()
 	}
 	return meta, err
+}
+
+// OfflineMatch uses the same archive and confidence threshold as the Bangumi
+// scraper, and leaves the final write to the caller.
+func (s *Service) OfflineMatch(ctx context.Context, series database.Series) (database.ScrapedMetadata, bool, error) {
+	if !s.archive.Ready() {
+		return database.ScrapedMetadata{}, false, nil
+	}
+	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
+	candidates, err := s.archive.Search(ctx, parsed, series.OneShot, 10)
+	if err != nil || len(candidates) == 0 || candidates[0].Confidence < AutoMatchMinConfidence {
+		return database.ScrapedMetadata{}, false, err
+	}
+	return ToScrapedMetadataWithQuery(series.Name, parsed, candidates[0]), true, nil
+}
+
+func (s *Service) OfflineSubject(ctx context.Context, series database.Series, subjectID int64) (database.ScrapedMetadata, bool, error) {
+	if !s.archive.Ready() {
+		return database.ScrapedMetadata{}, false, nil
+	}
+	candidate, found, err := s.archive.SubjectByID(ctx, subjectID)
+	if err != nil || !found {
+		return database.ScrapedMetadata{}, false, err
+	}
+	candidate.Confidence = 1
+	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
+	return ToScrapedMetadataWithQuery(series.Name, parsed, candidate), true, nil
 }
 
 // AutoScrapeOne runs automatic title parsing & matching on a single Series.

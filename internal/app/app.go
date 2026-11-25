@@ -21,6 +21,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
+	"github.com/xJogger/fake-komga-115/internal/extmeta"
 	"github.com/xJogger/fake-komga-115/internal/httpserver"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
@@ -54,6 +55,7 @@ type App struct {
 	tasks      *maintenance.Manager
 	archive    *archive.Service
 	bangumi    *bangumi.Service
+	metadata   *extmeta.Manager
 	updater    *updater.Service
 	diag       *diagnostics.Recorder
 	logger     *slog.Logger
@@ -140,6 +142,31 @@ func New(_ context.Context, options Options) (*App, error) {
 	}
 	thumbnailService.SetBangumiCoverFetcher(bangumiService.FetchCoverBytes)
 
+	proxyURLProvider := func(ctx context.Context) string {
+		proxy, _ := store.GetSetting(ctx, bangumi.SettingProxyURL)
+		return proxy
+	}
+	externalCovers, err := extmeta.NewCoverService(extmeta.CoverConfig{DataDir: dataDir, ProxyURLProvider: proxyURLProvider})
+	var metadataManager *extmeta.Manager
+	if err == nil {
+		metadataManager, err = extmeta.NewManager(store, bangumiService, externalCovers, dataDir, options.Logger, extmeta.ManagerOptions{
+			ProxyURLProvider: proxyURLProvider, ArchiveMetaReader: extmeta.LocalArchiveMetaReader(store),
+		})
+	}
+	if err != nil {
+		_ = bangumiService.Close()
+		archiveService.Close()
+		scanManager.Close()
+		store.Close()
+		return nil, err
+	}
+	thumbnailService.SetExternalCoverFetcher(metadataManager.FetchCover)
+	thumbnailService.SetLocalFirstPageFetcher(func(ctx context.Context, book database.Book) ([]byte, error) {
+		page, err := archiveService.ReadPage(ctx, book, 1)
+		return page.Data, err
+	})
+	metadataManager.StartScheduler()
+
 	coverManager := thumbnail.NewBatchManager(
 		store, archiveService, thumbnailService, options.Logger,
 	)
@@ -179,7 +206,7 @@ func New(_ context.Context, options Options) (*App, error) {
 			Port:           options.Port,
 			TrustedProxies: options.TrustedProxies,
 		}, options.Logger,
-	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager).WithDiagnostics(diagRecorder).WithUpdater(updaterService)
+	).WithServices(webdavManager, bangumiService).WithPipeline(pipelineManager).WithDiagnostics(diagRecorder).WithUpdater(updaterService).WithMetadata(metadataManager)
 
 	rawHandler := handler.Handler()
 	var routes http.Handler = rawHandler
@@ -195,7 +222,7 @@ func New(_ context.Context, options Options) (*App, error) {
 	return &App{
 		server: server, rawHandler: rawHandler, store: store, scanner: scanManager, pipelines: pipelineManager,
 		covers: coverManager, tasks: maintenanceManager, archive: archiveService, bangumi: bangumiService,
-		updater: updaterService, diag: diagRecorder, logger: options.Logger,
+		updater: updaterService, metadata: metadataManager, diag: diagRecorder, logger: options.Logger,
 	}, nil
 }
 
@@ -425,7 +452,11 @@ func (a *App) Shutdown(ctx context.Context) error {
 		Detail:    "HTTP server shutting down",
 	})
 	_ = a.StopLANServer()
-	return a.server.Shutdown(ctx)
+	err := a.server.Shutdown(ctx)
+	if a.metadata != nil {
+		a.metadata.Close()
+	}
+	return err
 }
 
 func (a *App) Close() error {
@@ -436,6 +467,9 @@ func (a *App) Close() error {
 	}
 	if a.pipelines != nil {
 		a.pipelines.Close()
+	}
+	if a.metadata != nil {
+		a.metadata.Close()
 	}
 	a.tasks.Close()
 	a.covers.Close()

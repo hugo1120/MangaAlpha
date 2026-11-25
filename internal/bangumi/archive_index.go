@@ -202,24 +202,27 @@ func (a *ArchiveIndex) StartOnlineUpdate() (ArchiveStatus, error) {
 }
 
 func (a *ArchiveIndex) StartOnlineUpdateWithOptions(force bool) (ArchiveStatus, error) {
-	a.mu.Lock()
-	if a.status.Updating {
-		st := a.status
-		a.mu.Unlock()
-		return st, errors.New("Bangumi archive update is already running")
+	ctx, st, err := a.beginOnlineUpdate(context.Background())
+	if err == nil {
+		go a.runOnlineUpdate(ctx, force, "", nil)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	return st, err
+}
+
+func (a *ArchiveIndex) beginOnlineUpdate(parent context.Context) (context.Context, ArchiveStatus, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.status.Updating {
+		return nil, a.status, errors.New("Bangumi archive update is already running")
+	}
+	ctx, cancel := context.WithCancel(parent)
 	a.cancel = cancel
 	a.status.Updating = true
 	a.status.Phase = "fetching_metadata"
 	a.status.Downloaded = 0
 	a.status.TotalBytes = 0
 	a.status.LastError = ""
-	st := a.status
-	a.mu.Unlock()
-
-	go a.runOnlineUpdate(ctx, force)
-	return st, nil
+	return ctx, a.status, nil
 }
 
 func (a *ArchiveIndex) CancelUpdate() bool {
@@ -240,11 +243,16 @@ type latestDumpMeta struct {
 	Size               int64  `json:"size"`
 }
 
-func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool) {
+func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool, metaURL string, override *http.Client) (finishErr error) {
 	client, proxyRaw := a.clientAndProxy()
+	if override != nil {
+		client = override
+	}
+	if metaURL == "" {
+		metaURL = a.MetaURL()
+	}
 	started := time.Now()
 	var (
-		finishErr  error
 		resultCode = "updated"
 		dumpName   string
 	)
@@ -252,6 +260,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool) {
 		nowStr := time.Now().UTC().Format(time.RFC3339)
 		a.mu.Lock()
 		a.status.Updating = false
+		a.cancel()
 		a.cancel = nil
 		a.status.LastCheckAt = nowStr
 		cb := a.onUpdateDone
@@ -298,7 +307,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool) {
 		}
 	}()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.MetaURL(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metaURL, nil)
 	if err != nil {
 		finishErr = err
 		return
@@ -432,6 +441,7 @@ func (a *ArchiveIndex) runOnlineUpdate(ctx context.Context, force bool) {
 	if a.logger != nil {
 		a.logger.Info("Bangumi offline archive updated", "dump", meta.Name)
 	}
+	return nil
 }
 
 type archiveSubjectLine struct {

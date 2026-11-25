@@ -335,23 +335,19 @@ func (s *Store) ApplyScrapedMetadata(
 	extCoverPath := strings.TrimSpace(incoming.ExtCoverPath)
 	matchOrigin := strings.TrimSpace(incoming.MatchOrigin)
 
-	if incoming.SubjectID > 0 || extSourceID == "" {
-		subj := incoming.SubjectID
-		current.BgmSubjectID = &subj
-	}
+	subj := incoming.SubjectID
+	current.BgmSubjectID = &subj
 	if extSourceID != "" {
-		if current.ExtSourceID != extSourceID || current.ExtEntryID != extEntryID ||
-			(extCoverURL != "" && current.ExtCoverURL != extCoverURL) {
+		if current.ExtSourceID != extSourceID || current.ExtEntryID != extEntryID || current.ExtCoverURL != extCoverURL {
 			current.ExtCoverPath = ""
 		}
-		current.ExtSourceID = extSourceID
-		current.ExtEntryID = extEntryID
-	}
-	if extCoverURL != "" {
-		if current.ExtCoverURL != extCoverURL {
-			current.ExtCoverPath = ""
+		current.ExtSourceID, current.ExtEntryID, current.ExtCoverURL = extSourceID, extEntryID, extCoverURL
+		current.BgmCoverURL, current.BgmCoverPath = "", ""
+	} else if incoming.SubjectID > 0 {
+		current.ExtSourceID, current.ExtEntryID, current.ExtCoverURL, current.ExtCoverPath = "", "", "", ""
+		if prevSubjectID != incoming.SubjectID {
+			current.BgmCoverURL, current.BgmCoverPath = "", ""
 		}
-		current.ExtCoverURL = extCoverURL
 	}
 	if extCoverPath != "" {
 		current.ExtCoverPath = extCoverPath
@@ -717,9 +713,6 @@ func (s *Store) ClearSeriesExternalBinding(ctx context.Context, series Series) (
 		current.ScrapeStatus = ScrapeStatusNone
 		current.ScrapeConfidence = 0
 		current.MatchOrigin = ""
-		if !current.NSFWLock {
-			current.IsNSFW = false
-		}
 		if !current.TitleLock {
 			current.Title = series.Name
 		}
@@ -732,6 +725,16 @@ func (s *Store) ClearSeriesExternalBinding(ctx context.Context, series Series) (
 	}
 	return s.SeriesMetadataByID(ctx, series)
 }
+
+type automaticMetadataKey struct{}
+
+// WithAutomaticMetadata protects a batch write from changes to visibility,
+// manual bindings, and field locks that arrive while a match is in flight.
+func WithAutomaticMetadata(ctx context.Context) context.Context {
+	return context.WithValue(ctx, automaticMetadataKey{}, true)
+}
+
+var ErrMetadataChanged = errors.New("series metadata changed during automatic scraping")
 
 func (s *Store) saveSeriesMetadata(ctx context.Context, m SeriesMetadata, now string) error {
 	genresJSON, _ := json.Marshal(cleanStringSlice(m.Genres))
@@ -746,6 +749,24 @@ func (s *Store) saveSeriesMetadata(ctx context.Context, m SeriesMetadata, now st
 		return err
 	}
 	defer tx.Rollback()
+
+	if automated, _ := ctx.Value(automaticMetadataKey{}).(bool); automated {
+		var origin, updatedAt string
+		err := tx.QueryRowContext(ctx, `
+SELECT coalesce(sm.match_origin,''),coalesce(sm.updated_at,'')
+FROM series s JOIN libraries l ON l.id=s.library_id
+LEFT JOIN series_metadata sm ON sm.series_id=s.id
+WHERE s.id=? AND l.enabled=1 AND NOT EXISTS (
+ SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id
+)`, m.SeriesID).Scan(&origin, &updatedAt)
+		if errors.Is(err, sql.ErrNoRows) || origin == "manual" || origin == "agent" ||
+			err == nil && updatedAt != "" && !parseTime(updatedAt).Equal(m.UpdatedAt) {
+			return ErrMetadataChanged
+		}
+		if err != nil {
+			return err
+		}
+	}
 
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO series_metadata(

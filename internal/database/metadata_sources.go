@@ -201,6 +201,19 @@ FROM metadata_repos WHERE id=?`, strings.TrimSpace(id))
 
 // UpsertMetadataRepo creates or updates a metadata repository record.
 func (s *Store) UpsertMetadataRepo(ctx context.Context, repo MetadataRepo) (MetadataRepo, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MetadataRepo{}, err
+	}
+	defer tx.Rollback()
+	saved, err := upsertMetadataRepo(ctx, tx, repo)
+	if err != nil {
+		return MetadataRepo{}, err
+	}
+	return saved, tx.Commit()
+}
+
+func upsertMetadataRepo(ctx context.Context, tx *sql.Tx, repo MetadataRepo) (MetadataRepo, error) {
 	url := strings.TrimSpace(repo.URL)
 	if url == "" {
 		return MetadataRepo{}, errors.New("metadata repo url is required")
@@ -219,12 +232,6 @@ func (s *Store) UpsertMetadataRepo(ctx context.Context, repo MetadataRepo) (Meta
 	if createdAt == "" {
 		createdAt = now
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return MetadataRepo{}, err
-	}
-	defer tx.Rollback()
 
 	id := strings.TrimSpace(repo.ID)
 	if id == "" {
@@ -268,10 +275,44 @@ ON CONFLICT(id) DO UPDATE SET
 		return MetadataRepo{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
+	return scanMetadataRepoRow(tx.QueryRowContext(ctx, `
+SELECT `+metadataRepoColumns+` FROM metadata_repos WHERE id=?`, id))
+}
+
+// MetadataRepoSourceUpdate carries source metadata and an optional manifest-local
+// dictionary key. The key can refer to a dictionary staged earlier in the refresh.
+type MetadataRepoSourceUpdate struct {
+	Source           MetadataSource
+	TagDictionaryKey string
+}
+
+// UpsertMetadataRepoWithSources commits a repository refresh as one transaction.
+func (s *Store) UpsertMetadataRepoWithSources(ctx context.Context, repo MetadataRepo, sources []MetadataRepoSourceUpdate) (MetadataRepo, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return MetadataRepo{}, err
 	}
-	return s.GetMetadataRepo(ctx, id)
+	defer tx.Rollback()
+	repo, err = upsertMetadataRepo(ctx, tx, repo)
+	if err != nil {
+		return MetadataRepo{}, err
+	}
+	for _, item := range sources {
+		src := item.Source
+		src.RepoID = repo.ID
+		if item.TagDictionaryKey != "" {
+			err := tx.QueryRowContext(ctx, `
+SELECT id FROM metadata_sources WHERE repo_id=? AND source_key=? AND kind='tag_dictionary'`,
+				repo.ID, item.TagDictionaryKey).Scan(&src.TagDictSourceID)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return MetadataRepo{}, err
+			}
+		}
+		if _, err := upsertMetadataSource(ctx, tx, src); err != nil {
+			return MetadataRepo{}, err
+		}
+	}
+	return repo, tx.Commit()
 }
 
 // DeleteMetadataRepo deletes a metadata repository and cascades deletion to its sources
@@ -342,6 +383,19 @@ FROM metadata_sources WHERE id=?`, strings.TrimSpace(id))
 
 // UpsertMetadataSource creates or updates a metadata source record.
 func (s *Store) UpsertMetadataSource(ctx context.Context, src MetadataSource) (MetadataSource, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MetadataSource{}, err
+	}
+	defer tx.Rollback()
+	saved, err := upsertMetadataSource(ctx, tx, src)
+	if err != nil {
+		return MetadataSource{}, err
+	}
+	return saved, tx.Commit()
+}
+
+func upsertMetadataSource(ctx context.Context, tx *sql.Tx, src MetadataSource) (MetadataSource, error) {
 	kind := strings.TrimSpace(src.Kind)
 	if kind == "" {
 		return MetadataSource{}, errors.New("metadata source kind is required")
@@ -371,12 +425,6 @@ func (s *Store) UpsertMetadataSource(ctx context.Context, src MetadataSource) (M
 	if createdAt == "" {
 		createdAt = now
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return MetadataSource{}, err
-	}
-	defer tx.Rollback()
 
 	id := strings.TrimSpace(src.ID)
 	if id == "" {
@@ -458,10 +506,8 @@ ON CONFLICT(id) DO UPDATE SET
 		return MetadataSource{}, err
 	}
 
-	if err := tx.Commit(); err != nil {
-		return MetadataSource{}, err
-	}
-	return s.GetMetadataSource(ctx, id)
+	return scanMetadataSourceRow(tx.QueryRowContext(ctx, `
+SELECT `+metadataSourceColumns+` FROM metadata_sources WHERE id=?`, id))
 }
 
 // UpdateMetadataSourceConfig updates user-configurable fields of an existing metadata source.

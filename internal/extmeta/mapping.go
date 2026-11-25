@@ -560,11 +560,13 @@ func dedupeNonEmpty(vals ...string) []string {
 	return out
 }
 
-func firstNonEmpty(a, b string) string {
-	if strings.TrimSpace(a) != "" {
-		return a
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
 	}
-	return b
+	return ""
 }
 
 func fmtErrorWrap(prefix string, err error) error {

@@ -497,7 +497,7 @@ func (s *Server) agentBatchSeries(w http.ResponseWriter, r *http.Request) {
 				})
 				continue
 			}
-			meta, bErr := s.bangumi.BindSubject(ctx, series, op.SubjectID)
+			meta, bErr := s.bangumi.BindSubjectWithOrigin(ctx, series, op.SubjectID, "agent")
 			if bErr != nil {
 				failed++
 				results = append(results, map[string]any{

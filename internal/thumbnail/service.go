@@ -29,6 +29,8 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
+type ExternalCoverFetcher func(ctx context.Context, sourceID, entryID, coverURL string) ([]byte, string, error)
+
 type CoverFetcher func(ctx context.Context, coverURL string, subjectID int64) ([]byte, error)
 
 const (
@@ -77,6 +79,11 @@ type Service struct {
 	bgmFailures map[string]time.Time
 	bgmEpoch    uint64
 
+	externalMu       sync.RWMutex
+	externalFetcher  ExternalCoverFetcher
+	localPageFetcher func(context.Context, database.Book) ([]byte, error)
+	localCoverFlight singleflight.Group
+
 	operationMu sync.RWMutex
 	inflightMu  sync.Mutex
 	inflight    map[string]struct{}
@@ -104,6 +111,20 @@ func New(store *database.Store, root string, logger *slog.Logger) (*Service, err
 
 func (s *Service) SetBangumiCoverFetcher(fetcher CoverFetcher) {
 	s.bgmFetcher = fetcher
+}
+
+func (s *Service) SetExternalCoverFetcher(fetcher ExternalCoverFetcher) {
+	s.externalMu.Lock()
+	defer s.externalMu.Unlock()
+	s.externalFetcher = fetcher
+}
+
+// SetLocalFirstPageFetcher enables on-demand local cover generation after an
+// external cover request fails.
+func (s *Service) SetLocalFirstPageFetcher(fetcher func(context.Context, database.Book) ([]byte, error)) {
+	s.externalMu.Lock()
+	defer s.externalMu.Unlock()
+	s.localPageFetcher = fetcher
 }
 
 func (s *Service) MaybeGenerate(book database.Book, pageNumber int, page []byte) {
@@ -203,12 +224,29 @@ func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) 
 		return Data{}, false, err
 	}
 	seriesID = series.ID
-	if data, ok, preferOnlyBgm := s.getBangumiCoverIfPreferred(ctx, seriesID); ok {
-		return data, true, nil
-	} else if preferOnlyBgm {
+	preferred, ok, preferOnlyBgm, externalAttempted := s.getPreferredCover(ctx, seriesID)
+	if ok {
+		if externalAttempted {
+			if _, err := s.store.SeriesByID(ctx, seriesID); err != nil {
+				return Data{}, false, err
+			}
+		}
+		return preferred, true, nil
+	}
+	if preferOnlyBgm {
 		return Data{}, false, nil
 	}
 
+	if data, ok, err := s.getBookCover(ctx, seriesID); ok || err != nil {
+		return data, ok, err
+	}
+	if externalAttempted {
+		return s.getLocalFirstPageCover(ctx, seriesID)
+	}
+	return Data{}, false, nil
+}
+
+func (s *Service) getBookCover(ctx context.Context, seriesID string) (Data, bool, error) {
 	s.operationMu.RLock()
 	defer s.operationMu.RUnlock()
 
@@ -224,6 +262,40 @@ func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) 
 		}
 	}
 	return Data{}, false, nil
+}
+
+func (s *Service) getLocalFirstPageCover(ctx context.Context, seriesID string) (Data, bool, error) {
+	s.externalMu.RLock()
+	fetcher := s.localPageFetcher
+	s.externalMu.RUnlock()
+	if fetcher == nil {
+		return Data{}, false, nil
+	}
+	if _, err := s.store.SeriesByID(ctx, seriesID); err != nil {
+		return Data{}, false, err
+	}
+	first, err := s.store.FirstBookInSeries(ctx, seriesID)
+	if err != nil {
+		return Data{}, false, nil
+	}
+	library, err := s.store.LibraryBasic(ctx, first.LibraryID)
+	if err != nil || library.ProviderType != database.ProviderLocal {
+		return Data{}, false, nil
+	}
+	_, err, _ = s.localCoverFlight.Do(first.ID, func() (any, error) {
+		page, err := fetcher(ctx, first)
+		if err != nil {
+			return nil, err
+		}
+		return nil, s.Generate(ctx, first, page)
+	})
+	if err != nil {
+		return Data{}, false, nil
+	}
+	if _, err := s.store.SeriesByID(ctx, seriesID); err != nil {
+		return Data{}, false, err
+	}
+	return s.getBookCover(ctx, seriesID)
 }
 
 func (s *Service) getOwnBookCover(ctx context.Context, seriesID string, includeHidden bool) (Data, bool, error) {
@@ -402,20 +474,31 @@ func (s *Service) InvalidateBangumiCoverFailures() {
 	s.bgmEpoch++
 }
 
-func (s *Service) getBangumiCoverIfPreferred(ctx context.Context, seriesID string) (Data, bool, bool) {
+func (s *Service) getPreferredCover(ctx context.Context, seriesID string) (data Data, ok, onlyBangumi, attemptedExternal bool) {
 	var (
-		bgmID       sql.NullInt64
-		coverSource string
-		coverPath   string
+		bgmID                       sql.NullInt64
+		coverSource                 string
+		coverPath                   string
+		sourceID, entryID, coverURL string
 	)
 	err := s.store.DB().QueryRowContext(ctx, `
-SELECT bgm_subject_id,cover_source,bgm_cover_path
-FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverPath)
-	if err != nil || !bgmID.Valid || bgmID.Int64 <= 0 {
-		return Data{}, false, false
+SELECT bgm_subject_id,cover_source,bgm_cover_path,ext_source_id,ext_entry_id,ext_cover_url
+FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverPath, &sourceID, &entryID, &coverURL)
+	if err != nil || coverSource == database.CoverSourceBook {
+		return Data{}, false, false, false
 	}
-	if coverSource == database.CoverSourceBook {
-		return Data{}, false, false
+	s.externalMu.RLock()
+	fetcher := s.externalFetcher
+	s.externalMu.RUnlock()
+	if fetcher != nil && sourceID != "" && entryID != "" && coverURL != "" {
+		raw, mediaType, err := fetcher(ctx, sourceID, entryID, coverURL)
+		if err == nil && len(raw) > 0 {
+			return Data{Bytes: raw, MediaType: mediaType}, true, false, true
+		}
+		return Data{}, false, false, true
+	}
+	if !bgmID.Valid || bgmID.Int64 <= 0 {
+		return Data{}, false, false, false
 	}
 	forceOnlyBgm := coverSource == database.CoverSourceBangumi
 	subjectID := bgmID.Int64
@@ -430,12 +513,12 @@ FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &c
 		if s.logger != nil && !errors.Is(fetchErr, errBangumiCoverUnavailable) {
 			s.logger.Debug("lazy fetch Bangumi cover failed", "series", seriesID, "subject", subjectID, "error", fetchErr)
 		}
-		return Data{}, false, forceOnlyBgm
+		return Data{}, false, forceOnlyBgm, false
 	}
 	if coverPath != expectedFile {
 		_ = s.store.SetSeriesBgmCoverPath(ctx, seriesID, subjectID, expectedFile)
 	}
-	return data, true, forceOnlyBgm
+	return data, true, forceOnlyBgm, false
 }
 
 func (s *Service) BangumiStats(ctx context.Context) (Stats, error) {

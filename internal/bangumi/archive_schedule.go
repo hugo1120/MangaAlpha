@@ -289,6 +289,10 @@ func (s *Service) archiveScheduleLoop() {
 }
 
 func (s *Service) checkArchiveScheduleOnce() {
+	// External subscriptions have their own cadence, including manual-only.
+	if s.metadataManagesArchive(s.ctx) {
+		return
+	}
 	now := s.now()
 	sched := s.ArchiveSchedule(s.ctx)
 	slot, due := archiveScheduleDueSlot(sched, now)

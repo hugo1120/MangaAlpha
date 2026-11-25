@@ -135,11 +135,11 @@ func ParseRepoManifest(data []byte) (*RepoManifest, error) {
 			"homepage":      src.Homepage,
 			"contributeUrl": src.ContributeURL,
 		} {
-			if rawURL == "" {
+			if rawURL == "" || field == "manifestUrl" && src.Kind == KindBangumiArchive && (rawURL == "zh_cn" || rawURL == "official") {
 				continue
 			}
-			if _, err := validateHTTPURL(rawURL); err != nil {
-				return nil, fmt.Errorf("source %q invalid %s: %w", src.ID, field, err)
+			if u, err := validateHTTPURL(rawURL); err != nil || u.User != nil {
+				return nil, fmt.Errorf("source %q invalid %s: %w", src.ID, field, ErrInvalidURL)
 			}
 		}
 	}

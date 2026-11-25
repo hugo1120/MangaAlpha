@@ -49,6 +49,7 @@ var circuitBreakerBackoffs = []time.Duration{
 type CoverConfig struct {
 	DataDir          string
 	Client           *http.Client
+	ProxyURLProvider func(context.Context) string
 	RequestsPerSec   float64
 	Burst            int
 	MaxConcurrent    int
@@ -82,6 +83,7 @@ type negativeEntry struct {
 type CoverService struct {
 	baseDir          string
 	client           *http.Client
+	proxyURLProvider func(context.Context) string
 	limiter          *rate.Limiter
 	sem              chan struct{}
 	maxImageBytes    int64
@@ -139,6 +141,7 @@ func NewCoverService(cfg CoverConfig) (*CoverService, error) {
 	return &CoverService{
 		baseDir:          baseDir,
 		client:           client,
+		proxyURLProvider: cfg.ProxyURLProvider,
 		limiter:          rate.NewLimiter(rate.Limit(rps), burst),
 		sem:              make(chan struct{}, maxConc),
 		maxImageBytes:    maxBytes,
@@ -284,7 +287,12 @@ func (c *CoverService) fetchValidateAndCache(
 	req.Header.Set("User-Agent", repoUserAgent)
 	req.Header.Set("Accept", "image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8")
 
-	resp, err := c.client.Do(req)
+	client := c.client
+	if c.proxyURLProvider != nil {
+		client = NewSafeHTTPClient(c.proxyURLProvider(ctx), 20*time.Second)
+		defer client.CloseIdleConnections()
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return CoverData{}, err

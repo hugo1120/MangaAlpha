@@ -29,6 +29,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/cache"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
+	"github.com/xJogger/fake-komga-115/internal/extmeta"
 	"github.com/xJogger/fake-komga-115/internal/maintenance"
 	"github.com/xJogger/fake-komga-115/internal/oneonefive"
 	"github.com/xJogger/fake-komga-115/internal/pipeline"
@@ -46,6 +47,7 @@ type Server struct {
 	client         *oneonefive.Client
 	webdav         *webdav.Manager
 	bangumi        *bangumi.Service
+	metadata       *extmeta.Manager
 	scanner        *scanner.Manager
 	pipelines      *pipeline.Manager
 	cache          *cache.Manager
@@ -106,6 +108,11 @@ func New(
 		web:            template.Must(template.ParseFS(staticFiles, "static/web_*.html")),
 	}
 	s.router = s.routes()
+	return s
+}
+
+func (s *Server) WithMetadata(manager *extmeta.Manager) *Server {
+	s.metadata = manager
 	return s
 }
 

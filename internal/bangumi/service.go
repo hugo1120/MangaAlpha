@@ -66,6 +66,7 @@ type Service struct {
 	activeRunID           string
 	activeStop            context.CancelFunc
 	coverInvalidator      func()
+	userCoverInvalidator  func(string)
 	metadataArchiveClient func(context.Context) *http.Client
 }
 
@@ -366,12 +367,32 @@ func (s *Service) SetCoverCacheInvalidator(invalidate func()) {
 	s.coverInvalidator = invalidate
 }
 
+func (s *Service) SetUserCoverCacheInvalidator(invalidate func(string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.userCoverInvalidator = invalidate
+}
+
 func (s *Service) invalidateCoverFailures() {
 	s.mu.Lock()
 	invalidate := s.coverInvalidator
 	s.mu.Unlock()
 	if invalidate != nil {
 		invalidate()
+	}
+}
+
+func (s *Service) invalidateUserCoverFailures(userID string) {
+	s.mu.Lock()
+	userInvalidate := s.userCoverInvalidator
+	globalInvalidate := s.coverInvalidator
+	s.mu.Unlock()
+	if userInvalidate != nil {
+		userInvalidate(userID)
+		return
+	}
+	if globalInvalidate != nil {
+		globalInvalidate()
 	}
 }
 

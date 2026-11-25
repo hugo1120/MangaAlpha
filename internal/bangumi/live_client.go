@@ -22,10 +22,15 @@ import (
 )
 
 var (
-	ErrNSFWBlocked      = errors.New("NSFW Bangumi subjects are disabled")
-	ErrSubjectNotFound  = errors.New("Bangumi subject not found")
-	ErrCoverUnavailable = errors.New("Bangumi cover unavailable")
+	ErrNSFWBlocked            = errors.New("NSFW Bangumi subjects are disabled")
+	ErrSubjectNotFound        = errors.New("Bangumi subject not found")
+	ErrCoverUnavailable error = coverUnavailableError{}
 )
+
+type coverUnavailableError struct{}
+
+func (coverUnavailableError) Error() string          { return "Bangumi cover unavailable" }
+func (coverUnavailableError) CoverUnavailable() bool { return true }
 
 type LiveClient struct {
 	baseURL      string

@@ -183,7 +183,7 @@ func (r *Recorder) shouldKeep(ev Event) bool {
 	switch ev.Stage {
 	case "startup", "shutdown", "mode", "lan_server", "scan_start", "scan_done",
 		"archive_fallback", "bangumi_archive", "android_service", "android_lan",
-		"extmeta_repo", "extmeta_sync":
+		"extmeta_repo", "extmeta_sync", "extmeta_scrape":
 		return true
 	default:
 		return false
@@ -394,11 +394,19 @@ var allowedMetaKeys = map[string]bool{
 	"httpStatus":     true,
 	"kind":           true,
 	"phase":          true,
+	"mode":           true,
+	"allowOnline":    true,
+	"total":          true,
+	"matched":        true,
+	"mapped":         true,
+	"unmatched":      true,
+	"failed":         true,
 }
 
 var allowedMetaEnums = map[string][]string{
 	"kind":  {"bangumi_archive", "offline_sqlite", "tag_dictionary", "mapping_pack"},
 	"phase": {"downloading", "indexing", "syncing"},
+	"mode":  {"incremental", "retry_unmatched", "force"},
 }
 
 func normalizeEvent(ev Event) Event {

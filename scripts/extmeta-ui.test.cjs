@@ -353,7 +353,7 @@ function loadAdminScraperContext({ apiImpl, confirmResult = true, stateInit = {}
   });
 
   const exports = vm.runInContext(
-    appSource.slice(start, end) + '\n({ renderAdminBangumi, paintAdminBangumi, openExtMetaSourceModal, openLibraryChainModal, openMappingExportPreviewModal });',
+    appSource.slice(start, end) + '\n({ renderAdminBangumi, paintAdminBangumi, openExtMetaSourceModal, openExtMetaAddSourceModal, openLibraryChainModal, openMappingExportPreviewModal });',
     ctx,
   );
   return {
@@ -711,9 +711,8 @@ test('multi-source batch scrape defaults allowOnline=false and polls ONLY while 
   assert.match(h.body.innerHTML, /building_sidecar/);
   assert.match(h.body.innerHTML, /50%/);
 
-  // Batch scrape defaults to allowOnline = false
-  const allowOnlineCb = h.doc.getElementById('extmeta-batch-online');
-  assert.equal(allowOnlineCb.checked, false);
+  // Batch scrape hides extmeta-batch-online when no enabled offline_sqlite has onlineApiUrl and defaults allowOnline = false
+  assert.equal(h.doc.getElementById('extmeta-batch-online'), null);
 
   h.doc.getElementById('extmeta-batch-lib').value = 'lib-1';
   h.doc.getElementById('extmeta-batch-mode').value = 'retry_unmatched';
@@ -948,6 +947,8 @@ test('series match modal switches to ready external source, queries candidates, 
       modalSubhead.innerHTML = opts.subheadHTML || '';
       modalBody.innerHTML = opts.bodyHTML || '';
       modalFoot.innerHTML = opts.footHTML || '';
+      const coverStart = doc.getElementById('cover-start');
+      if (coverStart && !coverStart.classList) coverStart.classList = { toggle() {} };
       if (opts.onMount) opts.onMount(modalBody);
     },
     closeModal: () => {},
@@ -1322,4 +1323,333 @@ test('unified scrape runs table merges, deduplicates, sorts descending, and canc
   requests.length = 0;
   await bgmCancelBtn.onclick();
   assert.deepEqual(requests[0], ['/admin/api/bangumi/runs/bgm-run-active/cancel', 'POST']);
+});
+
+test('library card scrape button renders as 刮削 and calls unified metadata scrape endpoint', async () => {
+  const libStart = appSource.indexOf('  async function renderAdminLibraries(');
+  const libEnd = appSource.indexOf('  async function browse115Drawer(', libStart);
+  assert.ok(libStart >= 0 && libEnd > libStart, 'expected renderAdminLibraries boundaries');
+
+  const { doc, makeContainer } = createFakeDOM();
+  const body = makeContainer('admin-tab-body');
+  const modalSubhead = makeContainer('modal-subhead');
+  const modalBody = makeContainer('modal-body');
+  const modalFoot = makeContainer('modal-foot');
+  const requests = [];
+  const toasts = [];
+  const navigated = [];
+
+  const libsFixture = [
+    { id: 'lib-normal', name: '普通本地库', providerType: 'local', rootPath: '/manga', enabled: true, seriesCount: 12, bookCount: 34, comicBytes: 1024 },
+    { id: 'lib-union', name: '漫画联合库', providerType: 'union', enabled: true, seriesCount: 20, bookCount: 50, comicBytes: 2048, unionLayers: [] },
+  ];
+
+  const ctx = vm.createContext({
+    document: doc,
+    navigator: { userAgent: 'Mozilla/5.0' },
+    CSS: { escape: (v) => String(v) },
+    WEEKDAY_NAMES: ['周日', '周一', '周二', '周三', '周四', '周五', '周六'],
+    state: { auth: { userId: 'admin', isAdmin: true }, libraries: [] },
+    esc: (v) => (v == null ? '' : String(v)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')),
+    fmtBytes: (n) => `${Number(n || 0)} B`,
+    fmtTime: (t) => t || '—',
+    providerLabel: (p) => p || 'local',
+    formatScheduleSummary: () => '',
+    toast: (msg, kind = 'ok') => toasts.push({ msg, kind }),
+    confirmModal: async () => true,
+    openModal: (opts) => {
+      modalSubhead.innerHTML = opts.subheadHTML || '';
+      modalBody.innerHTML = opts.bodyHTML || '';
+      modalFoot.innerHTML = opts.footHTML || '';
+      const coverStart = doc.getElementById('cover-start');
+      if (coverStart && !coverStart.classList) coverStart.classList = { toggle() {} };
+      if (opts.onMount) opts.onMount(modalBody);
+    },
+    closeModal: () => {},
+    navigate: (path) => navigated.push(path),
+    browse115Drawer: () => {},
+    browseLocalDrawer: () => {},
+    browseWebDAVDrawer: () => {},
+    api: async (url, opts = {}) => {
+      requests.push([url, opts.method || 'GET', opts.body ? JSON.parse(JSON.stringify(opts.body)) : null]);
+      if (url === '/admin/api/libraries') return libsFixture;
+      if (url === '/admin/api/webdav-accounts') return [];
+      if (url === '/admin/api/schedules') return { timezone: 'Asia/Shanghai', schedules: {} };
+      return {};
+    },
+  });
+
+  const renderAdminLibraries = vm.runInContext(
+    appSource.slice(libStart, libEnd) + '\nrenderAdminLibraries;',
+    ctx,
+  );
+  await renderAdminLibraries(body);
+
+  assert.match(body.innerHTML, /data-lib-bgm="lib-normal">刮削<\/button>/);
+  assert.match(body.innerHTML, /data-lib-bgm="lib-union">刮削<\/button>/);
+  assert.doesNotMatch(body.innerHTML, /刮削 Bangumi/);
+
+  requests.length = 0;
+  for (const libId of ['lib-normal', 'lib-union']) {
+    const btn = body.querySelector(`button[data-lib-bgm="${libId}"]`);
+    assert.ok(btn, `expected scrape button for ${libId}`);
+    await btn.onclick();
+  }
+
+  assert.deepEqual(requests, [
+    ['/admin/api/metadata/scrape', 'POST', { libraryId: 'lib-normal', mode: 'retry_unmatched', allowOnline: false }],
+    ['/admin/api/metadata/scrape', 'POST', { libraryId: 'lib-union', mode: 'retry_unmatched', allowOnline: false }],
+  ]);
+  assert.deepEqual(toasts, [
+    { msg: '已启动本库元数据刮削', kind: 'ok' },
+    { msg: '已启动本库元数据刮削', kind: 'ok' },
+  ]);
+  assert.deepEqual(navigated, ['/admin?tab=bangumi', '/admin?tab=bangumi']);
+
+  // Schedule & batch cover modals use neutral multi-source copy while preserving ids/payload keys
+  body.querySelector('button[data-lib-schedule="lib-normal"]').onclick();
+  assert.match(modalBody.innerHTML, /若未准备可用的离线元数据索引库，将自动跳过元数据刮削与补封面；任一扫库失败则中止后续步骤。/);
+  assert.match(modalBody.innerHTML, /扫库成功后自动执行元数据刮削（增量匹配新作品）/);
+  assert.ok(doc.getElementById('sch-bgm'));
+
+  const coverBtn = body.querySelector('button[data-lib-cover="lib-normal"]');
+  coverBtn.dataset = { provider: coverBtn.getAttribute('data-provider'), libCover: 'lib-normal' };
+  coverBtn.onclick();
+  assert.match(modalBody.innerHTML, /只读首卷第一页生成缩略图，不改变元数据绑定或封面显示偏好。/);
+  assert.match(modalBody.innerHTML, /仅补未匹配元数据且缺有效封面的系列/);
+  assert.ok(doc.getElementById('cover-unbound'));
+});
+
+test('extmeta-batch-online is hidden unless an enabled offline_sqlite source has onlineApiUrl', async () => {
+  const requests = [];
+  let activeOverview = sampleOverview();
+  const h = loadAdminScraperContext({
+    apiImpl: async (url, opts = {}) => {
+      requests.push([url, opts.method || 'GET', opts.body ? JSON.parse(JSON.stringify(opts.body)) : null]);
+      if (url === '/admin/api/bangumi/status') return sampleBangumiStatus();
+      if (url.startsWith('/admin/api/bangumi/runs')) return [];
+      if (url === '/admin/api/libraries') return sampleLibraries;
+      if (url.startsWith('/admin/api/bangumi/tracker')) return {};
+      if (url === '/admin/api/metadata/overview') return activeOverview;
+      if (url === '/admin/api/metadata/scrape-runs') return [];
+      return {};
+    },
+  });
+
+  // 1. Disabled offline_sqlite with onlineApiUrl + tag_dictionary with onlineApiUrl => still hidden
+  activeOverview = sampleOverview({
+    sources: [
+      {
+        id: 'src-dict-online',
+        kind: 'tag_dictionary',
+        name: '词典',
+        enabled: true,
+        onlineApiUrl: 'https://api.example.test/dict',
+      },
+      {
+        id: 'src-sqlite-disabled',
+        kind: 'offline_sqlite',
+        name: '停用离线库',
+        enabled: false,
+        onlineEnabled: true,
+        onlineApiUrl: 'https://api.example.test/lookup',
+      },
+      {
+        id: 'src-sqlite-online-opted-out',
+        kind: 'offline_sqlite',
+        name: '未开启在线补全的离线库',
+        enabled: true,
+        ready: true,
+        onlineEnabled: false,
+        onlineApiUrl: 'https://api.example.test/lookup',
+      },
+    ],
+  });
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, activeOverview, []);
+  assert.equal(h.doc.getElementById('extmeta-batch-online'), null);
+  await h.doc.getElementById('extmeta-batch-start').onclick();
+  await flushMicrotasks();
+  assert.deepEqual(requests[0], [
+    '/admin/api/metadata/scrape',
+    'POST',
+    { libraryId: '', mode: 'incremental', allowOnline: false },
+  ]);
+
+  // 2. Enabled offline_sqlite with onlineEnabled=true and onlineApiUrl => checkbox shown, defaults unchecked, can toggle true
+  requests.length = 0;
+  activeOverview = sampleOverview({
+    sources: [
+      {
+        id: 'src-sqlite-online',
+        kind: 'offline_sqlite',
+        name: '支持在线图库',
+        enabled: true,
+        ready: true,
+        onlineEnabled: true,
+        onlineApiUrl: 'https://api.example.test/lookup',
+      },
+    ],
+  });
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, activeOverview, []);
+  const cb = h.doc.getElementById('extmeta-batch-online');
+  assert.ok(cb, 'expected extmeta-batch-online checkbox when enabled offline_sqlite has onlineApiUrl');
+  assert.equal(cb.checked, false);
+
+  cb.checked = true;
+  cb.onchange();
+  await h.doc.getElementById('extmeta-batch-start').onclick();
+  await flushMicrotasks();
+  assert.deepEqual(requests[0], [
+    '/admin/api/metadata/scrape',
+    'POST',
+    { libraryId: '', mode: 'incremental', allowOnline: true },
+  ]);
+
+  // 3. Removing onlineApiUrl hides checkbox again and resets stale draft allowOnline back to false
+  requests.length = 0;
+  activeOverview = sampleOverview();
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, activeOverview, []);
+  assert.equal(h.doc.getElementById('extmeta-batch-online'), null);
+  await h.doc.getElementById('extmeta-batch-start').onclick();
+  await flushMicrotasks();
+  assert.deepEqual(requests[0], [
+    '/admin/api/metadata/scrape',
+    'POST',
+    { libraryId: '', mode: 'incremental', allowOnline: false },
+  ]);
+});
+
+test('source modals wrap online API fields in collapsible details with neutral hint', () => {
+  const h = loadAdminScraperContext({ apiImpl: async () => ({}) });
+  const expectedHint = '高级可选：仅用于接入自建或第三方兼容 GET ?q= 协议的查询服务；日常离线图库刮削与封面加载无需填写。';
+
+  // 1. Edit modal without onlineApiUrl/onlineEnabled: collapsed by default
+  h.openExtMetaSourceModal({
+    id: 'src-1',
+    name: '离线源 A',
+    kind: 'offline_sqlite',
+    enabled: true,
+    ready: true,
+    onlineApiUrl: '',
+    onlineEnabled: false,
+  }, [], () => {});
+  let detailsEl = h.doc.getElementById('ems-online-details');
+  assert.ok(detailsEl && detailsEl.tagName === 'DETAILS');
+  assert.equal(detailsEl.open, false);
+  let detailsSlice = h.modalBody.innerHTML.slice(
+    h.modalBody.innerHTML.indexOf('<details id="ems-online-details"'),
+    h.modalBody.innerHTML.indexOf('</details>'),
+  );
+  assert.match(detailsSlice, /高级选项（可选：自定义在线 API）/);
+  assert.ok(detailsSlice.includes(expectedHint));
+  assert.match(detailsSlice, /id="ems-online-url"/);
+  assert.match(detailsSlice, /id="ems-online-enabled"/);
+
+  // 2. Edit modal with onlineApiUrl set: auto-open
+  h.openExtMetaSourceModal({
+    id: 'src-2',
+    name: '在线源 B',
+    kind: 'offline_sqlite',
+    enabled: true,
+    ready: true,
+    onlineApiUrl: 'https://api.example.test/search',
+    onlineEnabled: false,
+  }, [], () => {});
+  detailsEl = h.doc.getElementById('ems-online-details');
+  assert.equal(detailsEl.open, true);
+
+  // 3. Edit modal with onlineEnabled set: auto-open
+  h.openExtMetaSourceModal({
+    id: 'src-3',
+    name: '在线源 C',
+    kind: 'offline_sqlite',
+    enabled: true,
+    ready: true,
+    onlineApiUrl: '',
+    onlineEnabled: true,
+  }, [], () => {});
+  assert.equal(h.doc.getElementById('ems-online-details').open, true);
+
+  // 4. Add custom source modal: collapsed by default and contains emas-online-url inside details
+  h.openExtMetaAddSourceModal([], () => {});
+  const addDetails = h.doc.getElementById('emas-online-details');
+  assert.ok(addDetails && addDetails.tagName === 'DETAILS');
+  assert.equal(addDetails.open, false);
+  detailsSlice = h.modalBody.innerHTML.slice(
+    h.modalBody.innerHTML.indexOf('<details id="emas-online-details"'),
+    h.modalBody.innerHTML.indexOf('</details>'),
+  );
+  assert.match(detailsSlice, /高级选项（可选：自定义在线 API）/);
+  assert.ok(detailsSlice.includes(expectedHint));
+  assert.match(detailsSlice, /id="emas-online-url"/);
+});
+
+test('library chain card and modal display 已停用（不生效） badge for disabled sources', () => {
+  const h = loadAdminScraperContext({ apiImpl: async () => ({}) });
+  const ov = sampleOverview({
+    sources: [
+      {
+        id: 'src-disabled',
+        kind: 'offline_sqlite',
+        name: '已停用离线源',
+        enabled: false,
+        ready: true,
+      },
+      {
+        id: 'src-enabled',
+        kind: 'offline_sqlite',
+        name: '已启用离线源',
+        enabled: true,
+        ready: true,
+      },
+    ],
+    libraryChains: {
+      'lib-1': ['src-disabled', 'bangumi'],
+      'lib-2': ['src-enabled'],
+    },
+  });
+
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, ov, []);
+  const chainsHTML = h.body.innerHTML.slice(
+    h.body.innerHTML.indexOf('id="extmeta-chains-card"'),
+    h.body.innerHTML.indexOf('id="extmeta-runs-card"'),
+  );
+  assert.match(chainsHTML, /#1 已停用离线源<\/span><span class="badge badge-warn">已停用（不生效）<\/span>/);
+  assert.doesNotMatch(chainsHTML, /#1 已启用离线源<\/span><span class="badge badge-warn">已停用（不生效）<\/span>/);
+
+  h.body.querySelector('button[data-extmeta-chain-edit="lib-1"]').onclick();
+  const pickerHTML = h.doc.getElementById('mchain-picker').innerHTML;
+  const itemBlocks = pickerHTML.split('<div class="union-layer-item">').slice(1);
+  const disabledBlock = itemBlocks.find((blk) => blk.includes('已停用离线源'));
+  const enabledBlock = itemBlocks.find((blk) => blk.includes('已启用离线源'));
+  assert.ok(disabledBlock && enabledBlock);
+  assert.match(disabledBlock, /<span class="badge badge-warn">已停用（不生效）<\/span>/);
+  assert.doesNotMatch(enabledBlock, /已停用（不生效）/);
+});
+
+test('legacy Bangumi scrape labels are unified to neutral metadata wording across UI and jump page', () => {
+  const stageStart = appSource.indexOf('  function pipelineStageLabel(');
+  const stageEnd = appSource.indexOf('  function toast(', stageStart);
+  assert.ok(stageStart >= 0 && stageEnd > stageStart);
+  const pipelineStageLabel = vm.runInContext(
+    appSource.slice(stageStart, stageEnd) + '\npipelineStageLabel;',
+    vm.createContext({}),
+  );
+  assert.equal(pipelineStageLabel('bangumi'), '元数据刮削');
+
+  assert.doesNotMatch(appSource, /刮削 Bangumi/);
+  assert.doesNotMatch(appSource, /Bangumi 刮削/);
+  assert.doesNotMatch(appSource, /Bangumi 增量刮削/);
+  assert.doesNotMatch(appSource, /不改变 Bangumi 绑定/);
+  assert.doesNotMatch(appSource, /仅补未绑定 Bangumi/);
+  assert.match(appSource, /定时扫库、元数据刮削与自动补封面已迁移至「书库管理」中的单库\/联合库「定时…」流水线配置。/);
+
+  const jumpSource = readFileSync('internal/httpserver/bangumi_jump.go', 'utf8');
+  assert.match(jumpSource, /backLabel := "返回元数据刮削中心"/);
+  assert.doesNotMatch(jumpSource, /返回 Bangumi 刮削中心/);
 });

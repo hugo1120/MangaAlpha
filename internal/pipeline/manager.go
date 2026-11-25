@@ -452,7 +452,7 @@ func (m *Manager) execute(item pipelineJob) {
 
 	if sched.AutoBangumi {
 		m.updateProgress(item.runID, "bangumi", scanRunIDs, bgmRunID, coverRunID, strings.Join(summaryParts, "；"))
-		errorLabel := "Bangumi 刮削异常"
+		errorLabel := "元数据刮削异常"
 		cancelMessage := "pipeline canceled during Bangumi scrape"
 		summaryFormat := "Bangumi 命中 %d / 未命中 %d"
 		var (

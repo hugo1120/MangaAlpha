@@ -178,7 +178,7 @@ func (tm *trackerManager) ExchangeOAuthCode(ctx context.Context, code, redirectU
 	if err := tm.saveUserConfig(ctx, latest); err != nil {
 		return TrackerStatus{}, err
 	}
-	tm.svc.invalidateCoverFailures()
+	tm.svc.invalidateUserCoverFailures(database.UserIDFromContext(ctx))
 
 	diagnostics.Default().Record(diagnostics.Event{
 		Level:     diagnostics.LevelInfo,
@@ -303,7 +303,7 @@ func (tm *trackerManager) refreshOAuthToken(ctx context.Context, force bool, win
 		return ErrOAuthNotConfigured
 	}
 
-	tm.svc.invalidateCoverFailures()
+	tm.svc.invalidateUserCoverFailures(database.UserIDFromContext(ctx))
 	diagnostics.Default().RecordVerbose(diagnostics.Event{
 		Level:     diagnostics.LevelInfo,
 		Component: "bangumi",

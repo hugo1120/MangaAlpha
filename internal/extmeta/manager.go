@@ -20,6 +20,7 @@ import (
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
 	"github.com/xJogger/fake-komga-115/internal/diagnostics"
+	"golang.org/x/sync/singleflight"
 )
 
 var (
@@ -51,20 +52,23 @@ type Manager struct {
 	wg     sync.WaitGroup
 	stop   sync.Once
 
-	mu           sync.RWMutex
-	closed       bool
-	scheduler    bool
-	activeSync   map[string]bool
-	syncs        []SyncRun
-	scrapes      []ScrapeRun
-	scrapeCancel context.CancelFunc
-	scrapeFlush  chan struct{}
-	online       OnlineStatus
-	nextOnline   time.Time
-	sidecars     map[string]*SidecarStore
-	dictionaries map[string]*TagDictionary
-	mappings     map[string][]MappingRecord
-	mappingIndex *MappingIndex
+	mu             sync.RWMutex
+	closed         bool
+	scheduler      bool
+	activeSync     map[string]bool
+	syncs          []SyncRun
+	scrapes        []ScrapeRun
+	scrapeCancel   context.CancelFunc
+	scrapeFlush    chan struct{}
+	online         OnlineStatus
+	nextOnline     time.Time
+	sidecars       map[string]*SidecarStore
+	dictionaries   map[string]*TagDictionary
+	mappings       map[string][]MappingRecord
+	mappingIndex   *MappingIndex
+	fallbackCovers map[string]fallbackCoverLookup
+	fallbackEpoch  uint64
+	fallbackFlight singleflight.Group
 }
 
 func NewManager(store *database.Store, bgm *bangumi.Service, covers *CoverService, dataDir string, logger *slog.Logger, opts ManagerOptions) (*Manager, error) {
@@ -260,7 +264,11 @@ func (m *Manager) fetchRepo(ctx context.Context, repo database.MetadataRepo) (re
 		src.Compression, src.NSFWRule = item.Compression, item.NSFWRule
 		updates = append(updates, database.MetadataRepoSourceUpdate{Source: src, TagDictionaryKey: dictionaryKey})
 	}
-	return m.store.UpsertMetadataRepoWithSources(ctx, repo, updates)
+	saved, err := m.store.UpsertMetadataRepoWithSources(ctx, repo, updates)
+	if err == nil {
+		m.invalidateFallbackCoverCacheLocked()
+	}
+	return saved, err
 }
 
 func validateSource(src database.MetadataSource, local bool) error {
@@ -398,12 +406,16 @@ func (m *Manager) UpdateSourceConfig(ctx context.Context, id string, cfg SourceC
 		src.SchemaType != before.SchemaType {
 		src.Ready, src.EntryCount, src.FileSize = false, 0, 0
 		src.RemoteETag, src.RemoteLastMod, src.RemoteUpdatedAt, src.LocalSHA256 = "", "", "", ""
-		src.LastCheckedAt, src.LastUpdatedAt, src.LastError, src.SidecarPath = "", "", "", ""
+		src.LastCheckedAt, src.LastError, src.SidecarPath = "", "", ""
+		if src.Enabled || (!before.Ready && before.LastUpdatedAt == "") {
+			src.LastUpdatedAt = ""
+		}
 	}
 	src, err = m.store.UpsertMetadataSource(ctx, src)
 	if err != nil {
 		return src, err
 	}
+	m.invalidateFallbackCoverCacheLocked()
 	if !src.Ready {
 		m.unloadSource(id)
 	}
@@ -428,6 +440,7 @@ func (m *Manager) DeleteRepo(ctx context.Context, repoID string) error {
 	if err := m.store.DeleteMetadataRepo(ctx, repoID); err != nil {
 		return err
 	}
+	m.invalidateFallbackCoverCacheLocked()
 	for _, src := range sources {
 		if src.RepoID == repoID {
 			err = errors.Join(err, m.removeArtifacts(src.ID))
@@ -445,6 +458,7 @@ func (m *Manager) DeleteSource(ctx context.Context, id string) error {
 	if err := m.store.DeleteMetadataSource(ctx, id); err != nil {
 		return err
 	}
+	m.invalidateFallbackCoverCacheLocked()
 	return errors.Join(m.removeArtifacts(id), m.reloadMappingIndex(ctx))
 }
 
@@ -522,6 +536,7 @@ func (m *Manager) SetLibrarySources(ctx context.Context, libraryID string, ids [
 	if err := m.store.SetLibraryMetadataSources(ctx, libraryID, ids); err != nil {
 		return nil, err
 	}
+	m.invalidateFallbackCoverCacheLocked()
 	return m.store.ListLibraryMetadataSources(ctx, libraryID)
 }
 

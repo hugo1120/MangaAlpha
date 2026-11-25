@@ -161,6 +161,7 @@ func New(_ context.Context, options Options) (*App, error) {
 		return nil, err
 	}
 	thumbnailService.SetExternalCoverFetcher(metadataManager.FetchCover)
+	thumbnailService.SetNSFWFallbackCoverFetcher(metadataManager.FetchFallbackNSFWCover, metadataManager.InvalidateFallbackCoverCache)
 	thumbnailService.SetLocalFirstPageFetcher(func(ctx context.Context, book database.Book) ([]byte, error) {
 		page, err := archiveService.ReadPage(ctx, book, 1)
 		return page.Data, err

@@ -73,7 +73,7 @@
   - 所有离线源均未命中时自动由已启用的**社区脱敏映射包（`mangaalpha_mapping_v1`）**兜底，后台支持预览并导出严格剥离本地路径、私有 IP、凭据与 URL 的 `.ndjson` 映射包（默认严格排除 NSFW）；默认纯离线极速匹配，仅在显式开启时才允许单线程防封熔断低速在线补全。详见 [docs/METADATA_SOURCES.md](docs/METADATA_SOURCES.md)。
 - **Bangumi 离线快照（默认中文简介增强镜像）+ 授权实时检索**：
   - 后台一键下载校验离线索引并本地秒级批量匹配，默认接入与官方 100% 同构的 **中文简介增强镜像（[`xJogger/bangumi-archive-zh`](https://github.com/xJogger/bangumi-archive-zh)）**，全站非 NSFW 外文简介已翻译为简体中文；也可随时切回 `bangumi/Archive` 官方原版或自定义兼容源，支持每周/每月定时检查更新并自动增量 diff 同步未锁定字段。
-  - 作品详情页支持 `api.bgm.tv/v0` 实时搜索或粘贴 Subject ID / 链接精准绑定，并支持切换至已就绪的扩展离线源检索绑定；当已绑定 Bangumi OAuth / PAT 账号且开启 `show_nsfw` 时，自动携带用户授权检索 `api.bgm.tv` 的 NSFW 条目并拉取对应封面；深度兼容双序方括号、`x` 合著作者、中英混排、扫图组噪音清洗与 `台版 / 港版 / 番外篇` 子目录父级回溯。
+  - 作品详情页支持 `api.bgm.tv/v0` 实时搜索或粘贴 Subject ID / 链接精准绑定，并支持切换至已就绪的扩展离线源检索绑定；当已绑定 Bangumi OAuth / PAT 账号且开启 `show_nsfw` 时，自动携带用户授权检索 `api.bgm.tv` 的 NSFW 条目并拉取对应封面（若 Bangumi NSFW 封面因权限受限不可用且已配置就绪的扩展离线图库，可自动按只读方式从离线图库保底显示封面而不改写 Bangumi 绑定）；深度兼容双序方括号、`x` 合著作者、中英混排、扫图组噪音清洗与 `台版 / 港版 / 番外篇` 子目录父级回溯。
   - 支持独立专用代理（`http` / `https` / `socks5` / `socks5h`），统一加速 Bangumi、元数据市场/封面抓取与 GitHub 更新检测，**不影响 115 与 WebDAV 直连流量**。
 - **NSFW 精准分级与默认隐藏**：严格依据 Bangumi 官方 `nsfw: true` 字段与扩展源分级规则（如 `gallery_v1` 严格按 `Non-H` 分类豁免，辅以未命中目录成人关键词识别与手动锁定）标记，默认隐藏；支持按用户授权与个人开关独立控制。
 - **多用户分权体系、跨平台更新检测与 AI Agent API**：支持 1 个主管理员 + 多个普通用户（`argon2id` 密码哈希），支持按账号精细分配书库白名单与 NSFW 访问权限；每位用户拥有完全独立的阅读进度、阅读历史、收藏夹、阅读列表、阅读器偏好、个人 API Key 与 Bangumi 进度追踪器，兼容 Session Cookie、`HTTP Basic Auth`、`Bearer` 与 `X-API-Key`；内置 24 小时跨平台更新检测（Android 端支持 `SHA256SUMS` 校验与应用内 `PackageInstaller` 安装）、全平台白名单脱敏诊断日志导出，以及管理员专属 `/api/agent/v1` AI Agent 批量治理接口（见 [docs/AGENT_API.md](docs/AGENT_API.md)）。
@@ -95,7 +95,7 @@
 
 ### 方式一：Windows 下载即用
 
-1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `_windows_amd64.zip` 压缩包（例如 `mangaalpha_v3.2.1_windows_amd64.zip`）并解压。
+1. 从 [Releases](https://github.com/xJogger/MangaAlpha/releases/latest) 下载 `_windows_amd64.zip` 压缩包（例如 `mangaalpha_v3.2.2_windows_amd64.zip`）并解压。
 2. 双击运行 `mangaalpha.exe`（无控制台黑窗，自动常驻系统托盘）后，默认浏览器会自动打开 `http://127.0.0.1:25600/` 并引导完成首次管理员用户名与密码设置；点击托盘小鱼图标可随时打开书架，右键菜单可打开管理后台、数据目录、运行日志（`mangaalpha.log`）或安全退出服务。如需以无托盘命令行/Windows 服务模式运行，可附加 `--no-tray` 参数。
 3. 数据默认存储在 `%LOCALAPPDATA%\fake-komga-115\data`（保持兼容，原地升级无需迁移目录）。
 
@@ -120,7 +120,7 @@ docker run -d \
   -v fake-komga-115-data:/data \
   -v /share/manga:/manga:ro \
   -e TZ=Asia/Shanghai \
-  blacktal/fake-komga-115:v3.2.1
+  blacktal/fake-komga-115:v3.2.2
 ```
 
 > 从 `v2.3.0` 起，GitHub Release 桌面/服务端压缩包与本地构建产物名统一为 `mangaalpha`；Docker 镜像名 `blacktal/fake-komga-115`、容器入口、`FK115_*` 环境变量与既有默认数据路径保持不变。已有容器升级时请保留 `/data` 数据卷，建议固定版本标签升级。

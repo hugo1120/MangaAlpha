@@ -124,6 +124,7 @@ func (s *Server) WithServices(webdavManager *webdav.Manager, bangumiService *ban
 		s.bangumi = bangumiService
 		if s.thumbs != nil {
 			bangumiService.SetCoverCacheInvalidator(s.thumbs.InvalidateBangumiCoverFailures)
+			bangumiService.SetUserCoverCacheInvalidator(s.thumbs.InvalidateUserBangumiCoverFailures)
 		}
 	}
 	return s

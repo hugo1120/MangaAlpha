@@ -2,9 +2,86 @@ package database
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"testing"
 )
+
+func TestOpenBackfillsLegacyMatchOrigin(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-origins.db")
+	store, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := t.Context()
+	if err := store.UpsertLibrary(ctx, Library{ID: "fixture", RootCID: "fixture-root", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	type testRow struct {
+		id, lock, extEntry, origin, want string
+		subject                          any
+		confidence                       float64
+	}
+	rows := []testRow{
+		{id: "manual", subject: 1, confidence: 1, want: "manual"},
+		{id: "threshold", subject: 2, confidence: 0.999, want: "manual"},
+		{id: "below-threshold", subject: 3, confidence: 0.9989, want: "auto"},
+		{id: "automatic", subject: 4, confidence: 0.99, want: "auto"},
+		{id: "zero-confidence", subject: 5, want: "auto"},
+		{id: "external", subject: 6, confidence: 1, extEntry: "fixture-entry"},
+		{id: "unbound", confidence: 1},
+		{id: "zero-subject", subject: 0, confidence: 1},
+		{id: "negative-subject", subject: -1, confidence: 1},
+		{id: "agent", subject: 7, origin: "agent", want: "agent"},
+		{id: "mapped", subject: 8, origin: "mapping", want: "mapping"},
+		{id: "already-auto", subject: 9, confidence: 1, origin: "auto", want: "auto"},
+	}
+	for _, column := range []string{
+		"status_lock", "title_lock", "title_sort_lock", "summary_lock", "reading_direction_lock",
+		"publisher_lock", "age_rating_lock", "language_lock", "total_book_count_lock", "release_date_lock",
+		"genres_lock", "tags_lock", "authors_lock", "alternate_titles_lock", "links_lock", "sharing_labels_lock", "nsfw_lock",
+	} {
+		rows = append(rows, testRow{id: column, lock: column, subject: 10, confidence: 0.99, want: "manual"})
+	}
+	for _, row := range rows {
+		_, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES(?,'fixture',?,?,?,'','','fixture-scan')`, row.id, row.id, row.id, row.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = store.DB().Exec(`
+INSERT INTO series_metadata(series_id,bgm_subject_id,scrape_confidence,ext_entry_id,match_origin,updated_at)
+VALUES(?,?,?,?,?,'')`, row.id, row.subject, row.confidence, row.extEntry, row.origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if row.lock != "" {
+			if _, err := store.DB().Exec(fmt.Sprintf("UPDATE series_metadata SET %s=1 WHERE series_id=?", row.lock), row.id); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 1; pass <= 2; pass++ {
+		reopened, err := Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			var origin string
+			err := reopened.DB().QueryRow("SELECT match_origin FROM series_metadata WHERE series_id=?", row.id).Scan(&origin)
+			if err != nil || origin != row.want {
+				t.Errorf("pass %d, %s: match_origin = %q, want %q, err = %v", pass, row.id, origin, row.want, err)
+			}
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestOpenMigratesLegacyToV2(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.db")

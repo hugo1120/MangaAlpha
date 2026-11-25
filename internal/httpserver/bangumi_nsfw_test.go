@@ -2,9 +2,13 @@ package httpserver
 
 import (
 	"bytes"
+	"database/sql"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -12,6 +16,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/extmeta"
 )
 
 type bangumiTestTransport func(*http.Request) (*http.Response, error)
@@ -182,5 +187,129 @@ VALUES('cover-series',303,1,'bangumi',?)`, now); err != nil {
 	owner, err := store.UserBangumiTrackerConfig(ctx, database.PrimaryAdminUserID)
 	if err != nil || owner.AccessToken != adminPAT {
 		t.Fatal("catalog cover read changed the owner's PAT")
+	}
+}
+
+func TestBangumiNSFWHTTPCoverUsesReadOnlyOfflineFallback(t *testing.T) {
+	server, store, bgm, _ := setupV27TestServer(t, "")
+	ctx := t.Context()
+	if _, err := store.ClaimAdmin(ctx, "fixture-owner", "FixturePassword123!"); err != nil {
+		t.Fatal(err)
+	}
+	lib := database.Library{ID: "fallback-lib", RootCID: "fixture-root", Name: "Fixture library", Enabled: true}
+	if err := store.UpsertLibrary(ctx, lib); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES('bound','fallback-lib','folder','Blue River','Blue River','','','scan');
+INSERT INTO series_metadata(series_id,bgm_subject_id,bgm_cover_path,is_nsfw,match_origin,updated_at)
+VALUES('bound',303,'existing-fixture.jpg',1,'manual','')`); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, "fixture.sqlite")
+	upstream, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = upstream.Exec(`
+CREATE TABLE entries (id TEXT PRIMARY KEY, title TEXT, title_alt TEXT, authors TEXT, summary TEXT,
+                      tags TEXT, category TEXT, cover_url TEXT, rating REAL, is_nsfw INTEGER,
+                      updated_at INTEGER, extra_json TEXT);
+INSERT INTO entries(id,title,cover_url,is_nsfw) VALUES('fixture-entry','Blue River','https://covers.example.test/fixture.png',1);
+`)
+	if err := errors.Join(err, upstream.Close()); err != nil {
+		t.Fatal(err)
+	}
+	var coverDownloads, bgmRequests atomic.Int32
+	png := testCoverPNG(t)
+	coverService, err := extmeta.NewCoverService(extmeta.CoverConfig{
+		DataDir: root,
+		Client: &http.Client{Transport: bangumiTestTransport(func(r *http.Request) (*http.Response, error) {
+			coverDownloads.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(png)), Request: r}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager, err := extmeta.NewManager(store, nil, coverService, root, nil, extmeta.ManagerOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.Close()
+	source, err := manager.AddCustomSource(ctx, database.MetadataSource{
+		Name: "Offline fixture", Kind: extmeta.KindOfflineSQLite, LocalPath: path,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.StartSourceSync(ctx, source.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		run := manager.Syncs()[0]
+		if run.Status == "success" {
+			break
+		}
+		if run.Status != "running" || time.Now().After(deadline) {
+			t.Fatalf("fixture sync status: %+v", run)
+		}
+	}
+	bgm.SetAPITransportForTest(bangumiTestTransport(func(r *http.Request) (*http.Response, error) {
+		bgmRequests.Add(1)
+		return &http.Response{StatusCode: http.StatusNotFound, Body: http.NoBody, Request: r}, nil
+	}))
+	server.thumbs.SetBangumiCoverFetcher(bgm.FetchCoverBytes)
+	server.thumbs.SetNSFWFallbackCoverFetcher(manager.FetchFallbackNSFWCover, manager.InvalidateFallbackCoverCache)
+
+	user, err := store.CreateUser(ctx, database.CreateUserInput{
+		Username: "fixture-reader", Password: "FixturePassword123!", AllowNSFW: true, AllowedLibraryIDs: []string{lib.ID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _, err := store.CreateAPIKeyForUser(ctx, user.ID, "fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestCover := func(show bool) *httptest.ResponseRecorder {
+		t.Helper()
+		if _, err := store.SetUserShowNSFW(ctx, user.ID, show); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/series/bound/thumbnail", nil)
+		r.Header.Set("X-API-Key", key)
+		w := httptest.NewRecorder()
+		server.Handler().ServeHTTP(w, r)
+		return w
+	}
+	if w := requestCover(false); w.Code != http.StatusNotFound || bgmRequests.Load() != 0 || coverDownloads.Load() != 0 {
+		t.Fatalf("opted-out reader reached cover upstreams, status=%d", w.Code)
+	}
+	for _, mode := range []string{database.CoverSourceAuto, database.CoverSourceBangumi, database.CoverSourceBook} {
+		if _, err := store.DB().Exec("UPDATE series_metadata SET cover_source=? WHERE series_id='bound'", mode); err != nil {
+			t.Fatal(err)
+		}
+		series := database.Series{ID: "bound"}
+		before, err := store.SeriesMetadataByID(ctx, series)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := requestCover(true)
+		isFallback := bytes.Equal(w.Body.Bytes(), png)
+		if w.Code != http.StatusOK || isFallback != (mode != database.CoverSourceBook) ||
+			(isFallback && (w.Header().Get("Cache-Control") != "private, no-store" || w.Header().Get("Content-Type") != "image/png")) {
+			t.Fatalf("mode %s returned status=%d and fallback=%v", mode, w.Code, isFallback)
+		}
+		after, err := store.SeriesMetadataByID(ctx, series)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("mode %s modified series metadata: %v", mode, err)
+		}
+	}
+	if w := requestCover(false); w.Code != http.StatusNotFound || bgmRequests.Load() != 1 || coverDownloads.Load() != 1 {
+		t.Fatalf("unexpected cached fallback behavior, status=%d, Bangumi=%d, external=%d", w.Code, bgmRequests.Load(), coverDownloads.Load())
 	}
 }

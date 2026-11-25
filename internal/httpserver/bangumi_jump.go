@@ -260,7 +260,7 @@ func (s *Server) createUserscriptPairKey(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) serveUserscriptPairPage(w http.ResponseWriter, r *http.Request) {
 	backHref := "/admin?tab=bangumi"
-	backLabel := "返回 Bangumi 刮削中心"
+	backLabel := "返回元数据刮削中心"
 	if principal, ok := s.currentPrincipal(r); ok && !principal.IsAdmin {
 		backHref = "/account"
 		backLabel = "返回账号设置"

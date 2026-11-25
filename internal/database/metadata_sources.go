@@ -74,6 +74,7 @@ type MetadataSourceSyncState struct {
 	LocalPath       *string `json:"localPath,omitempty"`
 	SidecarPath     *string `json:"sidecarPath,omitempty"`
 	Ready           *bool   `json:"ready,omitempty"`
+	Enabled         *bool   `json:"enabled,omitempty"`
 	EntryCount      *int64  `json:"entryCount,omitempty"`
 	FileSize        *int64  `json:"fileSize,omitempty"`
 	RemoteETag      *string `json:"remoteEtag,omitempty"`
@@ -591,6 +592,10 @@ func (s *Store) UpdateMetadataSourceSyncState(
 	if state.Ready != nil {
 		sets = append(sets, "ready=?")
 		args = append(args, boolInt(*state.Ready))
+	}
+	if state.Enabled != nil {
+		sets = append(sets, "enabled=?")
+		args = append(args, boolInt(*state.Enabled))
 	}
 	if state.EntryCount != nil {
 		sets = append(sets, "entry_count=?")

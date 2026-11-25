@@ -15,6 +15,7 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
+	"github.com/xJogger/fake-komga-115/internal/diagnostics"
 )
 
 var ErrNoReadySources = errors.New("目标书库暂无已就绪的离线数据源，请先一键下载 Bangumi 离线索引库或同步扩展离线源")
@@ -187,6 +188,7 @@ VALUES(?,nullif(?,''),?,?,'running',?,?)`, run.ID, libraryID, storedMode, mode =
 }
 
 func (m *Manager) executeScrape(ctx context.Context, run ScrapeRun, flush <-chan struct{}) {
+	started := time.Now()
 	flushCtx, stopFlush := context.WithCancel(ctx)
 	flushed := make(chan struct{})
 	initial := run
@@ -217,6 +219,15 @@ func (m *Manager) executeScrape(ctx context.Context, run ScrapeRun, flush <-chan
 			m.logger.Warn(run.Error, "runId", run.ID)
 		}
 	}
+	diagnostics.Default().Record(diagnostics.Event{
+		Component: "extmeta", Stage: "extmeta_scrape", Action: "finish",
+		DurationMs: time.Since(started).Milliseconds(),
+		Meta: map[string]any{
+			"mode": run.Mode, "status": run.Status, "allowOnline": run.AllowOnline,
+			"total": run.TotalSeries, "matched": run.Matched, "mapped": run.Mapped,
+			"unmatched": run.Unmatched, "skipped": run.Skipped, "failed": run.Failed,
+		},
+	})
 	m.scrapes[len(m.scrapes)-1] = run
 	m.scrapeCancel = nil
 	m.scrapeFlush = nil
@@ -488,6 +499,7 @@ func (m *Manager) matchOffline(ctx context.Context, target scrapeSeries, plan sc
 	series := target.series
 	chain := plan.chain(series.LibraryID)
 	parsed := bangumi.ParseSeriesWithPath(series.Name, series.RelativePath)
+	titles := append(slices.Clone(parsed.Candidates), series.Name)
 	var embedded *EmbeddedMeta
 	var readArchive bool
 	var sourceErr error
@@ -518,7 +530,7 @@ func (m *Manager) matchOffline(ctx context.Context, target scrapeSeries, plan sc
 				embedded, _ = m.opts.ArchiveMetaReader(ctx, book)
 			}
 		}
-		entry, confidence, err := m.matchSidecar(ctx, src.ID, parsed.Candidates, target.coverSHA1, embedded)
+		entry, confidence, err := m.matchSidecar(ctx, src.ID, titles, parsed.Authors, target.coverSHA1, embedded)
 		if err != nil {
 			sourceErr = err
 			continue
@@ -581,7 +593,7 @@ func (m *Manager) matchMapping(ctx context.Context, series database.Series, pars
 	return database.ScrapedMetadata{}, false, nil
 }
 
-func (m *Manager) matchSidecar(ctx context.Context, id string, titles []string, sha1 string, embedded *EmbeddedMeta) (*Entry, float64, error) {
+func (m *Manager) matchSidecar(ctx context.Context, id string, titles, authors []string, sha1 string, embedded *EmbeddedMeta) (*Entry, float64, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	sidecar := m.sidecars[id]
@@ -602,6 +614,7 @@ func (m *Manager) matchSidecar(ctx context.Context, id string, titles []string, 
 			}
 		}
 		titles = append([]string{embedded.Series, embedded.Title}, titles...)
+		authors = append(slices.Clone(authors), embedded.Authors...)
 	}
 	if sha1 != "" {
 		hits, err := sidecar.LookupByThumbSHA1(ctx, sha1)
@@ -615,22 +628,80 @@ func (m *Manager) matchSidecar(ctx context.Context, id string, titles []string, 
 			}
 		}
 	}
+	return matchSidecarTitle(ctx, sidecar, titles, authors, false)
+}
+
+func matchSidecarTitle(ctx context.Context, sidecar *SidecarStore, titles, authors []string, requireCover bool) (*Entry, float64, error) {
+	if sidecar.Schema() == SchemaGalleryV1 {
+		hits, err := sidecar.searchWithHints(ctx, titles, authors, 10)
+		if err != nil {
+			return nil, 0, err
+		}
+		hit, ok := selectGalleryMatch(hits, requireCover)
+		if !ok {
+			return nil, 0, nil
+		}
+		entry, err := sidecar.GetEntry(ctx, hit.EntryID)
+		if errors.Is(err, ErrEntryNotFound) {
+			return nil, 0, nil
+		}
+		return entry, hit.Score, err
+	}
+	seen := make(map[string]bool, len(titles))
 	for _, title := range titles {
-		if title == "" {
+		title = strings.TrimSpace(title)
+		if title == "" || seen[title] {
 			continue
 		}
+		seen[title] = true
 		hits, err := sidecar.SearchByTitle(ctx, title, 2)
 		if err != nil {
 			return nil, 0, err
 		}
 		if len(hits) > 0 && hits[0].Score >= 0.95 && (len(hits) == 1 || hits[0].Score-hits[1].Score >= 0.05) {
 			entry, err := sidecar.GetEntry(ctx, hits[0].EntryID)
-			if !errors.Is(err, ErrEntryNotFound) {
-				return entry, hits[0].Score, err
+			if errors.Is(err, ErrEntryNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, 0, err
+			}
+			if !requireCover || entry.CoverURL != "" {
+				return entry, hits[0].Score, nil
 			}
 		}
 	}
 	return nil, 0, nil
+}
+
+func selectGalleryMatch(hits []SearchMatch, requireCover bool) (best SearchMatch, found bool) {
+	if len(hits) == 0 || hits[0].Score < 0.95 {
+		return best, false
+	}
+	for i, hit := range hits {
+		if hits[0].Score-hit.Score >= 0.05 {
+			break
+		}
+		gallery := hit.gallery
+		if gallery == nil {
+			return SearchMatch{}, false
+		}
+		for _, previous := range hits[:i] {
+			other := previous.gallery
+			sameRoot := gallery.rootGID > 0 && gallery.rootGID == other.rootGID
+			authorConflict := len(gallery.authors) > 0 && len(other.authors) > 0 && !sharesKey(gallery.authors, other.authors)
+			if authorConflict || (!sameRoot && !sharesKey(gallery.cores, other.cores)) {
+				return SearchMatch{}, false
+			}
+		}
+		if requireCover && !gallery.hasCover {
+			continue
+		}
+		if !found || compareGalleryVersions(gallery, best.gallery) < 0 {
+			best, found = hit, true
+		}
+	}
+	return best, found
 }
 
 var (

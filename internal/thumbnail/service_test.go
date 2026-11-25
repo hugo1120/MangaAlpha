@@ -3,7 +3,9 @@ package thumbnail
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -12,10 +14,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
 
@@ -279,4 +283,186 @@ func TestScaledSize(t *testing.T) {
 			)
 		}
 	}
+}
+
+func TestNSFWFallbackPreferredCoverModes(t *testing.T) {
+	store, first, _ := thumbnailTestStore(t)
+	service, err := New(store, filepath.Join(t.TempDir(), "thumbnails", "series"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := database.UserScope{UserID: "reader", AllowNSFW: true, ShowNSFW: true, AllowedLibraryIDs: []string{first.LibraryID}}
+	ctx := database.WithUserScope(t.Context(), scope)
+	if _, err := store.DB().Exec(`
+INSERT INTO series_metadata(series_id,bgm_subject_id,is_nsfw,ext_source_id,ext_entry_id,updated_at)
+VALUES(?,42,1,'existing-source','existing-entry','')`, first.SeriesID); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Generate(ctx, first, testPNG(t, 9, 9)); err != nil {
+		t.Fatal(err)
+	}
+	fallbackPNG := testPNG(t, 18, 12)
+	var upstreamCalls, fallbackCalls int
+	service.SetBangumiCoverFetcher(func(context.Context, string, int64) ([]byte, error) {
+		upstreamCalls++
+		return nil, bangumi.ErrCoverUnavailable
+	})
+	service.SetNSFWFallbackCoverFetcher(func(ctx context.Context, id string) ([]byte, string, error) {
+		caller, _ := database.UserScopeFromContext(ctx)
+		if id != first.SeriesID || caller.UserID != scope.UserID || !caller.EffectiveShowNSFW() {
+			t.Fatal("fallback lost the caller scope")
+		}
+		fallbackCalls++
+		return fallbackPNG, "image/png", nil
+	}, nil)
+
+	for _, mode := range []string{database.CoverSourceAuto, database.CoverSourceBangumi, database.CoverSourceBook} {
+		if _, err := store.DB().Exec("UPDATE series_metadata SET cover_source=? WHERE series_id=?", mode, first.SeriesID); err != nil {
+			t.Fatal(err)
+		}
+		series, err := store.SeriesByID(ctx, first.SeriesID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before, err := store.SeriesMetadataByID(ctx, series)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, ok, err := service.Get(ctx, first.SeriesID)
+		if err != nil || !ok {
+			t.Fatalf("mode %s: cover present=%v, err=%v", mode, ok, err)
+		}
+		if mode == database.CoverSourceBook {
+			if data.MediaType != "image/jpeg" || bytes.Equal(data.Bytes, fallbackPNG) {
+				t.Fatalf("book mode returned %s", data.MediaType)
+			}
+		} else if data.MediaType != "image/png" || !bytes.Equal(data.Bytes, fallbackPNG) {
+			t.Fatalf("mode %s did not serve the fallback cover", mode)
+		}
+		after, err := store.SeriesMetadataByID(ctx, series)
+		if err != nil || !reflect.DeepEqual(before, after) {
+			t.Fatalf("mode %s changed series metadata: %v", mode, err)
+		}
+	}
+	if upstreamCalls != 1 || fallbackCalls != 2 {
+		t.Fatalf("upstream requests=%d, fallback requests=%d", upstreamCalls, fallbackCalls)
+	}
+	if _, err := store.DB().Exec("UPDATE series_metadata SET cover_source='auto' WHERE series_id=?", first.SeriesID); err != nil {
+		t.Fatal(err)
+	}
+	for _, denied := range []database.UserScope{
+		{UserID: scope.UserID, AllowNSFW: true, AllowedLibraryIDs: scope.AllowedLibraryIDs},
+		{UserID: scope.UserID, ShowNSFW: true, AllowedLibraryIDs: scope.AllowedLibraryIDs},
+	} {
+		if _, ok, err := service.Get(database.WithUserScope(ctx, denied), first.SeriesID); ok || !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("denied NSFW cover: ok=%v, err=%v", ok, err)
+		}
+	}
+	if upstreamCalls != 1 || fallbackCalls != 2 {
+		t.Fatal("denied NSFW cover reached an upstream fetcher")
+	}
+
+	service.SetNSFWFallbackCoverFetcher(func(context.Context, string) ([]byte, string, error) {
+		return []byte("invalid image fixture"), "image/png", nil
+	}, nil)
+	if data, ok, err := service.Get(ctx, first.SeriesID); err != nil || !ok || data.MediaType != "image/jpeg" {
+		t.Fatalf("auto mode with invalid fallback did not reuse book cover: %v, %v", ok, err)
+	}
+	if _, err := store.DB().Exec("UPDATE series_metadata SET cover_source='bangumi' WHERE series_id=?", first.SeriesID); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := service.Get(ctx, first.SeriesID); err != nil || ok {
+		t.Fatalf("bangumi mode with invalid fallback: %v, %v", ok, err)
+	}
+}
+
+func TestBangumiNSFWCooldownIsPerUserAndResettable(t *testing.T) {
+	store, first, _ := thumbnailTestStore(t)
+	service, err := New(store, filepath.Join(t.TempDir(), "thumbnails", "series"), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := func(user string) context.Context {
+		return database.WithUserScope(t.Context(), database.UserScope{
+			UserID: user, AllowNSFW: true, ShowNSFW: true, AllowedLibraryIDs: []string{first.LibraryID},
+		})
+	}
+	ctx := scope("reader-a")
+	for subject := 1; subject <= 7; subject++ {
+		id := fmt.Sprintf("fixture-series-%d", subject)
+		if _, err := store.DB().Exec(`
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES(?,?,?,?,?,'','','fixture-scan')`, id, first.LibraryID, id, id, id); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`
+INSERT INTO series_metadata(series_id,bgm_subject_id,is_nsfw,cover_source,updated_at)
+VALUES(?,?,1,'bangumi','')`, id, subject); err != nil {
+			t.Fatal(err)
+		}
+	}
+	png := testPNG(t, 18, 12)
+	var fetched, invalidations int
+	service.SetBangumiCoverFetcher(func(_ context.Context, _ string, subject int64) ([]byte, error) {
+		fetched++
+		switch subject {
+		case 3:
+			return png, nil
+		case 6:
+			return nil, errors.New("temporary upstream fixture error")
+		default:
+			return nil, fmt.Errorf("fixture response: %w", bangumi.ErrCoverUnavailable)
+		}
+	})
+	service.SetNSFWFallbackCoverFetcher(func(context.Context, string) ([]byte, string, error) {
+		return png, "image/png", nil
+	}, func() { invalidations++ })
+	get := func(ctx context.Context, subject, wantCalls int, wantType string) {
+		t.Helper()
+		data, ok, err := service.Get(ctx, fmt.Sprintf("fixture-series-%d", subject))
+		if err != nil || !ok || data.MediaType != wantType || fetched != wantCalls {
+			t.Fatalf("subject %d: type=%s, cover=%v, err=%v, requests=%d want %d", subject, data.MediaType, ok, err, fetched, wantCalls)
+		}
+	}
+	get(ctx, 1, 1, "image/png")
+	get(ctx, 1, 1, "image/png") // a cache hit does not count toward the cooldown
+	get(ctx, 3, 2, "image/jpeg")
+	get(ctx, 2, 3, "image/png")
+	get(ctx, 4, 4, "image/png") // the successful fetch reset the first failure
+	get(ctx, 5, 4, "image/png")
+	get(ctx, 3, 4, "image/jpeg") // cached Bangumi covers still win during cooldown
+	get(scope("reader-b"), 5, 5, "image/png")
+	service.bgmMu.Lock()
+	if cooldown := time.Until(service.bgmNSFWFailures["reader-a"].until); cooldown < 29*time.Minute || cooldown > bgmNSFWCooldown {
+		t.Errorf("reader cooldown is %s", cooldown)
+	}
+	expired := service.bgmNSFWFailures["reader-a"]
+	expired.until = time.Now().Add(-time.Second)
+	service.bgmNSFWFailures["reader-a"] = expired
+	service.bgmMu.Unlock()
+	get(ctx, 5, 6, "image/png") // expired cooldown starts a new streak
+	get(ctx, 6, 7, "image/png") // unrelated failure breaks the streak
+	get(ctx, 7, 8, "image/png")
+
+	service.InvalidateBangumiCoverFailures()
+	get(ctx, 1, 9, "image/png")
+	get(ctx, 2, 10, "image/png")
+	get(ctx, 4, 10, "image/png")
+	if err := service.ClearBangumiCovers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	get(ctx, 4, 11, "image/png")
+	get(ctx, 3, 12, "image/jpeg") // both the cooldown and disk image were cleared
+	if invalidations != 2 {
+		t.Fatalf("fallback cache invalidations=%d, want 2", invalidations)
+	}
+
+	// Per-user invalidation resets only the targeted user's cooldown and failure cache.
+	get(ctx, 1, 13, "image/png")
+	get(ctx, 2, 14, "image/png") // reader-a now cooling down
+	get(scope("reader-b"), 1, 15, "image/png")
+	get(scope("reader-b"), 2, 16, "image/png") // reader-b now cooling down
+	service.InvalidateUserBangumiCoverFailures("reader-a")
+	get(scope("reader-b"), 4, 16, "image/png") // reader-b still cooling down
+	get(ctx, 4, 17, "image/png")               // reader-a retries Bangumi after per-user reset
 }

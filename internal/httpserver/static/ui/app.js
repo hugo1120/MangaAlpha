@@ -502,7 +502,7 @@
       case 'queued': return '排队中';
       case 'scan': return '扫描目录';
       case 'union_refresh': return '合并联合库';
-      case 'bangumi': return 'Bangumi 刮削';
+      case 'bangumi': return '元数据刮削';
       case 'cover': return '补齐封面';
       case 'done': return '已完成';
       default: return stage || '—';
@@ -2956,7 +2956,7 @@
                 <button type="button" class="btn btn-primary btn-sm" data-lib-union-refresh="${esc(l.id)}">刷新合并</button>
                 <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
                 <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
-                <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削</button>
                 <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="union">补封面…</button>
                 <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
               ` : `
@@ -2976,7 +2976,7 @@
                 <button type="button" class="btn btn-primary btn-sm" data-lib-scan="${esc(l.id)}">扫描</button>
                 <button type="button" class="btn btn-sm" data-lib-pipeline="${esc(l.id)}">跑流水线</button>
                 <button type="button" class="btn btn-sm" data-lib-schedule="${esc(l.id)}">定时…</button>
-                <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削 Bangumi</button>
+                <button type="button" class="btn btn-bgm btn-sm" data-lib-bgm="${esc(l.id)}">刮削</button>
                 <button type="button" class="btn btn-sm" data-lib-cover="${esc(l.id)}" data-provider="${esc(l.providerType)}">补齐首卷封面…</button>
                 <button type="button" class="btn btn-sm" data-lib-toggle-hide="${esc(l.id)}" data-lib-name="${esc(l.name)}" data-lib-next-enabled="false">隐藏</button>
               ` : `
@@ -3306,7 +3306,7 @@
           maxWidth: '520px',
           bodyHTML: `
             <p style="margin:0 0 12px;font-size:12.5px;color:var(--text-muted)">
-              按服务器本机时区（${esc(serverTZ || 'Local')}）触发。${isSub ? '该库为联合库子库：定时扫库成功后自动刷新所属联合库。' : '若未准备 Bangumi 离线库，将自动跳过 Bangumi 刮削与补封面；任一扫库失败则中止后续步骤。'}
+              按服务器本机时区（${esc(serverTZ || 'Local')}）触发。${isSub ? '该库为联合库子库：定时扫库成功后自动刷新所属联合库。' : '若未准备可用的离线元数据索引库，将自动跳过元数据刮削与补封面；任一扫库失败则中止后续步骤。'}
             </p>
             <div class="field">
               <label class="check-row"><input type="checkbox" id="sch-enabled" ${existing.enabled ? 'checked' : ''}><span>启用定时自动化流水线</span></label>
@@ -3344,10 +3344,10 @@
               </div>` : ''}
             ${!isSub ? `
               <div class="field">
-                <label class="check-row"><input type="checkbox" id="sch-bgm" ${existing.autoBangumi !== false ? 'checked' : ''}><span>扫库/合并完成后执行 Bangumi 增量刮削</span></label>
+                <label class="check-row"><input type="checkbox" id="sch-bgm" ${existing.autoBangumi !== false ? 'checked' : ''}><span>扫库成功后自动执行元数据刮削（增量匹配新作品）</span></label>
               </div>
               <div class="field">
-                <label>未匹配 Bangumi 且缺封面作品的自动补封面上限（默认 0 = 不自动补封面）</label>
+                <label>未匹配元数据且缺封面作品的自动补封面上限（默认 0 = 不自动补封面）</label>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                   <input type="number" id="sch-cover-limit" min="0" max="10000" value="${existing.autoCoverLimit < 0 ? 0 : Number(existing.autoCoverLimit || 0)}" style="max-width:140px" ${existing.autoCoverLimit === -1 ? 'disabled' : ''}>
                   ${allowUnlimitedCover ? `<label class="check-row" style="margin:0"><input type="checkbox" id="sch-cover-unlimited" ${existing.autoCoverLimit === -1 ? 'checked' : ''}><span>不限数量</span></label>` : ''}
@@ -3486,8 +3486,11 @@
     body.querySelectorAll('button[data-lib-bgm]').forEach((btn) => {
       btn.onclick = async () => {
         try {
-          await api('/admin/api/bangumi/runs', { method: 'POST', body: { libraryId: btn.getAttribute('data-lib-bgm'), force: false } });
-          toast('已启动本库 Bangumi 批量刮削');
+          await api('/admin/api/metadata/scrape', {
+            method: 'POST',
+            body: { libraryId: btn.getAttribute('data-lib-bgm'), mode: 'retry_unmatched', allowOnline: false },
+          });
+          toast('已启动本库元数据刮削');
           navigate('/admin?tab=bangumi');
         } catch (err) { toast(err.message, 'error'); }
       };
@@ -3498,8 +3501,8 @@
         openModal({
           title: '批量补齐首卷封面',
           maxWidth: '520px',
-          bodyHTML: `<p>只读首卷第一页生成缩略图，不改变 Bangumi 绑定或封面显示偏好。</p>
-            <label class="check-row"><input id="cover-unbound" type="checkbox" checked>仅补未绑定 Bangumi 且缺有效封面的系列</label>
+          bodyHTML: `<p>只读首卷第一页生成缩略图，不改变元数据绑定或封面显示偏好。</p>
+            <label class="check-row"><input id="cover-unbound" type="checkbox" checked>仅补未匹配元数据且缺有效封面的系列</label>
             <label class="check-row"><input id="cover-all" type="checkbox" ${local ? 'checked' : ''}>全库处理</label>
             <div class="field"><label for="cover-limit">最多处理最近更新的系列数</label>
               <input id="cover-limit" type="number" min="1" max="10000" value="${local ? 50 : 5}" ${local ? 'disabled' : ''}></div>`,
@@ -3860,12 +3863,32 @@
     return true;
   }
 
+  function extOnlineApiDetailsHTML({ detailsId, inputId, value = '', open = false, includeToggle = false, enabled = false, marginBottom = '0' }) {
+    return `
+        <details id="${esc(detailsId)}" style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;background:var(--bg-input);margin-bottom:${esc(marginBottom)}"${open ? ' open' : ''}>
+          <summary style="cursor:pointer;font-size:12.5px;font-weight:600;color:var(--text-secondary)">高级选项（可选：自定义在线 API）</summary>
+          <div class="field-hint" style="margin-top:8px;margin-bottom:10px">高级可选：仅用于接入自建或第三方兼容 GET ?q= 协议的查询服务；日常离线图库刮削与封面加载无需填写。</div>
+          <div class="field" style="${includeToggle ? '' : 'margin-bottom:0'}">
+            <label for="${esc(inputId)}">在线 API 补全地址（可选${includeToggle ? '，受防封限速与熔断器保护' : ''}）</label>
+            <input type="url" id="${esc(inputId)}" value="${esc(value)}" placeholder="https://api.example.invalid/...">
+          </div>
+          ${includeToggle ? `
+          <div class="field" style="margin-bottom:0">
+            <label class="check-row">
+              <input type="checkbox" id="ems-online-enabled" ${enabled ? 'checked' : ''}>
+              <span>允许在显式开启在线补全时使用该源的在线 API</span>
+            </label>
+          </div>` : ''}
+        </details>`;
+  }
+
   function openExtMetaSourceModal(src, tagDictSources, onSaved) {
     const dicts = (tagDictSources || []).slice();
     if (src.tagDictSourceId && !dicts.some((d) => d.id === src.tagDictSourceId)) {
       dicts.push({ id: src.tagDictSourceId, name: src.tagDictSourceId });
     }
     const kindInfo = extSourceKindMeta(src.kind);
+    const hasOnlineConfig = Boolean((src.onlineApiUrl && String(src.onlineApiUrl).trim()) || src.onlineEnabled);
     openModal({
       title: `配置数据源 · ${src.name}`,
       maxWidth: '580px',
@@ -3914,16 +3937,14 @@
             <option value="monthly" ${src.autoUpdate === 'monthly' ? 'selected' : ''}>每月自动更新 (monthly)</option>
           </select>
         </div>
-        <div class="field">
-          <label for="ems-online-url">在线 API 补全地址（可选，受防封限速与熔断器保护）</label>
-          <input type="url" id="ems-online-url" value="${esc(src.onlineApiUrl || '')}" placeholder="https://api.example.invalid/...">
-        </div>
-        <div class="field" style="margin-bottom:0">
-          <label class="check-row">
-            <input type="checkbox" id="ems-online-enabled" ${src.onlineEnabled ? 'checked' : ''}>
-            <span>允许在显式开启在线补全时使用该源的在线 API</span>
-          </label>
-        </div>
+        ${extOnlineApiDetailsHTML({
+          detailsId: 'ems-online-details',
+          inputId: 'ems-online-url',
+          value: src.onlineApiUrl || '',
+          open: hasOnlineConfig,
+          includeToggle: true,
+          enabled: Boolean(src.onlineEnabled),
+        })}
       `,
       footHTML: `<button type="button" class="btn btn-primary" id="ems-save-btn">保存配置</button>`,
       onMount: () => {
@@ -4005,10 +4026,11 @@
           <label for="emas-local-path">服务器本地文件路径（可选）</label>
           <input type="text" id="emas-local-path" placeholder="/data/metadata/my-meta.sqlite">
         </div>
-        <div class="field">
-          <label for="emas-online-url">在线 API 补全地址（可选）</label>
-          <input type="url" id="emas-online-url" placeholder="https://api.example.invalid/...">
-        </div>
+        ${extOnlineApiDetailsHTML({
+          detailsId: 'emas-online-details',
+          inputId: 'emas-online-url',
+          marginBottom: '14px',
+        })}
         <div class="grid-2">
           <div class="field">
             <label for="emas-tag-dict">关联标签词典</label>
@@ -4109,11 +4131,12 @@
             const km = extSourceKindMeta(src.kind);
             return `
               <div class="union-layer-item">
-                <label class="check-row" style="margin:0;flex:1;min-width:0">
+                <label class="check-row" style="margin:0;flex:1;min-width:0;flex-wrap:wrap">
                   <input type="checkbox" data-mchain-id="${esc(src.id)}" ${checked ? 'checked' : ''}>
                   <span style="min-width:0;overflow-wrap:anywhere">${checked ? `<strong>#${idx + 1}</strong> ` : ''}${esc(src.name)}</span>
                   <span class="badge ${km.cls}">${esc(km.label)}</span>
                   ${src.ready === false ? `<span class="badge badge-warn">未就绪</span>` : ''}
+                  ${src.enabled === false ? `<span class="badge badge-warn">已停用（不生效）</span>` : ''}
                 </label>
                 ${checked ? `
                   <div style="display:flex;gap:4px">
@@ -4315,6 +4338,7 @@
       { id: 'bangumi', name: '内置 Bangumi 源', kind: 'bangumi_archive', ready: Boolean(arch.ready), enabled: true },
       ...extSources.filter((s) => s.kind === 'offline_sqlite'),
     ];
+    const hasOnlineCapableSource = extSources.some((s) => s && s.kind === 'offline_sqlite' && s.enabled && s.onlineEnabled && String(s.onlineApiUrl || '').trim() !== '');
     const topLevelLibs = (libs || []).filter((l) => !l.unionParentId);
     const selectableLibs = (libs || []).filter((l) => l.enabled !== false && !l.unionParentId);
     const libMap = new Map((libs || []).map((l) => [l.id, l]));
@@ -4376,8 +4400,13 @@
     const batchDraft = {
       libraryId: prevBatchLib ? prevBatchLib.value : ((state && state.extMetaBatchDraft && state.extMetaBatchDraft.libraryId) || ''),
       mode: prevBatchMode ? prevBatchMode.value : ((state && state.extMetaBatchDraft && state.extMetaBatchDraft.mode) || 'incremental'),
-      allowOnline: prevBatchOnline ? Boolean(prevBatchOnline.checked) : Boolean(state && state.extMetaBatchDraft && state.extMetaBatchDraft.allowOnline),
+      allowOnline: hasOnlineCapableSource
+        ? (prevBatchOnline ? Boolean(prevBatchOnline.checked) : Boolean(state && state.extMetaBatchDraft && state.extMetaBatchDraft.allowOnline))
+        : false,
     };
+    if (!hasOnlineCapableSource && typeof state === 'object' && state && state.extMetaBatchDraft) {
+      state.extMetaBatchDraft.allowOnline = false;
+    }
 
     const prevGuideEl = document.getElementById('extmeta-guide-details');
     const guideOpen = prevGuideEl ? Boolean(prevGuideEl.open) : Boolean(state && state.extMetaGuideOpen);
@@ -4596,13 +4625,14 @@
               <option value="force" ${batchDraft.mode === 'force' ? 'selected' : ''}>全量强制重刮（重新匹配全部作品，保留手动绑定与锁定字段）</option>
             </select>
           </div>
+          ${hasOnlineCapableSource ? `
           <div class="field">
             <label class="check-row">
               <input type="checkbox" id="extmeta-batch-online" ${batchDraft.allowOnline ? 'checked' : ''}>
               <span>允许低速在线补全（单线程防封熔断）</span>
             </label>
             <div class="field-hint">默认关闭（纯离线极速匹配）；仅当开启后，对离线未命中作品才调用已启用在线 API 的数据源，单线程限速并在 403/429/503 时自动熔断冷却。</div>
-          </div>
+          </div>` : ''}
           <button type="button" class="btn btn-primary" id="extmeta-batch-start">开始批量刮削</button>
           ${showOnlineEnrichBanner ? `
             <div class="extmeta-enrich-banner">
@@ -4770,7 +4800,8 @@
                           : chainIDs.map((sid, idx) => {
                               const src = sourceByID.get(sid);
                               const label = (src && src.name) || (sid === 'bangumi' ? '内置 Bangumi 源' : sid);
-                              return `${idx > 0 ? `<span class="extmeta-chain-arrow">→</span>` : ''}<span class="badge badge-accent">#${idx + 1} ${esc(label)}</span>`;
+                              const isDisabled = Boolean(src && src.enabled === false);
+                              return `${idx > 0 ? `<span class="extmeta-chain-arrow">→</span>` : ''}<span class="badge ${isDisabled ? '' : 'badge-accent'}">#${idx + 1} ${esc(label)}</span>${isDisabled ? `<span class="badge badge-warn">已停用（不生效）</span>` : ''}`;
                             }).join('')}
                       </div>
                     </div>
@@ -5686,7 +5717,7 @@
           <label class="check-row"><input type="checkbox" name="show_nsfw" ${settings.show_nsfw === 'true' ? 'checked' : ''}><span>显示 NSFW 作品（全局默认；各账号独立开关请在个人「账号设置」调整）</span></label>
           <label class="check-row"><input type="checkbox" name="volume_index_prefetch_enabled" ${settings.volume_index_prefetch_enabled === 'true' ? 'checked' : ''}><span>启用下一卷目录索引自动预热</span></label>
         </div>
-        <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted)">定时扫库、Bangumi 刮削与自动补封面已迁移至「书库管理」中的单库/联合库「定时…」流水线配置。</p>
+        <p style="margin:0 0 14px;font-size:12px;color:var(--text-muted)">定时扫库、元数据刮削与自动补封面已迁移至「书库管理」中的单库/联合库「定时…」流水线配置。</p>
         <button type="submit" class="btn btn-primary">保存系统设置</button>
       </form>
 

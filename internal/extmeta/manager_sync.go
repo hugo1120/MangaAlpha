@@ -68,7 +68,7 @@ func (m *Manager) startSourceSync(ctx context.Context, id string, force, schedul
 	m.wg.Go(func() {
 		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Hour)
 		defer cancel()
-		skipped, err := m.syncSource(ctx, src, force, run.ID)
+		skipped, err := m.syncSource(ctx, src, force, scheduled, run.ID)
 		m.finishSync(src, run.ID, skipped, err)
 	})
 	return run, nil
@@ -241,11 +241,12 @@ func (m *Manager) loadSource(src database.MetadataSource) error {
 	return nil
 }
 
-func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, force bool, runID string) (bool, error) {
+func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, force, scheduled bool, runID string) (bool, error) {
 	client := m.client(ctx, 3*time.Hour)
 	defer client.CloseIdleConnections()
+	autoEnable := !scheduled && !src.Ready && !src.Enabled && src.LastUpdatedAt == ""
 	if src.Kind == KindBangumiArchive {
-		return m.syncBangumi(ctx, client, src, force, runID)
+		return m.syncBangumi(ctx, client, src, force, autoEnable, runID)
 	}
 
 	staging, err := os.MkdirTemp(m.root, ".sync-")
@@ -255,6 +256,9 @@ func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, f
 	defer os.RemoveAll(staging)
 	now, ready := timestamp(), true
 	state := database.MetadataSourceSyncState{Ready: &ready, LastUpdatedAt: &now}
+	if autoEnable {
+		state.Enabled = &ready
+	}
 	files := make(map[string]string)
 	var dict *TagDictionary
 	var mappings []MappingRecord
@@ -413,6 +417,7 @@ func (m *Manager) publishSync(ctx context.Context, src database.MetadataSource, 
 	if err != nil {
 		return err
 	}
+	m.invalidateFallbackCoverCacheLocked()
 	switch src.Kind {
 	case KindTagDictionary:
 		m.dictionaries[src.ID] = dict
@@ -428,7 +433,7 @@ func (m *Manager) publishSync(ctx context.Context, src database.MetadataSource, 
 	return nil
 }
 
-func (m *Manager) syncBangumi(ctx context.Context, client *http.Client, src database.MetadataSource, force bool, runID string) (bool, error) {
+func (m *Manager) syncBangumi(ctx context.Context, client *http.Client, src database.MetadataSource, force, autoEnable bool, runID string) (bool, error) {
 	if m.bangumi == nil {
 		return false, ErrUnavailable
 	}
@@ -445,10 +450,19 @@ func (m *Manager) syncBangumi(ctx context.Context, client *http.Client, src data
 		return false, err
 	}
 	m.setSyncPhase(runID, "syncing")
-	_, err = m.store.UpdateMetadataSourceSyncState(ctx, src.ID, database.MetadataSourceSyncState{
+	skipped := st.LastCheckResult == "up_to_date"
+	state := database.MetadataSourceSyncState{
 		Ready: &st.Ready, EntryCount: &st.SubjectCount, LastUpdatedAt: &st.ImportedAt,
-	})
-	return st.LastCheckResult == "up_to_date", err
+	}
+	if autoEnable && !skipped {
+		enabled := true
+		state.Enabled = &enabled
+	}
+	_, err = m.store.UpdateMetadataSourceSyncState(ctx, src.ID, state)
+	if err == nil && !skipped {
+		m.InvalidateFallbackCoverCache()
+	}
+	return skipped, err
 }
 
 func (m *Manager) downloadMappings(ctx context.Context, client *http.Client, src database.MetadataSource, staging string) ([]MappingRecord, error) {

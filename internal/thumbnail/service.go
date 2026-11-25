@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,17 +32,25 @@ import (
 
 type ExternalCoverFetcher func(ctx context.Context, sourceID, entryID, coverURL string) ([]byte, string, error)
 
+type NSFWFallbackCoverFetcher func(ctx context.Context, seriesID string) ([]byte, string, error)
+
 type CoverFetcher func(ctx context.Context, coverURL string, subjectID int64) ([]byte, error)
 
 const (
-	defaultMaxEdge = 300
-	jpegQuality    = 75
-	maxImagePixels = 100_000_000
-	bgmFailureTTL  = 5 * time.Minute
-	maxBgmFailures = 2048
+	defaultMaxEdge  = 300
+	jpegQuality     = 75
+	maxImagePixels  = 100_000_000
+	bgmFailureTTL   = 5 * time.Minute
+	maxBgmFailures  = 2048
+	bgmNSFWCooldown = 30 * time.Minute
 )
 
 var errBangumiCoverUnavailable = errors.New("Bangumi cover unavailable")
+
+type bgmNSFWFailure struct {
+	consecutive int
+	until       time.Time
+}
 
 type Data struct {
 	Bytes     []byte
@@ -72,17 +81,21 @@ type Service struct {
 	bgmDir string
 	logger *slog.Logger
 
-	bgmFetcher  CoverFetcher
-	bgmFlight   singleflight.Group
-	bgmSem      chan struct{}
-	bgmMu       sync.RWMutex
-	bgmFailures map[string]time.Time
-	bgmEpoch    uint64
+	bgmFetcher      CoverFetcher
+	bgmFlight       singleflight.Group
+	bgmSem          chan struct{}
+	bgmMu           sync.RWMutex
+	bgmFailures     map[string]time.Time
+	bgmNSFWFailures map[string]bgmNSFWFailure
+	bgmUserEpoch    map[string]uint64
+	bgmEpoch        uint64
 
-	externalMu       sync.RWMutex
-	externalFetcher  ExternalCoverFetcher
-	localPageFetcher func(context.Context, database.Book) ([]byte, error)
-	localCoverFlight singleflight.Group
+	externalMu             sync.RWMutex
+	externalFetcher        ExternalCoverFetcher
+	nsfwFallbackFetcher    NSFWFallbackCoverFetcher
+	invalidateNSFWFallback func()
+	localPageFetcher       func(context.Context, database.Book) ([]byte, error)
+	localCoverFlight       singleflight.Group
 
 	operationMu sync.RWMutex
 	inflightMu  sync.Mutex
@@ -99,9 +112,11 @@ func New(store *database.Store, root string, logger *slog.Logger) (*Service, err
 	}
 	service := &Service{
 		store: store, root: root, bgmDir: bgmDir, logger: logger,
-		bgmSem:      make(chan struct{}, 6),
-		bgmFailures: make(map[string]time.Time),
-		inflight:    make(map[string]struct{}),
+		bgmSem:          make(chan struct{}, 6),
+		bgmFailures:     make(map[string]time.Time),
+		bgmNSFWFailures: make(map[string]bgmNSFWFailure),
+		bgmUserEpoch:    make(map[string]uint64),
+		inflight:        make(map[string]struct{}),
 	}
 	if err := service.cleanupOrphans(context.Background()); err != nil {
 		logger.Warn("clean orphan series thumbnails", "error", err)
@@ -117,6 +132,12 @@ func (s *Service) SetExternalCoverFetcher(fetcher ExternalCoverFetcher) {
 	s.externalMu.Lock()
 	defer s.externalMu.Unlock()
 	s.externalFetcher = fetcher
+}
+
+func (s *Service) SetNSFWFallbackCoverFetcher(fetcher NSFWFallbackCoverFetcher, invalidate func()) {
+	s.externalMu.Lock()
+	defer s.externalMu.Unlock()
+	s.nsfwFallbackFetcher, s.invalidateNSFWFallback = fetcher, invalidate
 }
 
 // SetLocalFirstPageFetcher enables on-demand local cover generation after an
@@ -341,10 +362,10 @@ func (s *Service) GetOrFetchBangumiCover(ctx context.Context, subjectID int64, c
 		return Data{}, sql.ErrNoRows
 	}
 	scope.AllowNSFW, scope.ShowNSFW = true, true
-	return s.getOrFetchBangumiCover(database.WithUserScope(ctx, scope), subjectID, coverURL)
+	return s.getOrFetchBangumiCover(database.WithUserScope(ctx, scope), subjectID, coverURL, false)
 }
 
-func (s *Service) getOrFetchBangumiCover(ctx context.Context, subjectID int64, previewURL string) (Data, error) {
+func (s *Service) getOrFetchBangumiCover(ctx context.Context, subjectID int64, previewURL string, nsfwSeries bool) (Data, error) {
 	if subjectID <= 0 {
 		return Data{}, errors.New("invalid Bangumi subject ID")
 	}
@@ -361,14 +382,17 @@ func (s *Service) getOrFetchBangumiCover(ctx context.Context, subjectID int64, p
 	if raw := s.readBangumiCover(diskFull, publicOnly); len(raw) > 0 {
 		return Data{Bytes: raw, MediaType: "image/jpeg"}, nil
 	}
+	if nsfwSeries && s.bangumiNSFWCoolingDown(scope.UserID) {
+		return Data{}, errBangumiCoverUnavailable
+	}
 	if s.bgmFetcher == nil {
 		return Data{}, errors.New("Bangumi cover fetcher is not configured")
 	}
 	flightKey := fmt.Sprintf("%s:%t:%s", scope.UserID, publicOnly, filepath.Base(diskFull))
 	val, fetchErr, _ := s.bgmFlight.Do(flightKey, func() (any, error) {
-		s.bgmMu.Lock()
-		failureUntil, epoch := s.bgmFailures[flightKey], s.bgmEpoch
-		s.bgmMu.Unlock()
+		s.bgmMu.RLock()
+		failureUntil, epoch, userEpoch := s.bgmFailures[flightKey], s.bgmEpoch, s.bgmUserEpoch[scope.UserID]
+		s.bgmMu.RUnlock()
 		if raw := s.readBangumiCover(diskFull, publicOnly); len(raw) > 0 {
 			return raw, nil
 		}
@@ -384,18 +408,27 @@ func (s *Service) getOrFetchBangumiCover(ctx context.Context, subjectID int64, p
 		if raw := s.readBangumiCover(diskFull, publicOnly); len(raw) > 0 {
 			return raw, nil
 		}
+		if nsfwSeries && s.bangumiNSFWCoolingDown(scope.UserID) {
+			return nil, errBangumiCoverUnavailable
+		}
 		dlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer cancel()
 		fetched, err := s.bgmFetcher(dlCtx, previewURL, subjectID)
 		if err != nil {
+			if nsfwSeries {
+				s.recordBangumiNSFWResult(scope.UserID, epoch, userEpoch, err)
+			}
 			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				s.cacheBangumiCoverFailure(flightKey, epoch)
+				s.cacheBangumiCoverFailure(flightKey, scope.UserID, epoch, userEpoch)
 			}
 			return nil, err
 		}
 		compressed, _, _, err := compressWithMaxEdge(fetched, 420)
+		if nsfwSeries {
+			s.recordBangumiNSFWResult(scope.UserID, epoch, userEpoch, err)
+		}
 		if err != nil {
-			s.cacheBangumiCoverFailure(flightKey, epoch)
+			s.cacheBangumiCoverFailure(flightKey, scope.UserID, epoch, userEpoch)
 			return nil, err
 		}
 		s.bgmMu.Lock()
@@ -428,6 +461,38 @@ func (s *Service) getOrFetchBangumiCover(ctx context.Context, subjectID int64, p
 	return Data{Bytes: val.([]byte), MediaType: "image/jpeg"}, nil
 }
 
+func (s *Service) bangumiNSFWCoolingDown(userID string) bool {
+	s.bgmMu.RLock()
+	defer s.bgmMu.RUnlock()
+	return time.Now().Before(s.bgmNSFWFailures[userID].until)
+}
+
+func (s *Service) recordBangumiNSFWResult(userID string, epoch, userEpoch uint64, err error) {
+	s.bgmMu.Lock()
+	defer s.bgmMu.Unlock()
+	if epoch != s.bgmEpoch || userEpoch != s.bgmUserEpoch[userID] {
+		return
+	}
+	var unavailable interface{ CoverUnavailable() bool }
+	failure := s.bgmNSFWFailures[userID]
+	now := time.Now()
+	if errors.As(err, &unavailable) && unavailable.CoverUnavailable() {
+		if now.Before(failure.until) {
+			return
+		}
+		if !failure.until.IsZero() {
+			failure = bgmNSFWFailure{}
+		}
+		failure.consecutive++
+		if failure.consecutive >= 2 {
+			failure.until = now.Add(bgmNSFWCooldown)
+		}
+		s.bgmNSFWFailures[userID] = failure
+	} else if err == nil || !now.Before(failure.until) {
+		delete(s.bgmNSFWFailures, userID)
+	}
+}
+
 func (s *Service) readBangumiCover(path string, publicOnly bool) []byte {
 	s.bgmMu.RLock()
 	defer s.bgmMu.RUnlock()
@@ -444,10 +509,10 @@ func readBangumiCoverFile(path string, publicOnly bool) []byte {
 	return raw
 }
 
-func (s *Service) cacheBangumiCoverFailure(key string, epoch uint64) {
+func (s *Service) cacheBangumiCoverFailure(key, userID string, epoch, userEpoch uint64) {
 	s.bgmMu.Lock()
 	defer s.bgmMu.Unlock()
-	if epoch != s.bgmEpoch {
+	if epoch != s.bgmEpoch || userEpoch != s.bgmUserEpoch[userID] {
 		return
 	}
 	now := time.Now()
@@ -469,9 +534,42 @@ func (s *Service) cacheBangumiCoverFailure(key string, epoch uint64) {
 
 func (s *Service) InvalidateBangumiCoverFailures() {
 	s.bgmMu.Lock()
-	defer s.bgmMu.Unlock()
+	s.invalidateBangumiCoverFailuresLocked()
+	s.bgmMu.Unlock()
+	s.invalidateFallbackCoverCache()
+}
+
+func (s *Service) InvalidateUserBangumiCoverFailures(userID string) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		s.InvalidateBangumiCoverFailures()
+		return
+	}
+	prefix := userID + ":"
+	s.bgmMu.Lock()
+	for key := range s.bgmFailures {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.bgmFailures, key)
+		}
+	}
+	delete(s.bgmNSFWFailures, userID)
+	s.bgmUserEpoch[userID]++
+	s.bgmMu.Unlock()
+}
+
+func (s *Service) invalidateBangumiCoverFailuresLocked() {
 	clear(s.bgmFailures)
+	clear(s.bgmNSFWFailures)
 	s.bgmEpoch++
+}
+
+func (s *Service) invalidateFallbackCoverCache() {
+	s.externalMu.RLock()
+	invalidate := s.invalidateNSFWFallback
+	s.externalMu.RUnlock()
+	if invalidate != nil {
+		invalidate()
+	}
 }
 
 func (s *Service) getPreferredCover(ctx context.Context, seriesID string) (data Data, ok, onlyBangumi, attemptedExternal bool) {
@@ -490,7 +588,9 @@ FROM series_metadata sm WHERE sm.series_id=?`, seriesID).Scan(&bgmID, &coverSour
 	}
 	s.externalMu.RLock()
 	fetcher := s.externalFetcher
+	fallback := s.nsfwFallbackFetcher
 	s.externalMu.RUnlock()
+	nsfwBangumi := isNSFW && bgmID.Valid && bgmID.Int64 > 0
 	if fetcher != nil && sourceID != "" && entryID != "" && coverURL != "" {
 		if scope, ok := database.UserScopeFromContext(ctx); ok && !scope.AllowNSFW && isNSFW {
 			return Data{}, false, false, true
@@ -507,15 +607,25 @@ FROM series_metadata sm WHERE sm.series_id=?`, seriesID).Scan(&bgmID, &coverSour
 	forceOnlyBgm := coverSource == database.CoverSourceBangumi
 	subjectID := bgmID.Int64
 	expectedFile := fmt.Sprintf("bgm_%d.jpg", subjectID)
-	if _, ok := database.UserScopeFromContext(ctx); !ok {
+	if _, scoped := database.UserScopeFromContext(ctx); !scoped {
 		ctx = database.WithUserScope(ctx, database.UserScope{
 			UserID: database.PrimaryAdminUserID, AllowNSFW: true, ShowNSFW: s.store.ShowNSFW(ctx),
 		})
 	}
-	data, fetchErr := s.getOrFetchBangumiCover(ctx, subjectID, "")
+	effectiveScope, _ := database.UserScopeFromContext(ctx)
+	nsfwEligible := nsfwBangumi && effectiveScope.EffectiveShowNSFW()
+	data, fetchErr := s.getOrFetchBangumiCover(ctx, subjectID, "", nsfwEligible)
 	if fetchErr != nil {
 		if s.logger != nil && !errors.Is(fetchErr, errBangumiCoverUnavailable) {
 			s.logger.Debug("lazy fetch Bangumi cover failed", "series", seriesID, "subject", subjectID, "error", fetchErr)
+		}
+		if nsfwEligible && fallback != nil {
+			raw, mediaType, err := fallback(ctx, seriesID)
+			if err == nil {
+				if _, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil {
+					return Data{Bytes: raw, MediaType: mediaType}, true, forceOnlyBgm, true
+				}
+			}
 		}
 		return Data{}, false, forceOnlyBgm, false
 	}
@@ -547,10 +657,10 @@ func (s *Service) BangumiStats(ctx context.Context) (Stats, error) {
 }
 
 func (s *Service) ClearBangumiCovers(ctx context.Context) error {
+	defer s.invalidateFallbackCoverCache()
 	s.bgmMu.Lock()
 	defer s.bgmMu.Unlock()
-	clear(s.bgmFailures)
-	s.bgmEpoch++
+	s.invalidateBangumiCoverFailuresLocked()
 	if err := os.RemoveAll(s.bgmDir); err != nil {
 		return err
 	}

@@ -525,7 +525,7 @@ func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpd
 			return TrackerStatus{}, err
 		}
 		if previousToken != "" || previousRefreshToken != "" {
-			tm.svc.invalidateCoverFailures()
+			tm.svc.invalidateUserCoverFailures(database.UserIDFromContext(ctx))
 		}
 		return tm.Status(ctx, 30)
 	}
@@ -564,8 +564,9 @@ func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpd
 	if err := tm.saveUserConfig(ctx, cfg); err != nil {
 		return TrackerStatus{}, err
 	}
-	if previousToken != cfg.Token || previousRefreshToken != cfg.RefreshToken {
-		tm.svc.invalidateCoverFailures()
+	if (upd.AccessToken != nil && strings.TrimSpace(*upd.AccessToken) != "") ||
+		previousToken != cfg.Token || previousRefreshToken != cfg.RefreshToken {
+		tm.svc.invalidateUserCoverFailures(database.UserIDFromContext(ctx))
 	}
 	return tm.Status(ctx, 30)
 }

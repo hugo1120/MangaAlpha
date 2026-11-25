@@ -249,6 +249,7 @@ func (c *CoverService) GetOrFetch(ctx context.Context, sourceID, entryID, coverU
 
 	negKey := c.negativeKey(sourceID, entryID, coverURL)
 	if msg, cached := c.checkNegativeCache(negKey); cached {
+		recordCoverFailure("NEGATIVE_CACHE_HIT", "A recent cover request failed.", 0)
 		return CoverData{}, fmt.Errorf("%w: %s", ErrNegativeCached, msg)
 	}
 
@@ -261,6 +262,7 @@ func (c *CoverService) GetOrFetch(ctx context.Context, sourceID, entryID, coverU
 			return nil, err
 		}
 		if msg, cached := c.checkNegativeCache(negKey); cached {
+			recordCoverFailure("NEGATIVE_CACHE_HIT", "A recent cover request failed.", 0)
 			return nil, fmt.Errorf("%w: %s", ErrNegativeCached, msg)
 		}
 
@@ -306,6 +308,8 @@ func (c *CoverService) fetchValidateAndCache(
 	if err != nil {
 		if errors.Is(err, ErrSSRFBlocked) {
 			diagnostics.Default().Record(metadataDiagnostic("extmeta_cover", "fetch", diagnostics.LevelWarn, err, proxy))
+		} else if !errors.Is(err, context.Canceled) {
+			recordCoverFailure("TRANSPORT_ERROR", DescribeError(err), 0)
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return CoverData{}, err
@@ -328,32 +332,39 @@ func (c *CoverService) fetchValidateAndCache(
 		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 		errMsg := fmt.Sprintf("cover HTTP %d", resp.StatusCode)
 		c.setNegativeCache(negKey, errMsg)
+		recordCoverFailure("HTTP_STATUS", "The cover server returned a non-success status.", resp.StatusCode)
 		return CoverData{}, errors.New(errMsg)
 	}
 
 	if resp.ContentLength > c.maxImageBytes {
 		errMsg := fmt.Sprintf("cover content-length (%d) exceeds %d bytes limit", resp.ContentLength, c.maxImageBytes)
 		c.setNegativeCache(negKey, errMsg)
+		recordCoverFailure("SIZE_LIMIT", "The cover exceeds the size limit.", 0)
 		return CoverData{}, fmt.Errorf("%w: %s", ErrInvalidImage, errMsg)
 	}
 
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, c.maxImageBytes+1))
 	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			recordCoverFailure("TRANSPORT_ERROR", DescribeError(err), 0)
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return CoverData{}, err
 		}
-		c.setNegativeCache(negKey, err.Error())
+		c.setNegativeCache(negKey, DescribeError(err))
 		return CoverData{}, err
 	}
 	if int64(len(raw)) > c.maxImageBytes {
 		errMsg := fmt.Sprintf("cover size exceeds %d bytes limit", c.maxImageBytes)
 		c.setNegativeCache(negKey, errMsg)
+		recordCoverFailure("SIZE_LIMIT", "The cover exceeds the size limit.", 0)
 		return CoverData{}, fmt.Errorf("%w: %s", ErrInvalidImage, errMsg)
 	}
 
 	ext, mimeType, ok := DetectImageFormat(raw)
 	if !ok {
 		c.setNegativeCache(negKey, "unrecognized image magic bytes")
+		recordCoverFailure("INVALID_IMAGE", "The cover has unrecognized image magic bytes.", 0)
 		return CoverData{}, fmt.Errorf("%w: unrecognized magic bytes", ErrInvalidImage)
 	}
 
@@ -373,6 +384,17 @@ func (c *CoverService) fetchValidateAndCache(
 		CachePath: cachePath,
 		FromCache: false,
 	}, nil
+}
+
+func recordCoverFailure(code, detail string, status int) {
+	event := diagnostics.Event{
+		Component: "extmeta", Stage: "extmeta_cover", Action: "fetch",
+		Code: code, Detail: detail,
+	}
+	if status != 0 {
+		event.Meta = map[string]any{"httpStatus": status}
+	}
+	diagnostics.Default().RecordVerbose(event)
 }
 
 // DetectImageFormat inspects leading magic bytes for JPEG, PNG, WebP, and GIF images.

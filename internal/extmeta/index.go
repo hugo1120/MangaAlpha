@@ -3,6 +3,7 @@ package extmeta
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
 	"github.com/xJogger/fake-komga-115/internal/cjk"
 	_ "modernc.org/sqlite"
 )
@@ -31,6 +33,8 @@ type SearchMatch struct {
 	IsNSFW    bool    `json:"isNsfw"`
 	Score     float64 `json:"score"`
 	MatchType string  `json:"matchType"`
+
+	gallery *galleryMatch
 }
 
 // ExtractThumbSHA1 extracts a 40-character lowercase SHA-1 hex digest from a cover URL
@@ -452,48 +456,107 @@ ORDER BY entry_id ASC`, digest)
 
 // SearchByTitle finds entries matching query via normalized exact lookup + FTS5 recall + similarity scoring.
 func (s *SidecarStore) SearchByTitle(ctx context.Context, query string, limit int) ([]SearchMatch, error) {
-	if s == nil || s.sidecarDB == nil {
-		return nil, errors.New("sidecar store is not open")
-	}
+	return s.SearchWithHints(ctx, []string{query}, nil, limit)
+}
+
+// SearchWithHints ranks matches across title variants and uses author hints for gallery entries.
+func (s *SidecarStore) SearchWithHints(ctx context.Context, titles, authors []string, limit int) ([]SearchMatch, error) {
 	if limit <= 0 {
 		limit = 10
 	}
-	if limit > 200 {
-		limit = 200
+	limit = min(limit, 200)
+	hits, err := s.searchWithHints(ctx, titles, authors, limit)
+	if len(hits) > limit {
+		hits = hits[:limit]
 	}
+	return hits, err
+}
 
+func (s *SidecarStore) searchWithHints(ctx context.Context, titles, authors []string, limit int) ([]SearchMatch, error) {
+	if s == nil || s.sidecarDB == nil {
+		return nil, errors.New("sidecar store is not open")
+	}
+	gallery := s.schema == SchemaGalleryV1 && s.upstreamDB != nil
+	queries := make(map[string]string)
+	addQuery := func(title string) {
+		key := cjk.ExactTitleKey(title)
+		if key != "" {
+			if _, exists := queries[key]; !exists {
+				queries[key] = title
+			}
+		}
+	}
+	authorKeys := titleKeys(authors)
+	for _, title := range titles {
+		addQuery(title)
+		if gallery && strings.ContainsAny(title, "[【(（") {
+			core, hints := parseGalleryTitle(title)
+			addQuery(core)
+			authorKeys = append(authorKeys, hints...)
+		}
+	}
+	candidates := make(map[string]SearchMatch)
+	for _, query := range queries {
+		if err := s.recallTitle(ctx, query, limit, gallery, candidates); err != nil {
+			return nil, err
+		}
+	}
+	if gallery && len(candidates) > 0 {
+		if err := s.scoreGalleryMatches(ctx, candidates, queries, authorKeys); err != nil {
+			return nil, err
+		}
+	}
+	hits := make([]SearchMatch, 0, len(candidates))
+	for _, hit := range candidates {
+		if gallery && hit.gallery == nil {
+			continue
+		}
+		hits = append(hits, hit)
+	}
+	slices.SortFunc(hits, func(a, b SearchMatch) int {
+		if a.Score > b.Score {
+			return -1
+		}
+		if a.Score < b.Score {
+			return 1
+		}
+		if a.gallery != nil && b.gallery != nil {
+			return compareGalleryVersions(a.gallery, b.gallery)
+		}
+		return strings.Compare(a.EntryID, b.EntryID)
+	})
+	return hits, nil
+}
+
+func (s *SidecarStore) recallTitle(ctx context.Context, query string, limit int, gallery bool, candidates map[string]SearchMatch) error {
 	normQ := cjk.ExactTitleKey(query)
 	ftsPhrase := cjk.FTSQueryPhrase(query)
-	if normQ == "" && ftsPhrase == "" {
-		return nil, nil
+	recallBudget := max(limit*4, 40)
+	exactLimit := limit * 2
+	if gallery {
+		recallBudget = max(limit*6, 60)
+		exactLimit = recallBudget
 	}
-
-	type scoredCandidate struct {
-		match SearchMatch
-	}
-	candidates := make(map[string]scoredCandidate)
-
+	recalled := make(map[string]struct{})
 	addCandidate := func(entryID, rawTitle, thumbSHA1, category string, isNSFW int, normTitle, normAlt, matchType string) {
+		recalled[entryID] = struct{}{}
 		score := scoreTitleMatch(normQ, normTitle, normAlt)
 		if score <= 0 && matchType == "fts" {
 			score = 0.25
 		}
-		if prev, ok := candidates[entryID]; ok {
-			if score <= prev.match.Score {
-				return
-			}
+		if prev, ok := candidates[entryID]; ok && (score < prev.Score ||
+			(score == prev.Score && matchType >= prev.MatchType)) {
+			return
 		}
-		candidates[entryID] = scoredCandidate{
-			match: SearchMatch{
-				SourceID:  s.sourceID,
-				EntryID:   entryID,
-				Title:     rawTitle,
-				Category:  category,
-				ThumbSHA1: thumbSHA1,
-				IsNSFW:    isNSFW != 0,
-				Score:     score,
-				MatchType: matchType,
-			},
+		candidates[entryID] = SearchMatch{
+			SourceID:  s.sourceID,
+			EntryID:   entryID,
+			Title:     rawTitle,
+			Category:  category,
+			ThumbSHA1: thumbSHA1,
+			IsNSFW:    isNSFW != 0,
+			Score:     score,
+			MatchType: matchType,
 		}
 	}
 
@@ -503,28 +566,27 @@ func (s *SidecarStore) SearchByTitle(ctx context.Context, query string, limit in
 SELECT entry_id, raw_title, thumb_sha1, category, is_nsfw, norm_title, norm_alt
 FROM ext_entries
 WHERE norm_title = ? OR norm_alt = ?
-LIMIT ?`, normQ, normQ, limit*2)
+LIMIT ?`, normQ, normQ, exactLimit)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		for exactRows.Next() {
 			var eid, rawTitle, sha1, cat, nt, na string
 			var nsfw int
 			if err := exactRows.Scan(&eid, &rawTitle, &sha1, &cat, &nsfw, &nt, &na); err != nil {
 				exactRows.Close()
-				return nil, err
+				return err
 			}
 			addCandidate(eid, rawTitle, sha1, cat, nsfw, nt, na, "exact")
 		}
 		if err := exactRows.Err(); err != nil {
 			exactRows.Close()
-			return nil, err
+			return err
 		}
 		exactRows.Close()
 	}
 
 	// 2. FTS5 recall (adjacent phrase first, then multi-word AND fallback if still under budget).
-	recallBudget := max(limit*4, 40)
 	runFTS := func(matchExpr string) error {
 		if matchExpr == "" {
 			return nil
@@ -553,36 +615,183 @@ LIMIT ?`, matchExpr, recallBudget)
 		return err
 	}
 
-	if len(candidates) < limit && ftsPhrase != "" {
+	if (gallery || len(recalled) < limit) && ftsPhrase != "" {
 		if err := runFTS(ftsPhrase); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	if len(candidates) < limit {
+	andThreshold := limit
+	if gallery {
+		andThreshold = recallBudget
+	}
+	if len(recalled) < andThreshold {
 		if andExpr := buildMultiTermFTSQuery(query); andExpr != "" && andExpr != ftsPhrase {
 			if err := runFTS(andExpr); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
 
-	results := make([]SearchMatch, 0, len(candidates))
-	for _, c := range candidates {
-		results = append(results, c.match)
+	return nil
+}
+
+type galleryMatch struct {
+	gid, rootGID   int64
+	cores, authors []string
+	active         bool
+	authorMatched  bool
+	authorConflict bool
+	rating         float64
+	hasCover       bool
+}
+
+var (
+	gallerySuffix = regexp.MustCompile(`(?:\s*(?:\[[^\[\]]*\]|【[^【】]*】))+\s*$`)
+	galleryCredit = regexp.MustCompile(`\[[^\[\]]*?[(（]([^()（）]+)[)）][^\[\]]*\]|【[^【】]*?[(（]([^()（）]+)[)）][^【】]*】`)
+)
+
+func parseGalleryTitle(raw string) (core string, authors []string) {
+	parsed := bangumi.ParseSeriesName(raw)
+	if len(parsed.Candidates) == 0 {
+		return "", nil
 	}
-	slices.SortFunc(results, func(a, b SearchMatch) int {
-		if a.Score > b.Score {
+	core = parsed.Candidates[0]
+	// Trailing release/language labels can look like author brackets to the folder parser.
+	if trimmed := gallerySuffix.ReplaceAllString(raw, ""); trimmed != raw {
+		if prefix := bangumi.ParseSeriesName(trimmed); len(prefix.Candidates) > 0 &&
+			cjk.ExactTitleKey(prefix.Candidates[0]) == cjk.ExactTitleKey(core) {
+			raw, parsed = trimmed, prefix
+		}
+	}
+	// In a circle (artist) credit, the artist identifies the work across releases.
+	credited := galleryCredit.ReplaceAllString(raw, "[$1$2]")
+	if credited != raw {
+		parsed = bangumi.ParseSeriesName(credited)
+	}
+	return core, titleKeys(parsed.Authors)
+}
+
+func titleKeys(values []string) []string {
+	var keys []string
+	for _, value := range values {
+		if key := cjk.ExactTitleKey(value); key != "" && !slices.Contains(keys, key) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+func sharesKey(a, b []string) bool {
+	for _, key := range a {
+		if slices.Contains(b, key) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *SidecarStore) scoreGalleryMatches(ctx context.Context, hits map[string]SearchMatch, queries map[string]string, authorKeys []string) error {
+	ids := make([]int64, 0, len(hits))
+	for id := range hits {
+		if gid, err := strconv.ParseInt(id, 10, 64); err == nil {
+			ids = append(ids, gid)
+		}
+	}
+	// Bind the candidate IDs in one parameter to stay within SQLite's variable limit.
+	batch, err := json.Marshal(ids)
+	if err != nil {
+		return err
+	}
+	rows, err := s.upstreamDB.QueryContext(ctx, `
+SELECT gid, COALESCE(title,''), COALESCE(title_jpn,''), COALESCE(expunged,0),
+       COALESCE(removed,0), COALESCE(replaced,0), COALESCE(root_gid,0), COALESCE(rating,0),
+       trim(COALESCE(thumb,'')) <> ''
+FROM gallery WHERE gid IN (SELECT value FROM json_each(?))`, string(batch))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var g galleryMatch
+		var title, titleJPN string
+		var expunged, removed, replaced int
+		if err := rows.Scan(&g.gid, &title, &titleJPN, &expunged, &removed, &replaced, &g.rootGID, &g.rating, &g.hasCover); err != nil {
+			return err
+		}
+		g.active = expunged == 0 && removed == 0 && replaced == 0
+		core, authors := parseGalleryTitle(title)
+		altCore, altAuthors := parseGalleryTitle(titleJPN)
+		g.cores = titleKeys([]string{core, altCore})
+		g.authors = append(authors, altAuthors...)
+		g.authorMatched = sharesKey(authorKeys, g.authors)
+		g.authorConflict = len(authorKeys) > 0 && len(g.authors) > 0 && !g.authorMatched
+
+		id := strconv.FormatInt(g.gid, 10)
+		hit := hits[id]
+		if g.authorConflict && hit.Score > 0.90 && hit.MatchType != "exact" {
+			hit.Score = 0.90
+		}
+		rawTitle, rawAlt := cjk.ExactTitleKey(title), cjk.ExactTitleKey(titleJPN)
+		for query := range queries {
+			if score := scoreTitleMatch(query, rawTitle, rawAlt); score > hit.Score {
+				if g.authorConflict && query != rawTitle && query != rawAlt && score > 0.90 {
+					score = 0.90
+				}
+				if score > hit.Score {
+					hit.Score, hit.MatchType = score, "fts"
+				}
+			}
+			for _, key := range g.cores {
+				score := scoreNormalizedPair(query, key)
+				if query == key {
+					switch {
+					case g.authorMatched:
+						score = 0.99
+					case g.authorConflict:
+						score = 0.90
+					default:
+						score = 0.96
+					}
+				} else if g.authorConflict && score > 0.90 {
+					score = 0.90
+				}
+				if score > hit.Score {
+					hit.Score, hit.MatchType = score, "core"
+				}
+			}
+		}
+		if !g.active {
+			hit.Score = max(0, hit.Score-0.01)
+		}
+		hit.gallery = &g
+		hits[id] = hit
+	}
+	return rows.Err()
+}
+
+func compareGalleryVersions(a, b *galleryMatch) int {
+	switch {
+	case a.active != b.active:
+		if a.active {
 			return -1
 		}
-		if a.Score < b.Score {
-			return 1
+		return 1
+	case a.authorMatched != b.authorMatched:
+		if a.authorMatched {
+			return -1
 		}
-		return strings.Compare(a.EntryID, b.EntryID)
-	})
-	if len(results) > limit {
-		results = results[:limit]
+		return 1
+	case a.rating > b.rating:
+		return -1
+	case a.rating < b.rating:
+		return 1
+	case a.gid > b.gid:
+		return -1
+	case a.gid < b.gid:
+		return 1
+	default:
+		return 0
 	}
-	return results, nil
 }
 
 // GetEntry loads the complete metadata record for entryID from the read-only upstream SQLite DB.

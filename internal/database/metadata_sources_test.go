@@ -315,7 +315,7 @@ VALUES('admin','b_aria_1','s_aria',0,12,?,?);
 	meta, err := store.SeriesMetadataByID(ctx, ser)
 	if err != nil || meta.BgmSubjectID == nil || *meta.BgmSubjectID != 539 ||
 		meta.Title != "水星领航员" || !meta.TitleLock || meta.Publisher != "Mag Garden" ||
-		meta.ExtSourceID != "" || meta.ExtEntryID != "" || meta.ExtCoverURL != "" || meta.ExtCoverPath != "" || meta.MatchOrigin != "" {
+		meta.ExtSourceID != "" || meta.ExtEntryID != "" || meta.ExtCoverURL != "" || meta.ExtCoverPath != "" || meta.MatchOrigin != "manual" {
 		t.Fatalf("series_metadata corrupted after upgrade: err=%v meta=%+v", err, meta)
 	}
 	var colRowID int64
@@ -341,7 +341,7 @@ VALUES('admin','b_aria_1','s_aria',0,12,?,?);
 	}
 	defer store2.Close()
 	meta2, err := store2.SeriesMetadataByID(ctx, ser)
-	if err != nil || meta2.BgmSubjectID == nil || *meta2.BgmSubjectID != 539 || meta2.Title != "水星领航员" {
+	if err != nil || meta2.BgmSubjectID == nil || *meta2.BgmSubjectID != 539 || meta2.Title != "水星领航员" || meta2.MatchOrigin != "manual" {
 		t.Fatalf("series_metadata lost after second Open: err=%v meta=%+v", err, meta2)
 	}
 }

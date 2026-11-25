@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -166,13 +167,16 @@ func TestManagerSyncFailureDetailsAndDiagnostics(t *testing.T) {
 		{"/blocked", "SSRF_BLOCKED", "网络安全策略", nil},
 		{"/missing", "NOT_FOUND", "HTTP 404", float64(http.StatusNotFound)},
 	} {
-		src := addManagerSource(t, m, database.MetadataSource{
+		src, err := m.AddCustomSource(t.Context(), database.MetadataSource{
 			Name: "Mapping index", Kind: KindMappingPack, ManifestURL: "https://repo.example.test" + tc.path,
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		syncManagerFixture(t, m, src, false, "failed")
 		run := m.Syncs()[0]
 		state, err := store.GetMetadataSource(t.Context(), src.ID)
-		if err != nil || state.LastError != run.Error || !strings.Contains(run.Error, tc.detail) {
+		if err != nil || state.Enabled || state.Ready || state.LastError != run.Error || !strings.Contains(run.Error, tc.detail) {
 			t.Fatalf("sync messages: state=%q run=%q error=%v", state.LastError, run.Error, err)
 		}
 		events := rec.Recent(1)
@@ -413,6 +417,7 @@ func TestManagerOfflineReadinessUsesVisibleLibraryChains(t *testing.T) {
 }
 
 func TestManagerOfflineChainMappingAndManualProtection(t *testing.T) {
+	rec := testMetadataDiagnostics(t)
 	ctx := context.Background()
 	mappings := `{"schema":"mangaalpha_mapping_v1","key":"Blue River","targetSource":"gallery_v1","targetId":"102"}
 {"schema":"mangaalpha_mapping_v1","key":"Uncatalogued Work","targetSource":"gallery_v1","targetId":"102"}
@@ -475,6 +480,18 @@ func TestManagerOfflineChainMappingAndManualProtection(t *testing.T) {
 	if done := m.ScrapeRuns()[0]; done.ID != run.ID || done.Status != "success" || done.Matched != 2 || done.Mapped != 1 {
 		t.Fatalf("scrape = %+v", done)
 	}
+	events := rec.Recent(1)
+	if len(events) != 1 {
+		t.Fatal("missing scrape completion diagnostic")
+	}
+	event := events[0]
+	if event.Component != "extmeta" || event.Stage != "extmeta_scrape" || event.Action != "finish" || event.Detail != "" ||
+		!reflect.DeepEqual(event.Meta, map[string]any{
+			"mode": "force", "status": "success", "allowOnline": true, "total": float64(2), "matched": float64(2),
+			"mapped": float64(1), "unmatched": float64(0), "skipped": float64(0), "failed": float64(0),
+		}) {
+		t.Errorf("scrape completion diagnostic = %+v", event)
+	}
 	if live, err := m.ScrapeRunByID(ctx, run.ID); err != nil || live.Mapped != 1 {
 		t.Fatalf("in-process scrape = %+v, err = %v", live, err)
 	}
@@ -525,9 +542,12 @@ func TestManagerNonEmptyMappingAllowsScrapeWithoutOtherSources(t *testing.T) {
 	})}
 	store, m, _ := newTestManager(t, ManagerOptions{HTTPClient: client})
 	seedMetadataLibrary(t, store, "main", true)
-	src := addManagerSource(t, m, database.MetadataSource{
+	src, err := m.AddCustomSource(t.Context(), database.MetadataSource{
 		Name: "Community", Kind: KindMappingPack, DownloadURL: "https://source.example.test/pack.ndjson",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	syncManagerFixture(t, m, src, false, "success")
 	run, err := m.StartMultiScrape(t.Context(), "", "", false)
 	if err != nil {
@@ -637,18 +657,38 @@ func TestManagerRemoteSyncValidatorsAndFailurePreservesIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	src := addManagerSource(t, m, database.MetadataSource{
+	src, err := m.AddCustomSource(ctx, database.MetadataSource{
 		Name: "Remote", Kind: KindOfflineSQLite, DownloadURL: "https://source.example.test/source.sqlite",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.Enabled || src.Ready {
+		t.Fatal("source fixture must start disabled and unready")
+	}
+	if _, err := m.startSourceSync(ctx, src.ID, false, true); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("scheduled initial sync for disabled source: %v", err)
+	}
 	syncManagerFixture(t, m, src, false, "success")
+	state, err := store.GetMetadataSource(ctx, src.ID)
+	if err != nil || !state.Enabled || !state.Ready {
+		t.Fatalf("first manual sync did not enable source: %+v, %v", state, err)
+	}
+	disabled := false
+	if _, err := m.UpdateSourceConfig(ctx, src.ID, SourceConfig{Enabled: &disabled}); err != nil {
+		t.Fatal(err)
+	}
 	syncManagerFixture(t, m, src, false, "skipped")
+	syncManagerFixture(t, m, src, true, "success")
 	bad.Store(true)
 	syncManagerFixture(t, m, src, true, "failed")
-	state, err := store.GetMetadataSource(ctx, src.ID)
-	if err != nil || !state.Ready || state.EntryCount != 2 || state.RemoteETag != `"first"` || downloads.Load() != 2 {
+	state, err = store.GetMetadataSource(ctx, src.ID)
+	if err != nil || state.Enabled || !state.Ready || state.EntryCount != 2 || state.RemoteETag != `"first"` || downloads.Load() != 3 {
 		t.Fatalf("remote sync state = %+v, downloads = %d, error = %v", state, downloads.Load(), err)
 	}
-	entry, err := m.entry(ctx, src.ID, "101")
+	m.mu.RLock()
+	entry, err := m.sidecars[src.ID].GetEntry(ctx, "101")
+	m.mu.RUnlock()
 	if err != nil || entry.Title != "Blue River" {
 		t.Fatalf("previous sidecar no longer readable: %+v %v", entry, err)
 	}
@@ -737,5 +777,44 @@ func TestManagerSchedulerHonorsSourceCadence(t *testing.T) {
 	})
 	if runs := m.Syncs(); len(runs) != 1 || runs[0].SourceID != weekly.ID || runs[0].Status != "success" || requests.Load() != 1 {
 		t.Fatalf("scheduled runs = %+v, requests = %d", runs, requests.Load())
+	}
+}
+
+func TestDisabledSourceStaysDisabledAcrossURLChangeRebuild(t *testing.T) {
+	ctx := context.Background()
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		return managerResponse(r, http.StatusOK, strings.NewReader(`{"data":[{"namespace":"topic","data":{"glasses":{"name":"眼镜"}}}]}`)), nil
+	})}
+	store, m, _ := newTestManager(t, ManagerOptions{HTTPClient: client})
+	src, err := m.AddCustomSource(ctx, database.MetadataSource{
+		Name: "Rebuild Dict", Kind: KindTagDictionary, Enabled: false, AutoUpdate: "manual",
+		DownloadURL: "https://source.example.test/v1.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// First-ever manual sync auto-enables the newly added source.
+	syncManagerFixture(t, m, src, false, "success")
+	got, err := store.GetMetadataSource(ctx, src.ID)
+	if err != nil || !got.Enabled || !got.Ready {
+		t.Fatalf("after first sync: %+v, err=%v", got, err)
+	}
+
+	// Admin explicitly disables the source, then changes its DownloadURL (which clears Ready).
+	disabled := false
+	nextURL := "https://source.example.test/v2.json"
+	if _, err := m.UpdateSourceConfig(ctx, src.ID, SourceConfig{Enabled: &disabled, DownloadURL: &nextURL}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = store.GetMetadataSource(ctx, src.ID)
+	if err != nil || got.Enabled || got.Ready {
+		t.Fatalf("after disabling and changing URL: %+v, err=%v", got, err)
+	}
+
+	// Rebuilding the explicitly disabled source must preserve Enabled=false.
+	syncManagerFixture(t, m, got, false, "success")
+	got, err = store.GetMetadataSource(ctx, src.ID)
+	if err != nil || got.Enabled || !got.Ready {
+		t.Fatalf("rebuilt disabled source unexpectedly changed enabled=%v ready=%v, err=%v", got.Enabled, got.Ready, err)
 	}
 }

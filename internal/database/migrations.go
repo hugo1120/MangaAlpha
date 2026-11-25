@@ -76,6 +76,9 @@ func applyMigrations(db *sql.DB) error {
 	if err := ensureSeriesMetadataExtColumns(db); err != nil {
 		return err
 	}
+	if err := backfillLegacyMatchOrigin(db); err != nil {
+		return err
+	}
 	if err := ensurePerformanceIndexes(db); err != nil {
 		return err
 	}
@@ -503,6 +506,25 @@ func ensureSeriesMetadataExtColumns(db *sql.DB) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+func backfillLegacyMatchOrigin(db *sql.DB) error {
+	_, err := db.Exec(`
+UPDATE series_metadata
+SET match_origin = CASE
+  WHEN coalesce(scrape_confidence, 0) >= 0.999
+    OR status_lock = 1 OR title_lock = 1 OR title_sort_lock = 1 OR summary_lock = 1
+    OR reading_direction_lock = 1 OR publisher_lock = 1 OR age_rating_lock = 1
+    OR language_lock = 1 OR total_book_count_lock = 1 OR release_date_lock = 1
+    OR genres_lock = 1 OR tags_lock = 1 OR authors_lock = 1 OR alternate_titles_lock = 1
+    OR links_lock = 1 OR sharing_labels_lock = 1 OR nsfw_lock = 1
+  THEN 'manual'
+  ELSE 'auto'
+END
+WHERE coalesce(match_origin, '') = ''
+  AND bgm_subject_id > 0
+  AND coalesce(ext_entry_id, '') = ''`)
+	return err
 }
 
 func columnExistsTx(tx *sql.Tx, table, column string) (bool, error) {

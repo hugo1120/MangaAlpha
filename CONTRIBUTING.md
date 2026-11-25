@@ -30,7 +30,7 @@ bash scripts/build-reader.sh
 
 # 前端 JS 语法与脚本单测
 node --check internal/httpserver/static/ui/app.js
-node --test scripts/webdav-form.test.cjs
+node --test scripts/*.test.cjs
 
 # Go 格式化、竞态单测、静态检查与跨平台编译校验
 gofmt -w cmd internal

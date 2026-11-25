@@ -174,5 +174,5 @@ server {
 
 1. 访问 `https://manga.example.com/health` 返回 `{"status":"ok"}`。
 2. 登录后在浏览器开发者工具 → Application → Cookies 检查 `fk115_session` 与 `KOMGA-SESSION` 均已带有 **`HttpOnly`**、**`SameSite=Lax`** 且 **`Secure`** 为勾选状态（若 `Secure` 未勾选，说明反代未透传 `X-Forwarded-Proto: https` 或反代 IP 不在 `FK115_TRUSTED_PROXIES` 中）。
-3. 在「管理后台 → Bangumi」点击「一键安装油猴脚本」，确认生成脚本内的服务器地址为 `https://manga.example.com` 且包含 `// @connect manga.example.com`。
+3. 在右上角「账号设置」（`/account`）的 Bangumi 油猴脚本卡片点击「一键安装油猴脚本」，确认生成脚本内的服务器地址为 `https://manga.example.com` 且包含 `// @connect manga.example.com`。
 4. 使用公网测试确认 `http://<服务器公网IP>:25600` **无法直接连入**（已被防火墙或 `127.0.0.1` 绑定拦截）。

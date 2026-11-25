@@ -16,7 +16,7 @@
 
 ### 方式一：AI Agent 一键授权流（推荐，无需手输密码、无需手动复制 Key）
 
-1. 在「管理后台 → Bangumi 刮削中心」找到 **「使用 AI Agent 协助匹配未命中作品」** 卡片，点击 **「复制给 AI Agent」**，粘贴给 Claude Code / Codex / Cursor / Antigravity / OpenClaw 等任意 AI Agent。
+1. 在「管理后台 → 元数据刮削」找到 **「使用 AI Agent 协助匹配未命中作品」** 卡片，点击 **「复制给 AI Agent」**，粘贴给 Claude Code / Codex / Cursor / Antigravity / OpenClaw 等任意 AI Agent。
 2. Agent 可免鉴权读取公开只读的内置指引：`GET /api/agent/v1/guide`（或 `GET /api/agent/v1/playbooks/bangumi-match`，不含任何私密书库数据）。
 3. Agent 调用 `POST /api/agent/v1/auth/requests` 发起授权申请，获得 10 分钟有效的直达确认链接（`/agent-auth/<requestId>`）与 6 位核对码（例如 `K7M-92Q`）发送给你。
 4. 你在浏览器点开链接（未登录会先走管理员登录页再自动跳回），核对确认码一致后点击 **「批准授权」**，服务端自动签发专属 API Key：
@@ -76,7 +76,7 @@ curl -fsS -H "Authorization: Bearer $FK115_API_KEY" \
   - `page`（从 `0` 开始，默认 `0`）、`size`（默认 `50`，最大 `200`）
   - `search` / `q`：搜索显示标题、原始目录名、别名或作者
   - `library_id`：限定书库 ID（可重复传参或逗号分隔）
-  - `scrape_status`：`none`（尚未刮削）| `matched`（已匹配，含手动绑定）| `unmatched`（自动未命中）
+  - `scrape_status`：`none`（尚未刮削）| `matched`（已匹配，含手动绑定）| `unmatched`（未匹配）
   - `nsfw`：`all`（默认，含 NSFW）| `only`（仅 NSFW）| `exclude`（排除 NSFW）
   - `include_hidden`：`true` | `false`（默认 `false`，仅查未隐藏书库）
   - `publisher`、`genre`、`tag`、`author`、`status`、`sort`

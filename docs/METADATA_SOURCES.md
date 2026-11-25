@@ -7,7 +7,7 @@
 ## 1. 概述与设计原则
 
 1. **纯离线优先**：大规模批量刮削默认仅读取本地 SQLite（及随库构建的只读 Sidecar FTS5 + SHA-1 索引）与本地社区映射包，避免触发上游站点 API 限流或封禁。
-2. **多源顺延链（Per-Library Priority Chain）**：每个物理书库可独立配置 `sourceIds` 优先级顺序（默认使用内置 Bangumi）；按 `#1 → #2 → ...` 顺序尝试匹配，若全部离线源未命中，则自动由已启用的社区映射包兜底。
+2. **多源顺延链（Per-Library Priority Chain）**：每个顶层书库（含联合书库，自动跳过联合子库）可独立配置 `sourceIds` 优先级顺序（未配置时默认使用内置 Bangumi）；按 `#1 → #2 → ...` 顺序尝试匹配，若全部离线源未命中，则自动由已启用的社区映射包兜底。
 3. **仅按需低速在线补全**：仅当管理员显式开启全局允许与书库级低速在线补全开关时，才对未命中条目执行单线程限速补全，并内置指数退避熔断保护。
 4. **隐私与社区共建**：所有导出至社区的映射包必须经过严格脱敏校验（剥离本地路径、私有 IP、Token 与 URL），默认严格排除 NSFW 条目。
 
@@ -28,6 +28,7 @@ MangaAlpha 采用声明式元数据市场 `repo.json` 规范。管理后台提�
 | `name` | `string` | 否 | 仓库显示名称 |
 | `description` | `string` | 否 | 仓库简介 |
 | `homepage` | `string` | 否 | 仓库主页 URL（仅允许 `http://` 或 `https://`） |
+| `version` | `string` | 否 | 清单版本号（如 `"2026.11.25.1"`，优先于 `updatedAt` 展示） |
 | `updatedAt` | `string` | 否 | 清单更新时间（建议 RFC3339） |
 | `sources` | `RepoSource[]` | 是 | 数据源声明数组 |
 
@@ -48,7 +49,7 @@ MangaAlpha 采用声明式元数据市场 `repo.json` 规范。管理后台提�
 | `sizeHintBytes` | `int64` | 否 | 预估文件大小（字节，非负整数） |
 | `defaultTagDictId` | `string` | 否 | 默认关联的 `tag_dictionary` 源 `id` |
 | `nsfwRule` | `string` | 否 | NSFW 判定规则提示（如 `non_h_safe`、`non_h_exempt`） |
-| `autoUpdateDefault` | `bool` | 否 | 默认是否开启自动更新 |
+| `autoUpdateDefault` | `string \| bool` | 否 | 默认自动更新周期：`"manual"` / `"weekly"` / `"monthly"`（向后兼容旧布尔值 `true` → `"weekly"`、`false` → `"manual"`） |
 | `homepage` | `string` | 否 | 源项目主页 URL（需 `http/https`） |
 | `contributeUrl` | `string` | 否 | 映射贡献 / PR / Issue 链接 URL（需 `http/https`） |
 | `default` | `bool` | 否 | 是否标记为默认推荐源 |
@@ -58,6 +59,7 @@ MangaAlpha 采用声明式元数据市场 `repo.json` 规范。管理后台提�
 ```json
 {
   "schema": "mangaalpha-repo-v1",
+  "version": "2026.11.25.1",
   "name": "社区开放元数据仓库",
   "description": "提供离线索引库、标签中文词典与脱敏映射包",
   "homepage": "https://github.com/BlackMuseCode/mangaalpha-metadata-repo",
@@ -68,7 +70,7 @@ MangaAlpha 采用声明式元数据市场 `repo.json` 规范。管理后台提�
       "kind": "bangumi_archive",
       "name": "Bangumi 中文简介增强镜像",
       "manifestUrl": "https://example.invalid/bgm/latest.json",
-      "autoUpdateDefault": true,
+      "autoUpdateDefault": "weekly",
       "default": true
     },
     {
@@ -243,7 +245,7 @@ CREATE TABLE gallery_meta (
 
 ## 6. 社区脱敏映射包：`mangaalpha_mapping_v1`
 
-`mangaalpha_mapping_v1` 是轻量级换行分隔 JSON（`.ndjson` 或 `.ndjson.gz`，流式上限 `64 MiB`），用于在多个用户间安全共享“目录/作品名 → 目标元数据 ID”的人工校对成果。
+`mangaalpha_mapping_v1` 是轻量级换行分隔 JSON（`.ndjson` 或 `.ndjson.gz`，流式上限 `64 MiB`），用于在多个用户间安全共享“目录/作品名 → 目标元数据 ID”的人工校对成果。空映射包（`packs: []` 或空 `.ndjson`）可零报错正常同步（计为 `0` 条记录，但不会单独满足“存在已就绪离线源”的批量刮削前置校验）。
 
 ### 6.1 单行记录字段
 
@@ -310,12 +312,14 @@ CREATE TABLE gallery_meta (
 
 ## 8. 安全、SSRF 防护与限流熔断机制
 
-1. **防 SSRF 网络客户端**：
+1. **防 SSRF 网络客户端与透明代理 Fake-IP 兼容**：
    - 仓库拉取、离线包下载、在线补全与外部封面代理统一使用安全 HTTP 客户端：
      - 仅允许 `http://` 与 `https://` 协议；
-     - 直连模式下在 TCP 拨号阶段检查解析出的**全部** IP 地址，拒绝回环（`127.0.0.0/8`、`::1`）、RFC1918/ULA 私网、链路本地（`169.254.0.0/16`、`fe80::/10`）、CGNAT（`100.64.0.0/10`）、组播及保留网段，阻断 DNS Rebinding 攻击；
-     - 代理模式支持 `http` / `https` / `socks5` / `socks5h`，同样禁止目标请求指向内网/保留 IP；
-     - 重定向最多允许 5 跳且逐跳复检目标地址安全性；跨域或 HTTPS 降级 HTTP 时自动剥离 `Authorization`、`Proxy-Authorization` 与 `Cookie` 请求头。
+     - **字面量 IP 与内网主机名严格拦截**：无论直连还是代理模式，均拒绝 `localhost`、单段主机名、`*.local`/`*.internal`/`*.lan`/`*.home.arpa` 等内网后缀，以及任何指向回环、RFC1918 私网、ULA（`fc00::/7`）、链路本地（`169.254.0.0/16`、`fe80::/10`）、CGNAT（`100.64.0.0/10`）、未指定地址（`0.0.0.0`/`::`）、组播或 `198.18.0.0/15` 的字面量 IP URL；
+     - **直连模式 DNS 校验与透明代理兼容（v3.2.1）**：针对合法公网域名的本地 DNS 解析结果，自动跳过屏蔽占位地址（`0.0.0.0` / `::`，绝不拨号；若全部为占位地址则拒绝），放行公网单播 IP 及标准透明代理 Fake-IP 段（IPv4 `198.18.0.0/15`、IPv6 `fc00::/18`，双栈并存时优先拨号非 Fake-IPv6 地址）；若解析结果混入任何真实回环、RFC1918 私网、局域网 ULA（`fd00::/8`）、链路本地、CGNAT 或非法作用域 IPv6，立即整次拒绝以阻断 DNS Rebinding 攻击；
+     - **显式代理模式**：支持 `http` / `https` / `socks5` / `socks5h`，同样禁止目标请求指向字面量非公网 IP 或内网主机名；若用户使用自定义非标 Fake-IP 段（如私网段）或自建内网镜像，可在「网络代理设置」中配置显式代理；
+     - 重定向最多允许 5 跳且逐跳复检目标地址安全性；跨域或 HTTPS 降级 HTTP 时自动剥离 `Authorization`、`Proxy-Authorization` 与 `Cookie` 请求头；
+     - 仓库订阅/刷新、源同步与封面异常（SSRF 拦截、熔断）均记录严格脱敏的 `diagnostics` 诊断事件，并向前端返回安全可读的中文分类提示。
 2. **封面抓取限流、校验与路径隔离**：
    - 并发上限 `2`、令牌桶默认速率 `1 req/s`（burst `2`）、`singleflight` 合并重复并发请求；
    - 单张封面体积上限 `10 MiB`，强制校验 JPEG / PNG / WebP / GIF 文件头魔数（拒绝 HTML 错误页冒充图片）；

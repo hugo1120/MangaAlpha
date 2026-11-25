@@ -1,7 +1,7 @@
 # AGENTS.md
 
 本文档面向 AI 编程助手、书库管理 Agent 以及参与二次开发与 PR 贡献的开发者。
-- 若你是参与代码修改的 **贡献者 / AI 编程助手**，开始修改前请先阅读 `CONTRIBUTING.md`、`README.md`、`SECURITY.md`、`docs/ARCHITECTURE.md` 与 `docs/AGENT_API.md`。
+- 若你是参与代码修改的 **贡献者 / AI 编程助手**，开始修改前请先阅读 `CONTRIBUTING.md`、`README.md`、`SECURITY.md`、`docs/ARCHITECTURE.md`、`docs/METADATA_SOURCES.md` 与 `docs/AGENT_API.md`。
 - 若你是通过 HTTP 接口管理运行中书库的 **运维 / 整理 Agent**，请直接阅读 `docs/AGENT_API.md` 并请求 `GET /api/agent/v1/manifest`。
 
 ## 项目目标与核心约束
@@ -18,10 +18,10 @@
 4. **隐藏书库、联合库与 NSFW 分级隔离**：
    - **隐藏书库（`libraries.enabled = 0`）**：保留全部数据库记录与缓存，但在前台书架、Komga 客户端、OPDS、阅读器直链（统一返回 `404`）及扫描/刮削任务中完全隔离，隐藏瞬间自动取消该库进行中任务。
    - **联合库（`provider_type = 'union'`）**：成员物理库对前台隐藏；对无成员库授权的普通用户不得在响应中暴露受限成员库元信息；任意物理源为 NSFW 时（未锁定 `nsfw_lock`），联合库系列必须保守继承 `is_nsfw = 1`。
-   - **NSFW 分级与按账号控制**：Bangumi 命中条目**仅**依据官方布尔字段 `nsfw == true` 标记 `is_nsfw`（严禁将 `nsfw == false` 但带用户标签的普通条目误判为 NSFW），未命中条目辅助识别显式成人路径词；普通用户仅在 `allow_nsfw = 1 && show_nsfw = 1` 时可见 NSFW 作品。
+   - **NSFW 分级与按账号控制**：Bangumi 命中条目**仅**依据官方布尔字段 `nsfw == true` 标记 `is_nsfw`（严禁将 `nsfw == false` 但带用户标签的普通条目误判为 NSFW），`gallery_v1` 离线图库源仅当 `category`（忽略大小写）严格等于 `"Non-H"` 时判为非 NSFW，未匹配条目辅助识别显式成人路径词；所有自动批量刮削与增量同步（含全量重刮）均须保护 `match_origin IN ('manual', 'agent')`、存量升级绑定与 `*Lock` 字段锁；普通用户仅在 `allow_nsfw = 1 && show_nsfw = 1` 时可见 NSFW 作品。
 5. **保持 100% 纯 Go 无 CGO + 跨平台兼容**：必须同时兼容 Linux、macOS、Windows（`-H=windowsgui` 系统托盘模式）与 Android `gomobile` 原生封装。
 6. **数据库迁移与大库性能约束**：
-   - 所有 Schema 变更必须在 `internal/database/migrations.go` 中做到幂等、事务安全、保留既有主管理员数据与 `collections.rowid` 等兼容约束，并补充存量旧库升级单测。
+   - 所有 Schema 变更必须在 `internal/database/migrations.go` 中做到幂等、事务安全、保留既有主管理员数据与 `collections.rowid` 等兼容约束，并补充存量旧库升级单测；SQLite 主库 DSN 保持 WAL + `_txlock=immediate` 使并发写事务正确遵守 `busy_timeout`。
    - 真实部署可达 10 万系列 / 50 万+单册，避免在热路径引入 N+1 查询、全表扫描或未分批的大 `IN (...)`。
 
 ## 开发与构建命令
@@ -29,7 +29,7 @@
 ```bash
 bash scripts/build-reader.sh
 node --check internal/httpserver/static/ui/app.js
-node --test scripts/webdav-form.test.cjs
+node --test scripts/*.test.cjs
 gofmt -w cmd internal
 go test -count=1 -race ./...
 go vet ./...
@@ -44,14 +44,16 @@ CGO_ENABLED=0 go build -o /tmp/mangaalpha ./cmd/server
 - `cmd/server`：CLI 参数、Windows 系统托盘（`tray_windows.go`）、信号处理和进程生命周期。
 - `internal/app`：组装数据库、115、WebDAV、Bangumi、扫描器、流水线、缓存、归档、缩略图、维护与 HTTP 服务，暴露 `Start()` / `ListenAddr()` / `Shutdown()` / `Close()`。
 - `internal/buildinfo`：版本号与 3.x 大版本代号元信息。
-- `internal/database`：SQLite schema、幂等升级迁移、多用户与权限表（`users.go`）、鉴权哈希（`argon2id` + `SHA-256`）、多存储源、联合库（`union.go`）、目录搜索与筛选（`catalog.go` / `search.go`）、收藏夹与阅读列表（`collections.go`）、阅读进度与历史墓碑（`progress.go`）、OPDS 映射（`opds.go`）、书架缓存（`shelf_cache.go`）。
+- `internal/database`：SQLite schema、幂等升级迁移、多用户与权限表（`users.go`）、鉴权哈希（`argon2id` + `SHA-256`）、多存储源、联合库（`union.go`）、目录搜索与无内容 FTS5 索引（`catalog.go` / `search.go`）、多源元数据配置与顺延链表（`metadata_sources.go`）、收藏夹与阅读列表（`collections.go`）、阅读进度与历史墓碑（`progress.go`）、OPDS 映射（`opds.go`）、书架缓存（`shelf_cache.go`）。
+- `internal/cjk`：基于 OpenCC 开放词典生成的 4,543 组繁简/异体字/日文新字体搜索折叠字表。
 - `internal/oneonefive`：115 Open SDK 封装、Token 自动刷新、限速、目录列表与 `downurl` 获取。
 - `internal/localfs`：本地与 SMB 挂载目录校验、免多余 `stat` 高效遍历、系统垃圾文件过滤与目录浏览。
 - `internal/webdav`：多账号 WebDAV `PROPFIND` 目录遍历、连接测试、全局请求限速（含 `FetchRange`）与 HTTP `Range` 读取。
 - `internal/scanner`：多存储源统一递归扫描、空挂载点防清空保护、普通模式与 One-Shots 事务暂存转换。
-- `internal/pipeline`：单库与联合库定时/手动自动化流水线调度（扫库 → 联合刷新 → 增量刮削 → 补封面）。
+- `internal/pipeline`：单库与联合库定时/手动自动化流水线调度（扫库 → 联合刷新 → 多源增量刮削 → 补封面）。
 - `internal/archive`：统一归档打开器（115/WebDAV 走 `RemoteReaderAt` + Range 缓存；本地/SMB 文件走原生 `*os.File`）及普通/加密 ZIP、RAR 索引与单页流式解压。
-- `internal/bangumi`：繁简/日文异体归一词表（`cjk.go`）、目录名清洗器、`bangumi/Archive` 多源离线 SQLite 索引库与定时更新、`api.bgm.tv` 实时客户端、独立代理与每用户 Bangumi OAuth/PAT 单向进度追踪器。
+- `internal/bangumi`：目录名清洗器、`bangumi/Archive` 多源离线 SQLite 索引库与定时更新、`api.bgm.tv` 实时授权客户端（含 NSFW 5 道防泄露防线）、独立代理与每用户 Bangumi OAuth/PAT 单向进度追踪器。
+- `internal/extmeta`：声明式元数据市场（`mangaalpha-repo-v1`）、纯 Go 流式解压（`.zst`/`.gz`/`.zip`）、只读双规范离线 SQLite（`mangaalpha_meta_v1` / `gallery_v1`）+ Sidecar FTS5/SHA-1 索引、标签翻译词典、社区脱敏映射包、包内 `ComicInfo.xml`/`galleryinfo.txt` 解析、防 SSRF（兼容透明代理 Fake-IP）客户端与限速熔断外部封面缓存。
 - `internal/cache`：Range block 与已解压页面的磁盘缓存与 LRU 淘汰。
 - `internal/thumbnail`：封面服务（`auto`/`bangumi`/`book` 优先级与按需 `singleflight` 懒缓存）及批量首卷封面任务。
 - `internal/maintenance`：Series / Book 手动索引与封面维护任务。

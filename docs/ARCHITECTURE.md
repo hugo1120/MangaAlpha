@@ -7,8 +7,9 @@
        │  Session Cookie / HTTP Basic Auth / Authorization: Bearer / X-API-Key
        ▼
 internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1 + /api/v1 + /api/v2)
-       ├── SQLite 主库 (鉴权、书库、隐藏与 NSFW 隔离、进度、元数据) ── internal/database
+       ├── SQLite 主库 (鉴权、书库、隐藏与 NSFW 隔离、进度、多源元数据表) ─ internal/database
        ├── Bangumi 双引擎刮削 + 本地离线索引库 + 独立代理 ──────────── internal/bangumi
+       ├── 多源元数据市场、只读 Sidecar 索引与映射包 ────────────────── internal/extmeta
        ├── 多源递归扫描器 (含 SMB 空挂载点保护) ────────────────────── internal/scanner
        ├── 统一归档读取器 (ZIP / RAR) ──────────────────────────────── internal/archive
        │     ├── 115 Open API (downurl + Range 分块缓存) ───────────── internal/oneonefive + internal/cache
@@ -39,7 +40,7 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
   - **WebDAV（`webdav`）**：支持在 `webdav_accounts` 表配置多个 WebDAV 源（兼容 CloudDrive2 `:19798/dav`、OpenList `:5244/dav`、群晖、Nextcloud，支持自定义限速与自签名证书 `insecureTls`）；令牌桶限速同时约束 `PROPFIND` 扫描与 `FetchRange` 分块读取。
   - **隐藏书库（`enabled = 0`）**：保留所有系列、单册、Bangumi 元数据、阅读进度与磁盘缓存；`SeriesByID` / `BookByID` / `SeriesPage` / `BooksPage` 统一要求 `libraries.enabled = 1`，隐藏瞬间自动调用 `cancelLibraryJobs` 中止运行中任务。
 
-## 4. Bangumi (`bgm.tv`) 双引擎刮削与 NSFW 默认隐藏
+## 4. 多源元数据刮削中心（`internal/bangumi` + `internal/extmeta`）与 NSFW 隔离
 
 1. **多规则漫画目录名清洗器（`parser.go` + `cjk.go`）**：
    - 扩充繁简、台湾异体字与日文新字体归一映射表；
@@ -51,9 +52,13 @@ internal/httpserver (authMiddleware + SPA + /reader + /admin/api + /api/agent/v1
    - 启动时若检测到本地 `terms_schema_version` 落后，从 `bgm_subjects` 在事务内重建 `bgm_terms` 词表，无需重新下载快照或重刮书库。
    - 批量刮削支持 `incremental`（仅新增）、`retry_unmatched`（重试未命中 + 新增）与 `force`（全量）三档模式。
 3. **引擎二：实时 `api.bgm.tv/v0` 客户端与独立代理**：
-   - 支持按关键词或 Subject ID 实时搜索绑定；独立代理配置统一作用于离线包下载、API 查询与封面抓取。
-4. **NSFW 分级规则与默认隐藏（`show_nsfw`）**：
-   - Bangumi 匹配结果**严格且仅**依据官方布尔字段 `nsfw == true` 标记 `series_metadata.is_nsfw = 1`（绝不因用户标签误伤 `nsfw: false` 的条目）；自动未命中条目则通过 `InferPathNSFW` 识别显式成人目录特征；支持 `nsfwLock` 手动覆盖锁定。
+   - 支持按关键词或 Subject ID 实时搜索绑定；当用户已绑定 Bangumi OAuth / PAT 且开启 `show_nsfw`（`EffectiveShowNSFW()`）时，对 `https://api.bgm.tv` 请求附带 Bearer 凭证以支持 NSFW 条目检索与封面拉取；独立代理配置统一作用于离线包下载、元数据市场、API 查询与封面抓取。
+4. **多源扩展元数据引擎（`internal/extmeta/`）与存储模型**：
+   - **Mihon 风格市场与离线 Sidecar**：支持订阅 `mangaalpha-repo-v1`（`repo.json`）或接入本地 SQLite / 远程压缩包（`.zst` / `.gz` / `.zip`），按 `mangaalpha_meta_v1` 与 `gallery_v1` 规范以只读模式打开上游库并在旁构建只读 Sidecar（FTS5 + SHA-1 指纹）索引，同时支持标签翻译词典（`tag_translation_text_v1`）、包内嵌入元数据（`ComicInfo.xml` / `galleryinfo.txt`）与社区脱敏映射包（`mangaalpha_mapping_v1`）。网络访问统一经防 SSRF HTTP 客户端，离线未命中且显式允许时才启用单线程限速在线补全与指数退避熔断（详见 [docs/METADATA_SOURCES.md](METADATA_SOURCES.md)）。
+   - **三张核心元数据表**：`metadata_repos`（持久化订阅仓库清单与同步状态）、`metadata_sources`（数据源类型、结构规范、下载/本地/Sidecar 路径、关联词典、在线补全配置与哈希/校验状态）、`library_metadata_sources`（按顶层书库存储 `#1 → #2 → ...` 顺延优先级链）。多源刮削对顶层书库（含联合书库）执行，自动跳过联合子库；所有离线源均未命中时由已启用映射包兜底。
+   - **`series_metadata` 扩展字段与 `match_origin` 保护边界**：`series_metadata` 新增 `ext_source_id`、`ext_entry_id`、`ext_cover_url`、`ext_cover_path` 与 `match_origin`（取值 `auto` / `mapping` / `manual` / `agent`）。后台批量刮削与增量同步经 `WithAutomaticMetadata` 与 SQL 过滤强制保护 `match_origin IN ('manual', 'agent')` 记录及各 `*Lock` 锁定字段，防止自动流程覆盖人工或 AI Agent 绑定结果。
+5. **NSFW 分级规则与默认隐藏（`show_nsfw`）**：
+   - Bangumi 匹配结果**严格且仅**依据官方布尔字段 `nsfw == true` 标记 `series_metadata.is_nsfw = 1`（绝不因用户标签误伤 `nsfw: false` 的条目）；`gallery_v1` 仅当 `category` 忽略大小写严格等于 `"Non-H"` 时标为非 NSFW；自动未命中条目则通过 `InferPathNSFW` 识别显式成人目录特征；支持 `nsfwLock` 手动覆盖锁定。
    - 全局设置 `show_nsfw` 默认 `"false"`：关闭时在前台书架、分类/出版社聚合、Komga 客户端与阅读器直链中过滤 `is_nsfw = 1` 系列（直链返回 `404`），而后台扫描、刮削与 `/api/agent/v1` 仍可完整管理。
 
 ## 5. 内置书架、简体中文阅读器与 Agent 接口

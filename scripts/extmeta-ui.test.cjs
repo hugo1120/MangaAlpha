@@ -476,6 +476,8 @@ const sampleLibraries = [
   { id: 'lib-1', name: '本地漫画库', providerType: 'local', enabled: true },
   { id: 'lib-2', name: 'WebDAV 书库', providerType: 'webdav', enabled: true },
   { id: 'lib-union', name: '联合书库', providerType: 'union', enabled: true },
+  { id: 'lib-member', name: '联合子库', providerType: 'local', unionParentId: 'lib-union', enabled: false },
+  { id: 'lib-hidden', name: '已隐藏独立库', providerType: 'local', enabled: false },
 ];
 
 test('recommended repo pre-fill populates input without auto-submitting, then subscribes on confirm', async () => {
@@ -626,8 +628,30 @@ test('library priority chain modal reorders sources and saves ordered sourceIds'
 
   h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, sampleOverview(), []);
 
-  // Only physical libraries should have chain edit buttons (not union library)
-  assert.equal(h.body.querySelectorAll('button[data-extmeta-chain-edit="lib-union"]').length, 0);
+  // Top-level libraries (including union library and hidden top-level libraries) appear in chains & export;
+  // union member libraries (unionParentId set) must NOT appear.
+  assert.equal(h.body.querySelectorAll('button[data-extmeta-chain-edit="lib-union"]').length, 1);
+  assert.equal(h.body.querySelectorAll('button[data-extmeta-chain-edit="lib-member"]').length, 0);
+  assert.equal(h.body.querySelectorAll('input[data-extmeta-export-lib="lib-union"]').length, 1);
+  assert.equal(h.body.querySelectorAll('input[data-extmeta-export-lib="lib-member"]').length, 0);
+  assert.match(h.body.innerHTML, /已隐藏独立库[\s\S]*已隐藏/);
+
+  // Union library chain can be edited and saved
+  const editUnionBtn = h.body.querySelector('button[data-extmeta-chain-edit="lib-union"]');
+  assert.ok(editUnionBtn);
+  editUnionBtn.onclick();
+  const unionSrcCb = h.modalBody.querySelector('input[data-mchain-id="src-sqlite-1"]');
+  assert.ok(unionSrcCb);
+  unionSrcCb.checked = true;
+  unionSrcCb.onchange();
+  await h.doc.getElementById('mchain-save').onclick();
+  assert.deepEqual(requests[0], [
+    '/admin/api/libraries/lib-union/metadata-sources',
+    'PUT',
+    { sourceIds: ['src-sqlite-1'] },
+  ]);
+
+  requests.length = 0;
   const editChainBtn = h.body.querySelector('button[data-extmeta-chain-edit="lib-1"]');
   assert.ok(editChainBtn);
   editChainBtn.onclick();
@@ -703,6 +727,103 @@ test('multi-source batch scrape defaults allowOnline=false and polls ONLY while 
   h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, sampleOverview(), []);
   assert.equal(h.pollCalls.length, 1, 'idle repaint must not add new poll timer');
   assert.ok(h.getStopPollCalls() > stopBefore, 'idle repaint must stop polling');
+});
+
+test('paintAdminBangumi aligns with backend ov.syncs, indexed, ov.onlineEnrich cooldown, and scrapeRuns target names', async () => {
+  const h = loadAdminScraperContext({
+    apiImpl: async () => ({}),
+  });
+
+  // 1. Backend canonical ov.syncs (with `indexed`) + ov.onlineEnrich (status: 'cooldown', circuitOpen: true, cooldownUntil)
+  const cooldownOverview = sampleOverview({
+    activeSyncs: undefined,
+    onlineEnrichStatus: undefined,
+    syncs: [{
+      id: 'sync-canonical-1',
+      sourceId: 'src-sqlite-1',
+      status: 'running',
+      phase: 'indexing',
+      downloadedBytes: 512,
+      totalBytes: 1024,
+      indexed: 4321,
+    }],
+    onlineEnrich: {
+      runId: 'scrape-1',
+      status: 'cooldown',
+      circuitOpen: true,
+      total: 12,
+      processed: 4,
+      matched: 3,
+      failed: 1,
+      httpStatus: 429,
+      cooldownUntil: '2026-11-25T10:30:00Z',
+      lastError: 'HTTP 429 Too Many Requests',
+    },
+  });
+  const runsPayload = {
+    runs: [{
+      id: 'run-union-1',
+      libraryId: 'lib-union',
+      mode: 'incremental',
+      status: 'completed',
+      totalSeries: 10,
+      processedSeries: 10,
+      matchedCount: 9,
+      unmatchedCount: 1,
+      skippedCount: 0,
+      startedAt: '2026-11-25T10:00:00Z',
+    }],
+  };
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, cooldownOverview, runsPayload);
+  assert.equal(h.pollCalls.length, 1, 'canonical syncs & onlineEnrich cooldown must trigger polling');
+  assert.equal(h.pollCalls[0].ms, 2200);
+  assert.match(h.body.innerHTML, /建索引中/);
+  assert.match(h.body.innerHTML, /50%/);
+  assert.match(h.body.innerHTML, /已建索引 4,321 条/);
+  assert.match(h.body.innerHTML, /在线补全已熔断保护/);
+  assert.match(h.body.innerHTML, /已处理 4 \/ 12 · 命中 3 · 失败 1/);
+  assert.match(h.body.innerHTML, /HTTP 429/);
+  assert.match(h.body.innerHTML, /冷却至：2026-11-25T10:30:00Z/);
+  assert.match(h.body.innerHTML, /HTTP 429 Too Many Requests/);
+  assert.match(h.body.innerHTML, /<td><strong>联合书库<\/strong><\/td>/);
+
+  // 2. Pure backend OnlineStatus cooldown (only status === 'cooldown', no circuitOpen/running/matched/failed) + syncing without phase
+  const pureBackendCooldown = sampleOverview({
+    activeSyncs: undefined,
+    onlineEnrichStatus: undefined,
+    syncs: [{
+      id: 'sync-canonical-2',
+      sourceId: 'src-sqlite-1',
+      status: 'running',
+      downloadedBytes: 256,
+      totalBytes: 1024,
+      indexed: 100,
+    }],
+    onlineEnrich: {
+      status: 'cooldown',
+      total: 8,
+      processed: 2,
+      httpStatus: 429,
+      cooldownUntil: '2026-11-25T10:35:00Z',
+    },
+  });
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, pureBackendCooldown, []);
+  assert.equal(h.pollCalls.length, 2, 'pure backend onlineEnrich cooldown must trigger polling');
+  assert.match(h.body.innerHTML, /同步状态：同步中/);
+  assert.match(h.body.innerHTML, /在线补全已熔断保护/);
+  assert.match(h.body.innerHTML, /已处理 2 \/ 8/);
+
+  // 3. Pure idle backend overview must not render enrich banner or poll
+  const stopBefore = h.getStopPollCalls();
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, sampleOverview({
+    activeSyncs: undefined,
+    onlineEnrichStatus: undefined,
+    syncs: [],
+    onlineEnrich: { status: 'idle', total: 0, processed: 0 },
+  }), []);
+  assert.equal(h.pollCalls.length, 2, 'idle canonical overview must not schedule polling');
+  assert.ok(h.getStopPollCalls() > stopBefore, 'idle canonical overview must stop polling');
+  assert.doesNotMatch(h.body.innerHTML, /extmeta-enrich-banner/);
 });
 
 test('sanitized mapping export defaults includeNsfw=false and invokes preview:true before download', async () => {
@@ -912,7 +1033,10 @@ test('series match modal switches to ready external source, queries candidates, 
     '/admin/api/series/ser-1/metadata/candidates?sourceId=src-sqlite-1&q=https%3A%2F%2Fgallery.example.test%2Fg%2F12345%2Fabc%2F',
   );
   const candidatesHTML = doc.getElementById('bgm-candidates-box').innerHTML;
-  assert.match(candidatesHTML, /\/admin\/api\/metadata\/sources\/src-sqlite-1\/entries\/12345\/cover\?u=/);
+  const candImg = modalBody.querySelector('img');
+  assert.ok(candImg, 'candidate cover img should exist');
+  assert.equal(candImg.getAttribute('src'), '/admin/api/metadata/sources/src-sqlite-1/entries/12345/cover');
+  assert.doesNotMatch(candidatesHTML, /\?u=/);
   assert.match(candidatesHTML, /中文译名标签/);
   assert.match(candidatesHTML, /匹配度 96%/);
 
@@ -922,8 +1046,9 @@ test('series match modal switches to ready external source, queries candidates, 
   assert.deepEqual(requests[1], [
     '/admin/api/series/ser-1/metadata/bind',
     'POST',
-    { sourceId: 'src-sqlite-1', entryId: '12345', origin: 'manual' },
+    { sourceId: 'src-sqlite-1', entryId: '12345' },
   ]);
+  assert.equal('origin' in requests[1][2], false, 'bind payload must not include origin');
 
   // 3. Modal unbind button in fresh open modal calls DELETE /metadata/bind
   openBangumiMatchModal('ser-1', detail);

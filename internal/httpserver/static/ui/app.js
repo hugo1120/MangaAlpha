@@ -2012,7 +2012,7 @@
           box.innerHTML = cands.map((c) => {
             const cSrcID = c.sourceId || sourceId;
             const cEntryID = String(c.entryId || '');
-            const imgURL = `/admin/api/metadata/sources/${encodeURIComponent(cSrcID)}/entries/${encodeURIComponent(cEntryID)}/cover${c.coverUrl ? `?u=${encodeURIComponent(c.coverUrl)}` : ''}`;
+            const imgURL = `/admin/api/metadata/sources/${encodeURIComponent(cSrcID)}/entries/${encodeURIComponent(cEntryID)}/cover`;
             const authorsList = Array.isArray(c.authors)
               ? c.authors.map((a) => (typeof a === 'string' ? a : (a && a.name) || '')).filter(Boolean)
               : [];
@@ -2060,7 +2060,7 @@
               try {
                 await api(`/admin/api/series/${encodeURIComponent(seriesID)}/metadata/bind`, {
                   method: 'POST',
-                  body: { sourceId: srcID, entryId: entryID, origin: 'manual' },
+                  body: { sourceId: srcID, entryId: entryID },
                 });
                 state.coverVer = Date.now();
                 state.taxonomies.loaded = false;
@@ -4292,9 +4292,9 @@
     const repos = Array.isArray(ov.repos) ? ov.repos : [];
     const extSources = Array.isArray(ov.sources) ? ov.sources : [];
     const libraryChains = (ov.libraryChains && typeof ov.libraryChains === 'object') ? ov.libraryChains : {};
-    const activeSyncs = Array.isArray(ov.activeSyncs) ? ov.activeSyncs : [];
-    const onlineEnrich = ov.onlineEnrichStatus || null;
-    const scrapeRuns = Array.isArray(extScrapeRuns) ? extScrapeRuns : ((extScrapeRuns && Array.isArray(extScrapeRuns.runs)) ? extScrapeRuns.runs : []);
+    const activeSyncs = Array.isArray(ov.syncs) ? ov.syncs : (Array.isArray(ov.activeSyncs) ? ov.activeSyncs : []);
+    const onlineEnrich = ov.onlineEnrich || ov.onlineEnrichStatus || null;
+    const scrapeRuns = Array.isArray(extScrapeRuns) ? extScrapeRuns : ((extScrapeRuns && Array.isArray(extScrapeRuns.runs)) ? extScrapeRuns.runs : (Array.isArray(ov.scrapeRuns) ? ov.scrapeRuns : []));
 
     if (typeof state === 'object' && state) {
       const nameMap = Object.assign({}, state.extSourceNames || {});
@@ -4311,8 +4311,27 @@
     const sourceByID = new Map(extSources.map((s) => [s.id, s]));
     const tagDictSources = extSources.filter((s) => s.kind === 'tag_dictionary');
     const chainCandidates = extSources.filter((s) => s.kind === 'offline_sqlite' || s.kind === 'bangumi_archive');
-    const physicalLibs = (libs || []).filter((l) => l.providerType !== 'union');
+    const topLevelLibs = (libs || []).filter((l) => !l.unionParentId);
     const selectableLibs = (libs || []).filter((l) => l.enabled !== false && !l.unionParentId);
+    const libMap = new Map((libs || []).map((l) => [l.id, l]));
+    const onlineEnrichRunning = Boolean(onlineEnrich && (onlineEnrich.running || onlineEnrich.status === 'running'));
+    const onlineEnrichCooldown = Boolean(onlineEnrich && (onlineEnrich.circuitOpen || onlineEnrich.status === 'cooldown'));
+    const onlineTotal = Number((onlineEnrich && onlineEnrich.total) || 0);
+    const onlineProcessed = Number((onlineEnrich && onlineEnrich.processed) || 0);
+    const onlineMatched = Number((onlineEnrich && onlineEnrich.matched) || 0);
+    const onlineFailed = Number((onlineEnrich && onlineEnrich.failed) || 0);
+    const onlineHTTPStatus = Number((onlineEnrich && onlineEnrich.httpStatus) || 0);
+    const showOnlineEnrichBanner = Boolean(
+      onlineEnrich && (
+        onlineEnrichRunning
+        || onlineEnrichCooldown
+        || onlineHTTPStatus > 0
+        || Boolean(onlineEnrich.cooldownUntil)
+        || Boolean(onlineEnrich.lastError)
+        || (onlineTotal + onlineProcessed + onlineMatched + onlineFailed) > 0
+        || (onlineEnrich.status && onlineEnrich.status !== 'idle')
+      )
+    );
 
     const prevRepoEl = document.getElementById('extmeta-repo-url');
     const editingRepo = prevRepoEl && document.activeElement === prevRepoEl;
@@ -4419,7 +4438,7 @@
           <ol class="extmeta-guide-list">
             <li><strong>内置 Bangumi 源</strong>：在下方「引擎一：Bangumi 离线索引库」拉取中文简介增强镜像或官方原版快照，即可毫秒级完成常规漫画刮削，并支持 <code>api.bgm.tv</code> 实时搜索与 AI Agent 协助。</li>
             <li><strong>订阅元数据市场 (<code>repo.json</code>)</strong>：在「元数据市场与源管理」输入仓库地址（或点击「填入社区推荐仓库地址」预填，确认后点「订阅仓库」），按需启用并下载扩展离线 SQLite 图库、标签中文翻译词典或社区脱敏映射包。</li>
-            <li><strong>配置书库顺延优先级链</strong>：在「书库多源顺延优先级链」为每个物理书库勾选并排序 <code>#1 → #2 → ...</code>；未配置时默认使用内置 Bangumi，所有离线源均未命中时自动由已启用的社区映射包兜底。</li>
+            <li><strong>配置书库顺延优先级链</strong>：在「书库多源顺延优先级链」为每个顶层书库（含联合书库）勾选并排序 <code>#1 → #2 → ...</code>；未配置时默认使用内置 Bangumi，所有离线源均未命中时自动由已启用的社区映射包兜底。</li>
             <li><strong>纯离线默认 + 低速在线补全防封</strong>：多源批量刮削默认仅读取本地离线 SQLite 与映射包（零外部限流风险）；仅当显式开启「允许低速在线补全」时，才对未命中条目启用单线程限速补全与自动熔断冷却。</li>
           </ol>
         </div>
@@ -4520,6 +4539,14 @@
                   const syncPct = syncJob && syncJob.totalBytes > 0
                     ? Math.min(100, Math.round((Number(syncJob.downloadedBytes || 0) / Number(syncJob.totalBytes)) * 100))
                     : 35;
+                  const indexedCount = Number((syncJob && (syncJob.indexedEntries ?? syncJob.indexed)) || 0);
+                  const rawPhase = syncJob ? String(syncJob.phase || syncJob.status || '').trim() : '';
+                  const syncPhaseLabel = ({
+                    downloading: '下载中',
+                    indexing: '建索引中',
+                    syncing: '同步中',
+                    running: '同步中',
+                  }[rawPhase] || rawPhase || '同步中');
                   const tagDictName = s.tagDictSourceId
                     ? ((sourceByID.get(s.tagDictSourceId) && sourceByID.get(s.tagDictSourceId).name) || s.tagDictSourceId)
                     : '';
@@ -4552,9 +4579,9 @@
                           ${syncJob ? `
                             <div class="extmeta-sync-box">
                               <div style="font-size:12px;color:var(--accent);margin-bottom:4px">
-                                同步中：${esc(syncJob.phase || syncJob.status)}
+                                同步状态：${esc(syncPhaseLabel)}
                                 ${syncJob.totalBytes > 0 ? ` · ${fmtBytes(syncJob.downloadedBytes)} / ${fmtBytes(syncJob.totalBytes)} (${syncPct}%)` : ''}
-                                ${Number(syncJob.indexedEntries || 0) > 0 ? ` · 已建索引 ${Number(syncJob.indexedEntries).toLocaleString()} 条` : ''}
+                                ${indexedCount > 0 ? ` · 已建索引 ${indexedCount.toLocaleString()} 条` : ''}
                               </div>
                               <div class="progress-track"><span style="width:${syncPct}%"></span></div>
                             </div>` : ''}
@@ -4581,12 +4608,12 @@
         <div class="card" id="extmeta-chains-card">
           <h3>书库多源顺延优先级链</h3>
           <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
-            每个物理书库默认使用内置 Bangumi 源；可自定义多个离线源按 <code>#1 → #2 → ...</code> 顺序匹配，<strong>离线源全部未命中时自动由已启用的社区映射包兜底</strong>。
+            每个顶层书库（含联合书库）默认使用内置 Bangumi 源；可自定义多个离线源按 <code>#1 → #2 → ...</code> 顺序匹配，<strong>离线源全部未命中时自动由已启用的社区映射包兜底</strong>。
           </p>
-          ${physicalLibs.length === 0
-            ? `<div class="empty-box" style="padding:18px">暂无物理书库。</div>`
+          ${topLevelLibs.length === 0
+            ? `<div class="empty-box" style="padding:18px">暂无顶层书库。</div>`
             : `<div class="extmeta-chain-list">
-                ${physicalLibs.map((l) => {
+                ${topLevelLibs.map((l) => {
                   const chainIDs = extNormalizeChain(libraryChains[l.id]);
                   return `
                     <div class="extmeta-chain-row">
@@ -4643,12 +4670,13 @@
             <div class="field-hint">默认关闭（纯离线极速匹配）；仅当开启后，对离线未命中作品才调用已启用在线 API 的数据源，单线程限速并在 403/429/503 时自动熔断冷却。</div>
           </div>
           <button type="button" class="btn btn-primary" id="extmeta-batch-start">开始多源批量刮削</button>
-          ${onlineEnrich && (onlineEnrich.running || onlineEnrich.circuitOpen || onlineEnrich.lastError || (Number(onlineEnrich.processed || 0) + Number(onlineEnrich.matched || 0) + Number(onlineEnrich.failed || 0)) > 0) ? `
+          ${showOnlineEnrichBanner ? `
             <div class="extmeta-enrich-banner">
-              <span class="badge ${onlineEnrich.circuitOpen ? 'badge-danger' : onlineEnrich.running ? 'badge-accent' : ''}">
-                ${onlineEnrich.circuitOpen ? '在线补全已熔断保护' : onlineEnrich.running ? '在线补全运行中' : '在线补全状态'}
+              <span class="badge ${onlineEnrichCooldown ? 'badge-danger' : onlineEnrichRunning ? 'badge-accent' : ''}">
+                ${onlineEnrichCooldown ? '在线补全已熔断保护' : onlineEnrichRunning ? '在线补全运行中' : onlineEnrich.status === 'canceled' ? '在线补全已取消' : onlineEnrich.status === 'success' ? '在线补全已完成' : '在线补全状态'}
               </span>
-              <span>已处理 ${Number(onlineEnrich.processed || 0)} · 命中 ${Number(onlineEnrich.matched || 0)} · 失败 ${Number(onlineEnrich.failed || 0)}</span>
+              <span>已处理 ${onlineProcessed}${onlineTotal > 0 ? ` / ${onlineTotal}` : ''}${(onlineEnrich.matched != null || onlineEnrich.failed != null) ? ` · 命中 ${onlineMatched} · 失败 ${onlineFailed}` : ''}</span>
+              ${onlineHTTPStatus > 0 ? `<span class="badge badge-warn">HTTP ${onlineHTTPStatus}</span>` : ''}
               ${onlineEnrich.cooldownUntil ? `<span class="badge badge-warn">冷却至：${fmtTime(onlineEnrich.cooldownUntil)}</span>` : ''}
               ${onlineEnrich.lastError ? `<span style="color:var(--danger)">${esc(onlineEnrich.lastError)}</span>` : ''}
             </div>` : ''}
@@ -4672,9 +4700,10 @@
                   const pct = total > 0 ? Math.min(100, Math.round((proc / total) * 100)) : 0;
                   const active = r.status === 'queued' || r.status === 'running';
                   const errText = r.error || (Array.isArray(r.errors) && r.errors[0]) || '';
+                  const targetName = (libMap.get(r.libraryId) && libMap.get(r.libraryId).name) || r.libraryName || r.libraryId || '全部未隐藏书库';
                   return `
                     <tr>
-                      <td><strong>${esc(r.libraryName || r.libraryId || '全部未隐藏书库')}</strong></td>
+                      <td><strong>${esc(targetName)}</strong></td>
                       <td>
                         <span class="badge">${esc(r.mode || 'incremental')}</span>
                         ${r.allowOnline ? `<span class="badge badge-warn">含在线补全</span>` : `<span class="badge">纯离线</span>`}
@@ -4711,10 +4740,10 @@
               <input type="checkbox" id="extmeta-export-all-libs" ${exportDraft.allLibs ? 'checked' : ''}>
               <span><strong>全部书库</strong></span>
             </label>
-            ${physicalLibs.map((l) => `
+            ${topLevelLibs.map((l) => `
               <label class="check-row">
                 <input type="checkbox" data-extmeta-export-lib="${esc(l.id)}" value="${esc(l.id)}" ${!exportDraft.allLibs && exportDraft.libraryIds.includes(l.id) ? 'checked' : ''}>
-                <span>${esc(l.name)}</span>
+                <span>${esc(l.name)}${l.enabled === false ? ' <span class="badge badge-warn">已隐藏</span>' : ''}</span>
               </label>`).join('')}
           </div>
         </div>
@@ -5082,7 +5111,6 @@
       };
     });
 
-    const libMap = new Map((libs || []).map((l) => [l.id, l]));
     body.querySelectorAll('button[data-extmeta-chain-edit]').forEach((btn) => {
       btn.onclick = () => {
         const libID = btn.getAttribute('data-extmeta-chain-edit');
@@ -5422,7 +5450,7 @@
       || runs.some((r) => r.status === 'queued' || r.status === 'running')
       || activeSyncs.some((j) => j.status === 'queued' || j.status === 'running')
       || scrapeRuns.some((r) => r.status === 'queued' || r.status === 'running')
-      || Boolean(onlineEnrich && onlineEnrich.running);
+      || Boolean(onlineEnrich && (onlineEnrich.running || onlineEnrich.status === 'running' || onlineEnrich.status === 'cooldown'));
     if (hasActive) {
       schedulePoll(async () => {
         if (location.pathname !== '/admin' || state.adminTab !== 'bangumi') return;

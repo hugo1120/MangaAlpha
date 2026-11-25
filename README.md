@@ -65,13 +65,17 @@
 - **分层叠加联合库（OverlayFS 风格）**：将多个物理库（如本地/SMB → WebDAV → 115）按优先级叠合为单一逻辑库，自动按归一化相对路径对齐、卷级互补叠加与同名上层覆盖，读取失败按层透明容灾回退；阅读进度双向回写底层副本，解散联合库无损保留进度。
 - **定时流水线与一键隐藏书库**：支持按本机时区每日/每周定时串行执行「扫库（联合库可勾选指定子库）→ 联合库合并刷新 → Bangumi 增量刮削 → 缺封面未匹配作品自动补首卷封面」；支持一键隐藏任意书库（保留全部数据与缓存，前台与客户端全链路隔离返回 `404`）。
 
-### 4. Bangumi (`bgm.tv`) 中文双引擎刮削、NSFW 隔离与跨平台治理
+### 4. 多源元数据刮削中心、Bangumi 授权检索与 NSFW 隔离
 
-- **离线快照（默认中文简介增强镜像）+ 在线双引擎**：
+- **Mihon 风格声明式元数据市场与离线 Sidecar 引擎（v3.2 新增）**：
+  - 支持订阅标准 `mangaalpha-repo-v1`（`repo.json`）元数据市场或手动接入本地 SQLite 源，通过纯 Go 流式解压（`.zst` / `.gz` / `.zip`）导入 `mangaalpha_meta_v1` 单表或 `gallery_v1` 通用四表离线图库，并在旁构建只读 Sidecar 索引（FTS5 + SHA-1 指纹召回）；同时支持解析归档内嵌的 `ComicInfo.xml` 与 `galleryinfo.txt` 元数据。
+  - 内置中文标签翻译词典（`tag_translation_text_v1`，支持纯中文 `zh` / 双语 `bilingual` / 原文 `raw` 展示模式）；每个顶层书库（含联合书库）可自定义 `#1 → #2 → ...` **多源顺延优先级链**。
+  - 所有离线源均未命中时自动由已启用的**社区脱敏映射包（`mangaalpha_mapping_v1`）**兜底，后台支持预览并导出严格剥离本地路径、私有 IP、凭据与 URL 的 `.ndjson` 映射包（默认严格排除 NSFW）；默认纯离线极速匹配，仅在显式开启时才允许单线程防封熔断低速在线补全。详见 [docs/METADATA_SOURCES.md](docs/METADATA_SOURCES.md)。
+- **Bangumi 离线快照（默认中文简介增强镜像）+ 授权实时检索**：
   - 后台一键下载校验离线索引并本地秒级批量匹配，默认接入与官方 100% 同构的 **中文简介增强镜像（[`xJogger/bangumi-archive-zh`](https://github.com/xJogger/bangumi-archive-zh)）**，全站非 NSFW 外文简介已翻译为简体中文；也可随时切回 `bangumi/Archive` 官方原版或自定义兼容源，支持每周/每月定时检查更新并自动增量 diff 同步未锁定字段。
-  - 作品详情页支持 `api.bgm.tv/v0` 实时搜索或粘贴 Subject ID / 链接精准绑定；深度兼容双序方括号、`x` 合著作者、中英混排、扫图组噪音清洗与 `台版 / 港版 / 番外篇` 子目录父级回溯。
-  - 支持独立专用代理（`http` / `https` / `socks5` / `socks5h`），统一加速 Bangumi、封面中转与 GitHub 更新检测，**不影响 115 与 WebDAV 直连流量**。
-- **NSFW 精准分级与默认隐藏**：严格依据 Bangumi 官方 `nsfw: true` 字段判定（辅助未命中目录成人关键词识别，并支持手动锁定），默认隐藏；支持按用户授权与个人开关独立控制。
+  - 作品详情页支持 `api.bgm.tv/v0` 实时搜索或粘贴 Subject ID / 链接精准绑定，并支持切换至已就绪的扩展离线源检索绑定；当已绑定 Bangumi OAuth / PAT 账号且开启 `show_nsfw` 时，自动携带用户授权检索 `api.bgm.tv` 的 NSFW 条目并拉取对应封面；深度兼容双序方括号、`x` 合著作者、中英混排、扫图组噪音清洗与 `台版 / 港版 / 番外篇` 子目录父级回溯。
+  - 支持独立专用代理（`http` / `https` / `socks5` / `socks5h`），统一加速 Bangumi、元数据市场/封面抓取与 GitHub 更新检测，**不影响 115 与 WebDAV 直连流量**。
+- **NSFW 精准分级与默认隐藏**：严格依据 Bangumi 官方 `nsfw: true` 字段与扩展源分级规则（如 `gallery_v1` 严格按 `Non-H` 分类豁免，辅以未命中目录成人关键词识别与手动锁定）标记，默认隐藏；支持按用户授权与个人开关独立控制。
 - **多用户分权体系、跨平台更新检测与 AI Agent API**：支持 1 个主管理员 + 多个普通用户（`argon2id` 密码哈希），支持按账号精细分配书库白名单与 NSFW 访问权限；每位用户拥有完全独立的阅读进度、阅读历史、收藏夹、阅读列表、阅读器偏好、个人 API Key 与 Bangumi 进度追踪器，兼容 Session Cookie、`HTTP Basic Auth`、`Bearer` 与 `X-API-Key`；内置 24 小时跨平台更新检测（Android 端支持 `SHA256SUMS` 校验与应用内 `PackageInstaller` 安装）、全平台白名单脱敏诊断日志导出，以及管理员专属 `/api/agent/v1` AI Agent 批量治理接口（见 [docs/AGENT_API.md](docs/AGENT_API.md)）。
 
 ---
@@ -202,7 +206,8 @@ systemctl --user start fake-komga-115
 
 - [docs/ANDROID.md](docs/ANDROID.md)：Android 独立版安装、SAF 目录权限、局域网服务与签名构建说明
 - [docs/AGENT_API.md](docs/AGENT_API.md)：AI Agent 专用书库管理接口（`/api/agent/v1`）参考手册
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：系统架构、鉴权、多源流式读取、Bangumi 双引擎与内置阅读器原理
+- [docs/METADATA_SOURCES.md](docs/METADATA_SOURCES.md)：开放元数据市场（`repo.json`）、离线索引规范、标签翻译词典、脱敏映射包与 SSRF 防护规范
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)：系统架构、鉴权、多源流式读取、多源元数据中心与内置阅读器原理
 - [docs/REVERSE_PROXY.md](docs/REVERSE_PROXY.md)：公网部署安全清单与 Caddy / Nginx / NPM / Cloudflare Tunnel HTTPS 反向代理示例
 - [docs/RELEASING.md](docs/RELEASING.md)：维护者的发版、产物验证与 Docker `latest` 切换流程
 - [AGENTS.md](AGENTS.md)：面向开发者与 AI 编程助手的仓库规范与构建指引
@@ -221,7 +226,7 @@ systemctl --user start fake-komga-115
 - **[CloudDrive2](https://www.clouddrive2.com/)**：提供了高性能的云盘挂载与标准 WebDAV 服务支持，让多种网盘通过 WebDAV 流式接入漫画书库更加便捷。
 - **[Mihon](https://mihon.app/) 与 [Koharia](https://github.com/Mister-album/Koharia)**：优秀的 Android 漫画阅读客户端（Koharia 原生支持 Komga 生态），推动了 Komga 客户端体验的普及与打磨。
 - **[KOReader](https://koreader.rocks/) 与 [`opdsforcomic.koplugin`](https://github.com/hugo1120/opdsforcomic.koplugin)**（[@hugo1120](https://github.com/hugo1120)）：为墨水屏设备带来了体验极佳的 OPDS 逐页流式漫画阅读、预取低内存解码与章节导航能力。
-- **Go 核心开源库**：感谢 [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite)（纯 Go 无 CGO SQLite 引擎）、[`nwaples/rardecode`](https://github.com/nwaples/rardecode)（纯 Go RAR4/RAR5 解码器）、[`go-chi/chi`](https://github.com/go-chi/chi) 与 Go 标准库及 `golang.org/x` 团队。
+- **Go 核心开源库**：感谢 [`modernc.org/sqlite`](https://gitlab.com/cznic/sqlite)（纯 Go 无 CGO SQLite 引擎）、[`klauspost/compress`](https://github.com/klauspost/compress)（纯 Go Zstandard 流式解压）、[`nwaples/rardecode`](https://github.com/nwaples/rardecode)（纯 Go RAR4/RAR5 解码器）、[`go-chi/chi`](https://github.com/go-chi/chi) 与 Go 标准库及 `golang.org/x` 团队。
 - **[霞鹜文楷 (LXGW WenKai)](https://github.com/lxgw/LxgwWenKai)**（SIL OFL 1.1）：大版本代号展示所用中文字形子集取材自霞鹜文楷开源字体。
 - **[OpenCC](https://github.com/BYVoid/OpenCC)**（Apache-2.0）：繁简与日文异体字搜索折叠字表（`internal/cjk/table_data.go`）基于 OpenCC 开放词典生成。
 

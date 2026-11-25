@@ -80,7 +80,7 @@ curl -fsS -H "Authorization: Bearer $FK115_API_KEY" \
   - `nsfw`：`all`（默认，含 NSFW）| `only`（仅 NSFW）| `exclude`（排除 NSFW）
   - `include_hidden`：`true` | `false`（默认 `false`，仅查未隐藏书库）
   - `publisher`、`genre`、`tag`、`author`、`status`、`sort`
-- `GET /api/agent/v1/series/{seriesID}`：查看单部系列的完整 `metadata`（含全部 `*Lock` 字段锁、`isNsfw`、`nsfwLock`）、阅读进度与单册文件列表。
+- `GET /api/agent/v1/series/{seriesID}`：查看单部系列的完整 `metadata`（含全部 `*Lock` 字段锁、`isNsfw`、`nsfwLock`，以及多源扩展绑定字段 `extSourceId`、`extEntryId`、`matchOrigin`；上游外部封面 URL 与本地缓存路径仅在服务端内部使用，不对外序列化）、阅读进度与单册文件列表。
 - `GET /api/agent/v1/series/{seriesID}/bangumi/candidates?q=关键词或SubjectID`：检索该系列的 Bangumi 候选条目及目录名清洗结果 `parsed`。
 
 ### 2.4 批量修正系列元数据与 Bangumi 绑定
@@ -129,10 +129,14 @@ curl -fsS -X POST \
 ```
 
 支持的 `action`：
-- `bind_bangumi`：绑定指定 Bangumi `subjectId`（优先拉取实时详情，离线库兜底，保留已锁定字段）。
+- `bind_bangumi`：绑定指定 Bangumi `subjectId`（优先拉取实时详情，离线库兜底，保留已锁定字段，并写入 `matchOrigin: "agent"`）。
 - `auto_scrape`：按最新清洗与繁简规则重新自动匹配单部作品。
 - `patch_metadata`：局部修改标题、排序名、状态、方向、出版社、简介、分类、标签、封面来源（`auto`/`bangumi`/`book`）、`isNsfw` 及对应 `*Lock` 锁。
 - `clear_bangumi`：解除 Bangumi 绑定并恢复目录名标题。
+
+> **多源元数据引擎与 `match_origin` 保护边界**：
+> - 系统多源刮削引擎（`internal/extmeta/`）在数据库持久化 `metadata_repos`（元数据市场）、`metadata_sources`（离线图库 / 标签词典 / 映射包）与 `library_metadata_sources`（顶层书库多源顺延链）三张配置表，并在 `series_metadata` 中记录 `ext_source_id`、`ext_entry_id`、`ext_cover_url`、`ext_cover_path` 与 `match_origin`（`auto` / `mapping` / `manual` / `agent`）。
+> - 通过网页后台手动绑定写入 `match_origin = "manual"`，通过 Agent `bind_bangumi` 写入 `match_origin = "agent"`。后台 Bangumi 与多源批量刮削（含 `mode: "force"`）均自动跳过 `match_origin IN ('manual', 'agent')` 的系列且尊重字段 `*Lock`，确保人工与 Agent 校对成果不会被自动任务覆盖；同时这两类绑定也是导出脱敏社区映射包（`mangaalpha_mapping_v1`）的默认来源。更多规范见 [docs/METADATA_SOURCES.md](METADATA_SOURCES.md)。
 
 ### 2.5 Bangumi 批量刮削、任务监控与全局开关
 

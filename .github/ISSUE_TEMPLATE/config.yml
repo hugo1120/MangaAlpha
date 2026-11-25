@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 项目文档与快速开始 (README)
+    url: https://github.com/xJogger/MangaAlpha/blob/main/README.md
+    about: 查阅安装部署、存储源配置、客户端接入与常见问题解答
+  - name: Android 独立版使用说明
+    url: https://github.com/xJogger/MangaAlpha/blob/main/docs/ANDROID.md
+    about: 查看 SAF 目录授权、局域网服务与手机端诊断日志导出说明
+  - name: 安全漏洞私密反馈指南 (SECURITY)
+    url: https://github.com/xJogger/MangaAlpha/blob/main/SECURITY.md
+    about: 若问题涉及鉴权绕过或敏感凭据风险，请先阅读安全指南并通过私下渠道反馈

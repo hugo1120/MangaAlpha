@@ -807,7 +807,7 @@
           </form>
           <div class="topbar-actions">
             <button type="button" class="btn btn-sm" id="theme-toggle-btn" data-theme-btn title="${esc(themeButtonTitle(state.themeMode))}">${esc(themeButtonLabel(state.themeMode))}</button>
-            ${state.auth.username ? `<a href="${accountLink}" data-nav class="user-pill" title="个人账号设置、显示偏好与 API Key">${esc(state.auth.username)}</a>` : ''}
+            ${state.auth.username ? `<a href="${accountLink}" data-nav class="user-pill${activeNav === 'account' ? ' active' : ''}" title="个人账号设置、显示偏好与 API Key">${esc(state.auth.username)}</a>` : ''}
             ${admin && activeNav === 'admin' && navigator.userAgent.includes('FK115Android/') ? '<a class="btn btn-sm" href="/__android/settings">手机端设置</a><a class="btn btn-sm" href="/__android/stop">停止服务</a>' : ''}
             <button type="button" class="btn btn-sm" id="logout-btn">退出</button>
           </div>
@@ -1274,9 +1274,13 @@
             <input type="text" id="f-author" class="filter-author-input" placeholder="作者筛选" value="${esc(author)}">
             <button type="button" class="btn btn-primary btn-sm" id="f-apply">筛选</button>
             <button type="button" class="btn btn-sm" id="f-reset">重置</button>
-            <label class="check-row filter-merge-toggle" title="只在内置网页版合并展示，不改卷列表与阅读进度">
-              <input type="checkbox" id="f-merge-bgm" ${mergedWorks() ? 'checked' : ''}>合并相同 Bangumi ID
-            </label>
+            <div class="filter-merge-wrap">
+              <label class="check-row filter-merge-toggle" title="仅网页书架生效，第三方客户端仍独立展示，不改卷列表与阅读进度">
+                <input type="checkbox" id="f-merge-bgm" ${mergedWorks() ? 'checked' : ''}>
+                <span>合并相同 Bangumi ID</span>
+              </label>
+              <span class="filter-merge-hint">（仅网页书架生效，第三方客户端仍独立展示）</span>
+            </div>
             <span class="filter-count" style="margin-left:auto;color:var(--text-muted);font-size:12.5px">共 ${totalElements.toLocaleString()} 部作品</span>
           </div>
         </div>
@@ -2414,7 +2418,7 @@
             </div>
             ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u)}</div>`).join('')}
             <div style="font-size:12.5px;color:var(--text-secondary);margin-top:4px">
-              <strong>KOReader 墨水屏</strong>（推荐插件 <a href="https://github.com/hugo1120/opdsforcomic.koplugin/releases" target="_blank" rel="noopener noreferrer" style="color:var(--accent)"><code>opdsforcomic.koplugin</code> ↗</a> · 点击直读 / 章节导航 / 零提前建索引 / 双向同步进度）
+              <strong><a href="https://koreader.rocks/" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">KOReader ↗</a> 墨水屏</strong>（推荐插件 <a href="https://github.com/hugo1120/opdsforcomic.koplugin/releases" target="_blank" rel="noopener noreferrer" style="color:var(--accent)"><code>opdsforcomic.koplugin</code> ↗</a> · 点击直读 / 章节导航 / 零提前建索引 / 双向同步进度）
             </div>
             ${(addrs.length ? addrs : [st.adminUrl || location.origin]).map((u) => `<div class="code-box">${esc(u.replace(/\/+$/, ''))}/api/opds/v1.2</div>`).join('')}
             <div style="font-size:12.5px;color:var(--text-secondary);margin-top:4px">
@@ -2427,11 +2431,25 @@
           </div>
         </div>
 
-        <div class="card">
-          <h3>全局索引与流式读取统计</h3>
-          <div style="display:grid;gap:8px;font-size:13px;color:var(--text-secondary)">
-            <div>已建立归档索引单册：<strong>${Number(perf.indexCount ?? perf.indexedBooksCount ?? 0).toLocaleString()}</strong></div>
-            <div>累计真实 Range 读取流量：<strong>${fmtBytes(perf.downloadBytes || 0)}</strong>（${Number(perf.downloadSamples || 0).toLocaleString()} 次请求）</div>
+        <div class="overview-side-col">
+          <div class="card">
+            <h3>全局索引与流式读取统计</h3>
+            <div style="display:grid;gap:8px;font-size:13px;color:var(--text-secondary)">
+              <div>已建立归档索引单册：<strong>${Number(perf.indexCount ?? perf.indexedBooksCount ?? 0).toLocaleString()}</strong></div>
+              <div>累计真实 Range 读取流量：<strong>${fmtBytes(perf.downloadBytes || 0)}</strong>（${Number(perf.downloadSamples || 0).toLocaleString()} 次请求）</div>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3>问题反馈与需求建议</h3>
+            <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 12px;line-height:1.6">
+              遇到异常或有新想法，欢迎按分类提交 GitHub Issue。反馈 Bug 建议附带<strong>脱敏诊断日志</strong>（自动剔除 Token、密码与私人路径），切勿粘贴真实凭据。
+            </p>
+            <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+              <a class="btn btn-sm btn-primary" href="https://github.com/xJogger/MangaAlpha/issues/new?template=bug_report.yml" target="_blank" rel="noopener noreferrer">反馈 Bug（附导出脱敏日志指引）↗</a>
+              <a class="btn btn-sm" href="https://github.com/xJogger/MangaAlpha/issues/new?template=feature_request.yml" target="_blank" rel="noopener noreferrer">提交功能需求 ↗</a>
+              <a class="btn btn-sm" href="/admin?tab=settings#diagnostics" data-nav>前往「诊断日志」导出 →</a>
+            </div>
           </div>
         </div>
       </div>
@@ -3813,25 +3831,6 @@
       </div>
 
       <div class="card">
-        <h3>油猴脚本（Bangumi 条目页快捷跳转与简介简中翻译）</h3>
-        <p style="margin:0 0 12px;font-size:13px;color:var(--text-secondary);line-height:1.65">
-          在 <code>bgm.tv</code> / <code>bangumi.tv</code> / <code>chii.in</code> 条目页<strong>右侧收藏盒下方</strong>以原生侧栏卡片展示本库收录状态（自动适配浅色与深色模式）、一键直达作品或多版本切换栏，并在<strong>简介正上方</strong>自动提供「显示简中翻译 / 查看原文」切换按钮（复用本地中文增强离线库）。
-          支持 Tampermonkey / Violentmonkey 直接弹窗安装与覆盖升级。
-        </p>
-        <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
-          <a class="btn btn-primary btn-sm" id="bgm-us-install-script" href="/bgm/userscript/latest.user.js" target="_blank" rel="noopener noreferrer">① 安装 / 更新油猴脚本</a>
-          <button type="button" class="btn btn-sm" id="bgm-us-pair-key">② 一键生成并同步专属 Key 到油猴</button>
-        </div>
-        <div style="margin-top:10px;font-size:12px;color:var(--text-muted);line-height:1.65;padding:8px 10px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
-          <div><strong>① 源码与密钥彻底分离：</strong>脚本本体永久不含任何密钥（并内置 <code>@updateURL</code> / <code>@downloadURL</code>，支持在油猴扩展中直接点击原生「检查更新」），后续升级脚本的 Diff 永远纯净、绝不清空已保存的 Key。</div>
-          <div style="margin-top:4px"><strong>② 首次或轮换 Key 同步：</strong>装完脚本后点一次「② 一键生成并同步专属 Key 到油猴」，会自动吊销旧的同名「Bangumi 油猴脚本」Key，并通过本机配对页把地址与新 Key 直接写入油猴本地存储（全程免手输、密钥不进服务端日志）。</div>
-          <div style="margin-top:4px"><strong>③ 跨域权限提示说明：</strong>脚本运行在 <code>bgm.tv</code> 上、需要向你的 MangaAlpha 服务器（<code>${esc(location.hostname)}</code>）发起收录探测与简中简介请求，已在 <code>@connect</code> 中自动预授权当前主机；若油猴弹出「跨域访问确认」，点击<strong>「始终允许该域名」</strong>即可。</div>
-          <div style="margin-top:4px">脚本更新地址：<code>${esc(location.origin)}/bgm/userscript/latest.user.js</code> · 直达跳转格式：<code>${esc(location.origin)}/bgm/&lt;subjectId&gt;</code></div>
-        </div>
-        <div id="bgm-us-status" style="margin-top:8px;font-size:12px;color:var(--text-muted)"></div>
-      </div>
-
-      <div class="card">
         <div class="section-head">
           <h3>刮削任务记录</h3>
           <button type="button" class="btn btn-sm" id="bgm-refresh-btn">刷新</button>
@@ -4075,35 +4074,6 @@
           toast('已恢复默认内置 Bangumi OAuth 应用');
           renderAdminBangumi(body);
         } catch (err) { toast(err.message, 'error'); }
-      };
-    }
-
-    const usPairKeyBtn = document.getElementById('bgm-us-pair-key');
-    if (usPairKeyBtn) {
-      usPairKeyBtn.onclick = async () => {
-        usPairKeyBtn.disabled = true;
-        const popup = window.open('about:blank', '_blank');
-        try {
-          const res = await api('/admin/api/bangumi/userscript/pair-key', { method: 'POST' });
-          const hash = `server=${encodeURIComponent(location.origin)}&key=${encodeURIComponent(res.key)}`;
-          const pairUrl = `${location.origin}${res.pairPath || '/bgm/userscript/pair'}#${hash}`;
-          if (popup && !popup.closed) {
-            popup.location.href = pairUrl;
-          } else {
-            window.location.href = pairUrl;
-          }
-          const stEl = document.getElementById('bgm-us-status');
-          if (stEl) {
-            const rotNote = res.rotatedOldKeys > 0 ? `（已自动吊销 ${res.rotatedOldKeys} 个旧油猴 Key）` : '';
-            stEl.innerHTML = `<span style="color:var(--success)">✅ 已生成新专属 Key（前缀 <code>${esc(res.keyPrefix || '')}</code>）${rotNote}并打开配对页自动写入油猴存储。若未自动完成，请先点左侧「① 安装 / 更新油猴脚本」。</span>`;
-          }
-          toast('已打开配对页同步专属 Key 到油猴');
-        } catch (err) {
-          if (popup && !popup.closed) popup.close();
-          toast(err.message || '生成油猴专属 Key 失败', 'error');
-        } finally {
-          usPairKeyBtn.disabled = false;
-        }
       };
     }
 
@@ -4422,7 +4392,7 @@
           </div>`}
       </div>
 
-      <div class="card">
+      <div class="card" id="admin-diagnostics-card">
         <div class="section-head" style="flex-wrap:wrap;gap:10px">
           <div>
             <h3 style="margin:0 0 4px">脱敏诊断日志与排障导出</h3>
@@ -4639,6 +4609,16 @@
           renderAdminSettings(body);
         } catch (err) { toast(err.message, 'error'); }
       };
+    }
+
+    if (location.hash === '#diagnostics') {
+      history.replaceState(null, '', location.pathname + location.search);
+      requestAnimationFrame(() => {
+        const diagCard = document.getElementById('admin-diagnostics-card');
+        if (diagCard && typeof diagCard.scrollIntoView === 'function') {
+          diagCard.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
     }
   }
 
@@ -6039,24 +6019,24 @@
             <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">使用当前账号的用户名与密码（或右侧生成的个人 API Key）即可登录以下客户端，阅读进度与收藏夹与网页端实时同步：</p>
             <div style="display:grid;gap:10px">
               <div>
-                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>Komga 客户端</strong>（Koharia / Mihon 等）</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>Komga 客户端</strong>（推荐 <a href="https://github.com/Mister-album/Koharia" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Koharia ↗</a> Android 阅读器，或 <a href="https://mihon.app/" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">Mihon ↗</a> Komga 扩展）</div>
                 <div style="display:flex;gap:6px;align-items:center">
-                  <div class="code-box" style="flex:1;margin:0">${esc(komgaURL)}</div>
-                  <button type="button" class="btn btn-sm" data-acc-copy="${esc(komgaURL)}">复制</button>
+                  <div class="code-box" style="flex:1;min-width:0;margin:0">${esc(komgaURL)}</div>
+                  <button type="button" class="btn btn-sm" style="flex-shrink:0" data-acc-copy="${esc(komgaURL)}">复制</button>
                 </div>
               </div>
               <div>
-                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>KOReader 墨水屏 OPDS</strong>（<code>opdsforcomic.koplugin</code>）</div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong><a href="https://koreader.rocks/" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">KOReader ↗</a> 墨水屏 OPDS</strong>（推荐插件 <a href="https://github.com/hugo1120/opdsforcomic.koplugin/releases" target="_blank" rel="noopener noreferrer" style="color:var(--accent)"><code>opdsforcomic.koplugin</code> ↗</a>）</div>
                 <div style="display:flex;gap:6px;align-items:center">
-                  <div class="code-box" style="flex:1;margin:0">${esc(koreaderURL)}</div>
-                  <button type="button" class="btn btn-sm" data-acc-copy="${esc(koreaderURL)}">复制</button>
+                  <div class="code-box" style="flex:1;min-width:0;margin:0">${esc(koreaderURL)}</div>
+                  <button type="button" class="btn btn-sm" style="flex-shrink:0" data-acc-copy="${esc(koreaderURL)}">复制</button>
                 </div>
               </div>
               <div>
                 <div style="font-size:12px;color:var(--text-secondary);margin-bottom:4px"><strong>标准 Komga OPDS v1.2</strong></div>
                 <div style="display:flex;gap:6px;align-items:center">
-                  <div class="code-box" style="flex:1;margin:0">${esc(komgaOpdsURL)}</div>
-                  <button type="button" class="btn btn-sm" data-acc-copy="${esc(komgaOpdsURL)}">复制</button>
+                  <div class="code-box" style="flex:1;min-width:0;margin:0">${esc(komgaOpdsURL)}</div>
+                  <button type="button" class="btn btn-sm" style="flex-shrink:0" data-acc-copy="${esc(komgaOpdsURL)}">复制</button>
                 </div>
               </div>
             </div>
@@ -6285,6 +6265,11 @@
             const pairUrl = `${location.origin}${res.pairPath || '/bgm/userscript/pair'}#${hash}`;
             if (popup && !popup.closed) popup.location.href = pairUrl;
             else window.location.href = pairUrl;
+            const stEl = document.getElementById('bgm-us-status');
+            if (stEl) {
+              const rotNote = res.rotatedOldKeys > 0 ? `（已自动吊销 ${res.rotatedOldKeys} 个旧油猴 Key）` : '';
+              stEl.innerHTML = `<span style="color:var(--success)">✅ 已生成新专属 Key（前缀 <code>${esc(res.keyPrefix || '')}</code>）${rotNote}并打开配对页自动写入油猴存储。若未自动完成，请先点左侧「① 安装 / 更新油猴脚本」。</span>`;
+            }
             toast('已打开配对页同步个人专属 Key 到油猴');
           } catch (err) {
             if (popup && !popup.closed) popup.close();

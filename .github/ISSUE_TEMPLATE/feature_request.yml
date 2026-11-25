@@ -1,0 +1,52 @@
+name: 功能需求与体验建议
+description: 提议新功能、客户端兼容性增强或交互体验优化
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢为 MangaAlpha 提交功能建议！清晰的使用场景描述能帮助评估优先级与设计方案。
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: 涉及模块
+      options:
+        - 网页书架 / 浏览与筛选
+        - 内置网页阅读器 (/reader)
+        - 管理后台 / 多用户与权限
+        - 存储源 / 联合库 / 扫描
+        - Bangumi 刮削 / 追踪 / 油猴脚本
+        - Komga / OPDS / 第三方客户端兼容
+        - Android 独立版
+        - AI Agent API / 部署与运维
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 使用场景与当前痛点
+      description: 请描述你在什么场景下遇到了什么不便，希望解决什么问题。
+      placeholder: 例如：在手机竖屏浏览时…… / 管理大量书库时……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的功能或改进方式
+      description: 请说明你期望的交互、界面展示或接口行为。
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 补充说明或参考（可选）
+      description: 可附上你考虑过的替代做法或参考体验（请勿贴入真实 Token、密码或私人路径）。
+    validations:
+      required: false

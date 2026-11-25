@@ -1,0 +1,99 @@
+name: Bug 反馈
+description: 报告程序异常、扫描/阅读器/客户端同步问题或界面显示 Bug
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈 MangaAlpha 问题！为加快定位排查，提交 Bug 前请尽量附上**脱敏诊断日志**：
+        - **网页端 / 桌面端 / Docker 服务端**：进入「**管理后台 → 缓存与设置 → 脱敏诊断日志与排障导出**」（`/admin?tab=settings`），可按需勾选「详细排障模式」并复现问题后，点击「导出诊断报告 (.txt)」并附在下方。
+        - **Android 独立版 App**：下拉常驻通知展开「**手机端设置**」（或从管理后台顶栏 / 启动页进入「**手机端设置与诊断日志**」），在「脱敏诊断日志与导出」中导出或分享脱敏报告并附在下方。
+
+        > **安全提醒**：导出的脱敏日志会自动剔除敏感凭据，但手工贴入报错截图、终端输出或配置时，**切勿粘贴任何真实 115 Token、Bangumi PAT、WebDAV 密码、代理密码、API Key、Session Cookie、真实 `downurl` 或私人目录隐私信息**。
+
+  - type: input
+    id: version
+    attributes:
+      label: MangaAlpha 版本
+      description: 可在网页底部页脚、「管理后台 → 概览与连接」或「缓存与设置 → 软件版本与更新检测」查看
+      placeholder: 例如：v3.1.1 / v3.2.0-preview / docker 镜像标签
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deploy_mode
+    attributes:
+      label: 部署 / 运行方式
+      options:
+        - Linux 二进制
+        - Docker 容器
+        - Windows 桌面端 (exe / 托盘)
+        - macOS 二进制
+        - Android 独立版 (APK)
+        - 源码自行编译
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: 涉及的存储源、端或模块（可多选）
+      multiple: true
+      options:
+        - 115 Open API
+        - 本地磁盘 / SMB 挂载
+        - WebDAV (CloudDrive2 / OpenList / NAS)
+        - 联合库 (OverlayFS)
+        - 内置网页书架 / 管理后台
+        - 内置网页阅读器 (/reader)
+        - Bangumi 刮削 / 进度追踪 / 油猴脚本
+        - Koharia / Mihon (Komga API)
+        - KOReader (opdsforcomic.koplugin / OPDS)
+        - Android 独立版原生功能 / SAF
+    validations:
+      required: false
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请描述遇到了什么问题、预期表现是什么、实际表现是什么。
+      placeholder: 例如：打开某非固实加密归档时…… / 期望……实际……
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 请尽可能清晰地列出复现问题的操作步骤。
+      placeholder: |
+        1. 打开 ……
+        2. 点击 ……
+        3. 出现报错或异常 ……
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 脱敏诊断日志 / 错误输出（强烈建议附带）
+      description: |
+        请按以下路径导出脱敏诊断日志并拖拽上传 `.txt` 或粘贴关键片段：
+        - 服务端 / 桌面端：「管理后台 → 缓存与设置 → 脱敏诊断日志与排障导出」（`/admin?tab=settings`）
+        - Android 独立版：「Android 原生手机端设置 → 脱敏诊断日志与导出」
+        切勿贴入真实 Token、密码、API Key、Cookie 或真实下载链接。
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: security_check
+    attributes:
+      label: 提交前安全确认
+      options:
+        - label: 我已确认提交内容与日志中不包含真实 Token、密码、API Key、Cookie 或真实 downurl
+          required: true

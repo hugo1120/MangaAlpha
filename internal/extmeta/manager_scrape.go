@@ -16,21 +16,23 @@ import (
 )
 
 type ScrapeRun struct {
-	ID          string `json:"id"`
-	LibraryID   string `json:"libraryId"`
-	Mode        string `json:"mode"`
-	Status      string `json:"status"`
-	AllowOnline bool   `json:"allowOnline"`
-	StartedAt   string `json:"startedAt"`
-	CompletedAt string `json:"completedAt,omitempty"`
-	TotalSeries int    `json:"totalSeries"`
-	Processed   int    `json:"processedSeries"`
-	Matched     int    `json:"matchedCount"`
-	Mapped      int    `json:"mappingCount"`
-	Unmatched   int    `json:"unmatchedCount"`
-	Skipped     int    `json:"skippedCount"`
-	Failed      int    `json:"failedCount"`
-	Error       string `json:"error,omitempty"`
+	ID            string `json:"id"`
+	LibraryID     string `json:"libraryId"`
+	LibraryName   string `json:"libraryName,omitempty"`
+	CurrentSeries string `json:"currentSeries,omitempty"`
+	Mode          string `json:"mode"`
+	Status        string `json:"status"`
+	AllowOnline   bool   `json:"allowOnline"`
+	StartedAt     string `json:"startedAt"`
+	CompletedAt   string `json:"completedAt,omitempty"`
+	TotalSeries   int    `json:"totalSeries"`
+	Processed     int    `json:"processedSeries"`
+	Matched       int    `json:"matchedCount"`
+	Mapped        int    `json:"mappingCount"`
+	Unmatched     int    `json:"unmatchedCount"`
+	Skipped       int    `json:"skippedCount"`
+	Failed        int    `json:"failedCount"`
+	Error         string `json:"error,omitempty"`
 }
 
 type scrapeSeries struct {
@@ -61,6 +63,7 @@ func (m *Manager) StartMultiScrape(ctx context.Context, libraryID, mode string, 
 	default:
 		return ScrapeRun{}, ErrInvalidConfig
 	}
+	libraryName := "全部未隐藏书库"
 	if libraryID != "" {
 		lib, err := m.store.LibraryBasic(ctx, libraryID)
 		if err != nil {
@@ -69,6 +72,7 @@ func (m *Manager) StartMultiScrape(ctx context.Context, libraryID, mode string, 
 		if !lib.Enabled || lib.UnionParentID != "" {
 			return ScrapeRun{}, ErrUnavailable
 		}
+		libraryName = lib.Name
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -81,7 +85,7 @@ func (m *Manager) StartMultiScrape(ctx context.Context, libraryID, mode string, 
 	jobCtx, cancel := context.WithCancel(m.ctx)
 	m.scrapeCancel = cancel
 	run := ScrapeRun{
-		ID: newRunID(), LibraryID: libraryID, Mode: mode, AllowOnline: allowOnline,
+		ID: newRunID(), LibraryID: libraryID, LibraryName: libraryName, Mode: mode, AllowOnline: allowOnline,
 		Status: "running", StartedAt: timestamp(),
 	}
 	m.scrapes = append(m.scrapes, run)
@@ -175,7 +179,8 @@ SELECT s.id,s.library_id,s.name,s.relative_path,s.one_shot,
 FROM series s JOIN libraries l ON l.id=s.library_id
 LEFT JOIN series_metadata sm ON sm.series_id=s.id
 WHERE l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)
-  AND coalesce(sm.match_origin,'') NOT IN ('manual','agent')`
+  AND coalesce(sm.match_origin,'') NOT IN ('manual','agent')
+  AND NOT (coalesce(sm.match_origin,'')='' AND (coalesce(sm.bgm_subject_id,0)>0 OR coalesce(sm.ext_entry_id,'')<>''))`
 	var args []any
 	if libraryID != "" {
 		query += " AND s.library_id=?"
@@ -216,11 +221,14 @@ func (m *Manager) multiScrape(ctx context.Context, run *ScrapeRun) error {
 		return err
 	}
 	run.TotalSeries = len(targets)
+	m.publishScrapeProgress(run)
 	pending := make([]scrapeSeries, 0)
 	for _, target := range targets {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		run.CurrentSeries = target.series.Name
+		m.publishScrapeProgress(run)
 		incoming, matched, err := m.matchOffline(ctx, target, plan)
 		if err == nil && !matched && run.AllowOnline && len(plan.online) > 0 {
 			pending = append(pending, target)
@@ -231,7 +239,7 @@ func (m *Manager) multiScrape(ctx context.Context, run *ScrapeRun) error {
 	return m.enrichOnline(ctx, run, plan.online, pending)
 }
 
-func (m *Manager) finishSeries(ctx context.Context, run *ScrapeRun, target scrapeSeries, incoming database.ScrapedMetadata, matched bool, err error) {
+func (m *Manager) finishSeries(ctx context.Context, run *ScrapeRun, target scrapeSeries, incoming database.ScrapedMetadata, matched bool, err error) error {
 	if err == nil {
 		switch {
 		case matched:
@@ -255,6 +263,11 @@ func (m *Manager) finishSeries(ctx context.Context, run *ScrapeRun, target scrap
 	default:
 		run.Unmatched++
 	}
+	m.publishScrapeProgress(run)
+	return err
+}
+
+func (m *Manager) publishScrapeProgress(run *ScrapeRun) {
 	m.mu.Lock()
 	m.scrapes[len(m.scrapes)-1] = *run
 	m.mu.Unlock()
@@ -456,6 +469,7 @@ func (m *Manager) entry(ctx context.Context, sourceID, entryID string) (*Entry, 
 
 type CandidateResult struct {
 	Parsed     bangumi.ParsedQuery `json:"parsed"`
+	SourceID   string              `json:"sourceId,omitempty"`
 	Candidates any                 `json:"candidates"`
 }
 
@@ -475,7 +489,7 @@ func (m *Manager) SearchCandidates(ctx context.Context, seriesID, sourceID, quer
 		if hits == nil {
 			hits = []bangumi.SubjectCandidate{}
 		}
-		return CandidateResult{Parsed: parsed, Candidates: hits}, err
+		return CandidateResult{Parsed: parsed, SourceID: sourceID, Candidates: hits}, err
 	}
 	src, err := m.store.GetMetadataSource(ctx, sourceID)
 	if err != nil {
@@ -486,6 +500,7 @@ func (m *Manager) SearchCandidates(ctx context.Context, seriesID, sourceID, quer
 	}
 	parsed := bangumi.ParseSeriesWithPath(series.Name, series.RelativePath)
 	hits := make([]*Entry, 0)
+	dict := m.sourceTagDictionary(ctx, src.TagDictSourceID)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	sidecar := m.sidecars[sourceID]
@@ -524,7 +539,16 @@ func (m *Manager) SearchCandidates(ctx context.Context, seriesID, sourceID, quer
 			}
 		}
 	}
-	return CandidateResult{Parsed: parsed, Candidates: hits}, nil
+	for i, hit := range hits {
+		entry := *hit
+		entry.SourceID = sourceID
+		entry.Tags = slices.Clone(hit.Tags)
+		if dict != nil {
+			entry.Tags = dict.TranslateList(entry.Tags, TagDisplayMode(src.TagDisplayMode))
+		}
+		hits[i] = &entry
+	}
+	return CandidateResult{Parsed: parsed, SourceID: sourceID, Candidates: hits}, nil
 }
 
 func (m *Manager) BindSeriesExternal(ctx context.Context, seriesID, sourceID, entryID, origin string) (database.SeriesMetadata, error) {
@@ -565,18 +589,23 @@ func (m *Manager) BindSeriesExternal(ctx context.Context, seriesID, sourceID, en
 	return m.store.ApplyScrapedMetadata(ctx, series, m.externalMetadata(ctx, src, entry, origin, 1))
 }
 
+func (m *Manager) sourceTagDictionary(ctx context.Context, sourceID string) *TagDictionary {
+	if sourceID == "" {
+		return nil
+	}
+	source, err := m.store.GetMetadataSource(ctx, sourceID)
+	if err != nil || !source.Enabled || !source.Ready {
+		return nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.dictionaries[sourceID]
+}
+
 func (m *Manager) externalMetadata(ctx context.Context, src database.MetadataSource, entry *Entry, origin string, confidence float64) database.ScrapedMetadata {
 	tags := append([]string{}, entry.Tags...)
-	if src.TagDictSourceID != "" {
-		dictSrc, err := m.store.GetMetadataSource(ctx, src.TagDictSourceID)
-		if err == nil && dictSrc.Enabled && dictSrc.Ready {
-			m.mu.RLock()
-			dict := m.dictionaries[src.TagDictSourceID]
-			m.mu.RUnlock()
-			if dict != nil {
-				tags = dict.TranslateList(tags, TagDisplayMode(src.TagDisplayMode))
-			}
-		}
+	if dict := m.sourceTagDictionary(ctx, src.TagDictSourceID); dict != nil {
+		tags = dict.TranslateList(tags, TagDisplayMode(src.TagDisplayMode))
 	}
 	authors := make([]database.Author, 0, len(entry.Authors))
 	for _, name := range entry.Authors {
@@ -604,13 +633,6 @@ func (m *Manager) ClearSeriesExternal(ctx context.Context, seriesID string) (dat
 	series, err := m.store.SeriesByIDAny(ctx, seriesID, false)
 	if err != nil {
 		return database.SeriesMetadata{}, err
-	}
-	current, err := m.store.SeriesMetadataByID(ctx, series)
-	if err != nil {
-		return current, err
-	}
-	if current.ExtSourceID == "" && current.BgmSubjectID != nil {
-		return m.store.ClearSeriesBangumiBinding(ctx, series)
 	}
 	return m.store.ClearSeriesExternalBinding(ctx, series)
 }

@@ -522,11 +522,10 @@ func containsIPv4Literal(s string) bool {
 }
 
 func containsIPv6Literal(s string) bool {
-	// Check bracketed IPv6 or tokens containing "::" that parse as valid IPv6 addresses.
 	for _, field := range strings.FieldsFunc(s, func(r rune) bool {
 		return unicode.IsSpace(r) || r == ',' || r == ';' || r == '"' || r == '\'' || r == '[' || r == ']'
 	}) {
-		if !strings.Contains(field, "::") {
+		if strings.Count(field, ":") < 2 {
 			continue
 		}
 		if addr, err := netip.ParseAddr(field); err == nil && addr.Is6() {

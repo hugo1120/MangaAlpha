@@ -22,6 +22,11 @@ type OnlineStatus struct {
 	Status        string     `json:"status"`
 	Total         int        `json:"total"`
 	Processed     int        `json:"processed"`
+	Running       bool       `json:"running"`
+	CircuitOpen   bool       `json:"circuitOpen"`
+	Matched       int        `json:"matched"`
+	Failed        int        `json:"failed"`
+	LastError     string     `json:"lastError,omitempty"`
 	SourceID      string     `json:"sourceId,omitempty"`
 	HTTPStatus    int        `json:"httpStatus,omitempty"`
 	CooldownUntil *time.Time `json:"cooldownUntil,omitempty"`
@@ -33,6 +38,9 @@ func (m *Manager) OnlineEnrichStatus() OnlineStatus {
 	status := m.online
 	if status.Status == "" {
 		status.Status = "idle"
+	}
+	if status.CircuitOpen && status.CooldownUntil != nil && !time.Now().Before(*status.CooldownUntil) {
+		status.CircuitOpen, status.CooldownUntil = false, nil
 	}
 	return status
 }
@@ -49,10 +57,16 @@ func (m *Manager) enrichOnline(ctx context.Context, run *ScrapeRun, sources []da
 	}
 	client := m.client(ctx, 30*time.Second)
 	defer client.CloseIdleConnections()
-	status := OnlineStatus{RunID: run.ID, Status: "running", Total: len(pending)}
+	status := OnlineStatus{RunID: run.ID, Status: "running", Running: true, Total: len(pending)}
+	if previous := m.OnlineEnrichStatus(); previous.CircuitOpen {
+		status.Status, status.CircuitOpen = "cooldown", true
+		status.SourceID, status.HTTPStatus = previous.SourceID, previous.HTTPStatus
+		status.CooldownUntil, status.LastError = previous.CooldownUntil, previous.LastError
+	}
 	m.setOnlineStatus(status)
 	defer func() {
 		status.Status = "success"
+		status.Running = false
 		if ctx.Err() != nil {
 			status.Status = "canceled"
 		}
@@ -61,6 +75,8 @@ func (m *Manager) enrichOnline(ctx context.Context, run *ScrapeRun, sources []da
 	// Keep the current series and source on a circuit trip. The same request
 	// resumes after cooldown, and completed items remain committed.
 	for _, target := range pending {
+		run.CurrentSeries = target.series.Name
+		m.publishScrapeProgress(run)
 		parsed := bangumi.ParseSeriesName(target.series.Name)
 		query := firstNonEmpty(parsed.Candidates...)
 		var (
@@ -84,8 +100,18 @@ func (m *Manager) enrichOnline(ctx context.Context, run *ScrapeRun, sources []da
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		m.finishSeries(ctx, run, target, meta, found, failed)
+		err := m.finishSeries(ctx, run, target, meta, found, failed)
 		status.Processed++
+		switch {
+		case errors.Is(err, database.ErrMetadataChanged):
+		case err != nil:
+			status.Failed++
+			if failed == nil || status.LastError == "" {
+				status.LastError = "online metadata enrichment failed"
+			}
+		case found:
+			status.Matched++
+		}
 		m.setOnlineStatus(status)
 	}
 	return nil
@@ -97,6 +123,9 @@ func (m *Manager) onlineMatch(ctx context.Context, client *http.Client, sourceID
 		if err := waitUntil(ctx, m.nextOnline); err != nil {
 			return empty, false, err
 		}
+		status.Status, status.SourceID = "running", sourceID
+		status.HTTPStatus, status.CooldownUntil, status.CircuitOpen = 0, nil, false
+		m.setOnlineStatus(*status)
 		series, err := m.store.SeriesByIDAny(ctx, target.series.ID, false)
 		if err != nil {
 			return empty, false, database.ErrMetadataChanged
@@ -105,23 +134,28 @@ func (m *Manager) onlineMatch(ctx context.Context, client *http.Client, sourceID
 		if err != nil {
 			return empty, false, err
 		}
-		if current.MatchOrigin == "manual" || current.MatchOrigin == "agent" {
+		if current.MatchOrigin == "manual" || current.MatchOrigin == "agent" ||
+			(current.MatchOrigin == "" && (current.ExtEntryID != "" || current.BgmSubjectID != nil && *current.BgmSubjectID > 0)) {
 			return empty, false, database.ErrMetadataChanged
 		}
 		source, err := m.store.GetMetadataSource(ctx, sourceID)
 		if err != nil || !source.Enabled || !source.OnlineEnabled || source.OnlineAPIURL == "" {
 			return empty, false, nil
 		}
-		status.Status, status.SourceID = "running", sourceID
-		status.HTTPStatus, status.CooldownUntil = 0, nil
-		m.setOnlineStatus(*status)
 		entry, code, retry, err := requestOnlineEntry(ctx, client, source.OnlineAPIURL, query)
 		m.nextOnline = time.Now().Add(5*time.Second + rand.N(3*time.Second+1))
-		if code == http.StatusForbidden || code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable {
+		status.HTTPStatus = code
+		if err != nil && ctx.Err() == nil {
+			status.LastError = "online metadata request failed"
+			if code != 0 {
+				status.LastError += " (HTTP " + strconv.Itoa(code) + ")"
+			}
+		}
+		if isCircuitBreakerStatus(code) {
 			delay := max(retry, time.Minute<<min(trips, 5))
 			until := time.Now().Add(delay)
 			m.nextOnline = until
-			status.Status, status.HTTPStatus, status.CooldownUntil = "cooldown", code, &until
+			status.Status, status.CircuitOpen, status.CooldownUntil = "cooldown", true, &until
 			m.setOnlineStatus(*status)
 			continue
 		}

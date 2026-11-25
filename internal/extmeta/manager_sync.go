@@ -22,12 +22,14 @@ type SyncRun struct {
 	ID              string `json:"id"`
 	SourceID        string `json:"sourceId"`
 	Status          string `json:"status"`
+	Phase           string `json:"phase,omitempty"`
 	StartedAt       string `json:"startedAt"`
 	CompletedAt     string `json:"completedAt,omitempty"`
 	Error           string `json:"error,omitempty"`
 	DownloadedBytes int64  `json:"downloadedBytes"`
 	TotalBytes      int64  `json:"totalBytes"`
 	Indexed         int64  `json:"indexed"`
+	IndexedEntries  int64  `json:"indexedEntries"`
 }
 
 const runHistoryLimit = 100
@@ -55,7 +57,11 @@ func (m *Manager) startSourceSync(ctx context.Context, id string, force, schedul
 	if m.activeSync[id] {
 		return SyncRun{}, ErrBusy
 	}
-	run := SyncRun{ID: newRunID(), SourceID: id, Status: "running", StartedAt: timestamp()}
+	phase := "downloading"
+	if src.Kind == KindOfflineSQLite && src.LocalPath != "" && filepath.Clean(src.LocalPath) != m.sqlitePath(src.ID) {
+		phase = "indexing"
+	}
+	run := SyncRun{ID: newRunID(), SourceID: id, Status: "running", Phase: phase, StartedAt: timestamp()}
 	m.activeSync[id] = true
 	m.syncs = append(m.syncs, run)
 	m.wg.Go(func() {
@@ -82,6 +88,12 @@ func (m *Manager) updateSync(id string, update func(*SyncRun)) {
 			return
 		}
 	}
+}
+
+func (m *Manager) setSyncPhase(id, phase string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.updateSync(id, func(run *SyncRun) { run.Phase = phase })
 }
 
 func (m *Manager) finishSync(sourceID, runID string, skipped bool, err error) {
@@ -219,7 +231,7 @@ func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, f
 	client := m.client(ctx, 3*time.Hour)
 	defer client.CloseIdleConnections()
 	if src.Kind == KindBangumiArchive {
-		return m.syncBangumi(ctx, client, src, force)
+		return m.syncBangumi(ctx, client, src, force, runID)
 	}
 
 	staging, err := os.MkdirTemp(m.root, ".sync-")
@@ -274,10 +286,11 @@ func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, f
 		}
 		var indexed int64
 		index := filepath.Join(staging, "index.db")
+		m.setSyncPhase(runID, "indexing")
 		err := BuildSidecarIndex(ctx, upstream, index, src.SchemaType, func(count int64) {
 			indexed = count
 			m.mu.Lock()
-			m.updateSync(runID, func(run *SyncRun) { run.Indexed = count })
+			m.updateSync(runID, func(run *SyncRun) { run.Indexed, run.IndexedEntries = count, count })
 			m.mu.Unlock()
 		})
 		if err != nil {
@@ -292,6 +305,7 @@ func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, f
 		if err != nil {
 			return false, err
 		}
+		m.setSyncPhase(runID, "indexing")
 		dict, err = LoadTagDictionaryFile(path)
 		if err != nil {
 			return false, err
@@ -304,6 +318,7 @@ func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, f
 		if err != nil {
 			return false, err
 		}
+		m.setSyncPhase(runID, "indexing")
 		ndjson, err := SanitizeAndExportMappings(mappings, ExportMappingsOptions{IncludeNSFW: true})
 		if err != nil {
 			return false, err
@@ -325,6 +340,7 @@ func (m *Manager) syncSource(ctx context.Context, src database.MetadataSource, f
 	default:
 		return false, ErrInvalidConfig
 	}
+	m.setSyncPhase(runID, "syncing")
 	return false, m.publishSync(ctx, src, staging, state, files, dict, mappings)
 }
 
@@ -398,7 +414,7 @@ func (m *Manager) publishSync(ctx context.Context, src database.MetadataSource, 
 	return nil
 }
 
-func (m *Manager) syncBangumi(ctx context.Context, client *http.Client, src database.MetadataSource, force bool) (bool, error) {
+func (m *Manager) syncBangumi(ctx context.Context, client *http.Client, src database.MetadataSource, force bool, runID string) (bool, error) {
 	if m.bangumi == nil {
 		return false, ErrUnavailable
 	}
@@ -414,6 +430,7 @@ func (m *Manager) syncBangumi(ctx context.Context, client *http.Client, src data
 	if err != nil {
 		return false, err
 	}
+	m.setSyncPhase(runID, "syncing")
 	_, err = m.store.UpdateMetadataSourceSyncState(ctx, src.ID, database.MetadataSourceSyncState{
 		Ready: &st.Ready, EntryCount: &st.SubjectCount, LastUpdatedAt: &st.ImportedAt,
 	})

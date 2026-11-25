@@ -18,6 +18,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,8 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/zstd"
+	"github.com/xJogger/fake-komga-115/internal/bangumi"
+	"github.com/xJogger/fake-komga-115/internal/database"
 	_ "modernc.org/sqlite"
 )
 
@@ -207,6 +210,42 @@ func TestSSRFClientRedirectsAndHeaderStripping(t *testing.T) {
 	}
 }
 
+func TestSSRFProxyValidatesTargetsWithoutResolvingThem(t *testing.T) {
+	var hits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		if r.URL.Host != "public.example.test" {
+			t.Errorf("proxy received target %q", r.URL.Host)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer proxy.Close()
+	client := NewSafeHTTPClient(proxy.URL, 5*time.Second)
+	defer client.CloseIdleConnections()
+
+	for _, host := range []string{
+		"metadata", "redis", "postgres", "intranet", "NaS.LoCaL.", "host.docker.internal",
+		"printer.lan", "server.home.arpa", "host.localdomain", "1.in-addr.arpa", "1.ip6.arpa",
+		"169.254.169.254", "198.18.0.1",
+	} {
+		resp, err := client.Get("http://" + host + "/")
+		if resp != nil {
+			resp.Body.Close()
+		}
+		if !errors.Is(err, ErrSSRFBlocked) {
+			t.Errorf("target %q: got %v, want ErrSSRFBlocked", host, err)
+		}
+	}
+	resp, err := client.Get("http://public.example.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent || hits.Load() != 1 {
+		t.Fatalf("proxy status = %d, requests = %d", resp.StatusCode, hits.Load())
+	}
+}
+
 func TestRepoManifestParseFetchAndValidation(t *testing.T) {
 	t.Parallel()
 
@@ -312,6 +351,65 @@ func TestRepoManifestParseFetchAndValidation(t *testing.T) {
 	}
 	if _, err := FetchRepoManifest(context.Background(), client, srv.URL+"/too-big.json"); err == nil {
 		t.Fatalf("expected oversized remote repo manifest to fail")
+	}
+}
+
+func TestRepoManifestAutoUpdatePreferences(t *testing.T) {
+	const body = `{
+		"schema": "mangaalpha-repo-v1",
+		"name": "Community Metadata",
+		"version": "2026.11.25.1",
+		"updatedAt": "2026-11-25T00:00:00Z",
+		"sources": [
+			{"id":"archive","kind":"bangumi_archive","name":"Archive","manifestUrl":"zh_cn","autoUpdateDefault":"weekly"},
+			{"id":"catalog","kind":"offline_sqlite","name":"Catalog","downloadUrl":"https://example.test/catalog.sqlite","autoUpdateDefault":"manual"},
+			{"id":"tags","kind":"tag_dictionary","name":"Tags","autoUpdateDefault":" Monthly "},
+			{"id":"legacy-on","kind":"mapping_pack","name":"Legacy on","autoUpdateDefault":true},
+			{"id":"legacy-off","kind":"mapping_pack","name":"Legacy off","autoUpdateDefault":false}
+		]
+	}`
+	manifest, err := ParseRepoManifest([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Version != "2026.11.25.1" {
+		t.Fatalf("version = %q", manifest.Version)
+	}
+	want := []AutoUpdatePreference{"weekly", "manual", "monthly", "weekly", "manual"}
+	for i, source := range manifest.Sources {
+		if source.AutoUpdateDefault != want[i] {
+			t.Errorf("%s: schedule = %q, want %q", source.ID, source.AutoUpdateDefault, want[i])
+		}
+		data, err := json.Marshal(source.AutoUpdateDefault)
+		if err != nil || string(data) != fmt.Sprintf("%q", want[i]) {
+			t.Errorf("%s: marshaled schedule = %s, err = %v", source.ID, data, err)
+		}
+	}
+	for _, invalid := range []string{`"daily"`, `""`, "null", "1", "[]", "{}"} {
+		var preference AutoUpdatePreference
+		if err := json.Unmarshal([]byte(invalid), &preference); err == nil {
+			t.Errorf("accepted invalid schedule %s", invalid)
+		}
+	}
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		return managerResponse(r, http.StatusOK, strings.NewReader(body)), nil
+	})}
+	store, manager, _ := newTestManager(t, ManagerOptions{HTTPClient: client})
+	ctx := t.Context()
+	repo, err := manager.SubscribeRepo(ctx, "https://example.test/repo.json")
+	if err != nil || repo.RepoVersion != manifest.Version {
+		t.Fatalf("subscribed version = %q, err = %v", repo.RepoVersion, err)
+	}
+	sources, err := store.ListMetadataSources(ctx, "")
+	if err != nil || len(sources) != len(want) {
+		t.Fatalf("subscribed source count = %d, err = %v", len(sources), err)
+	}
+	for i, declared := range manifest.Sources {
+		for _, source := range sources {
+			if source.SourceKey == declared.ID && source.AutoUpdate != string(want[i]) {
+				t.Errorf("%s: saved schedule = %q, want %q", source.SourceKey, source.AutoUpdate, want[i])
+			}
+		}
 	}
 }
 
@@ -850,6 +948,19 @@ func TestMappingsParseLookupAndSanitizedExport(t *testing.T) {
 	}
 }
 
+func TestMappingIPv6Literals(t *testing.T) {
+	for _, input := range []string{"fe80::1", "Before [2001:0db8:85a3:0000:0000:8a2e:0370:7334] After"} {
+		if !containsSensitiveOrPrivateValue(input) {
+			t.Errorf("IPv6 literal was allowed in %q", input)
+		}
+	}
+	for _, input := range []string{"Re:Zero: Starting Life", "12:34:56"} {
+		if containsSensitiveOrPrivateValue(input) {
+			t.Errorf("ordinary title was rejected: %q", input)
+		}
+	}
+}
+
 func TestArchiveEmbeddedMetadataParsers(t *testing.T) {
 	t.Parallel()
 
@@ -957,6 +1068,8 @@ func TestCoverServiceCacheLimiterNegativeAndCircuitBreaker(t *testing.T) {
 			time.Sleep(35 * time.Millisecond)
 			activeConns.Add(-1)
 			_, _ = w.Write(validPNG)
+		case "/updated.png":
+			_, _ = w.Write(validJPEG)
 		case "/bad-magic":
 			_, _ = w.Write([]byte("<html>blocked page</html>"))
 		case "/huge.png":
@@ -1021,6 +1134,15 @@ func TestCoverServiceCacheLimiterNegativeAndCircuitBreaker(t *testing.T) {
 	if err != nil || !cached.FromCache || hits.Load() != hitsBefore {
 		t.Fatalf("expected disk cache hit without network call, got fromCache=%v err=%v", cached.FromCache, err)
 	}
+	newURL := srv.URL + "/updated.png"
+	updated, err := svc.GetOrFetch(t.Context(), "src-conc", "e-0", newURL)
+	if err != nil || updated.FromCache || !bytes.Equal(updated.Bytes, validJPEG) || updated.CachePath == cached.CachePath {
+		t.Fatalf("changed cover URL: got %+v, err = %v", updated, err)
+	}
+	reused, err := svc.GetOrFetch(t.Context(), "src-conc", "e-0", " "+newURL+" ")
+	if err != nil || !reused.FromCache || !bytes.Equal(reused.Bytes, validJPEG) || hits.Load() != hitsBefore+1 {
+		t.Fatalf("changed cover URL cache: got %+v, err = %v, requests = %d", reused, err, hits.Load()-hitsBefore)
+	}
 
 	// Verify invalid magic & oversized payload rejection + 5m negative cache.
 	if _, err := svc.GetOrFetch(context.Background(), "src-neg", "bad1", srv.URL+"/bad-magic"); !errors.Is(err, ErrInvalidImage) {
@@ -1084,5 +1206,224 @@ func TestCoverServiceCacheLimiterNegativeAndCircuitBreaker(t *testing.T) {
 	res, err := svc.GetOrFetch(context.Background(), "src-cb", "cb-item", srv.URL+"/flaky.png")
 	if err != nil || res.Extension != "png" {
 		t.Fatalf("expected circuit breaker recovery on 200 OK, got err=%v", err)
+	}
+}
+
+func TestManagerCoverChecksSidecarEvenWhenSeriesNSFWIsLockedOff(t *testing.T) {
+	ctx := t.Context()
+	png := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	var requests int
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		requests++
+		return managerResponse(r, http.StatusOK, bytes.NewReader(png)), nil
+	})}
+	store, m, root := newTestManager(t, ManagerOptions{})
+	covers, err := NewCoverService(CoverConfig{DataDir: root, Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.covers = covers
+	seedMetadataLibrary(t, store, "main", true)
+	seedMetadataSeries(t, store, "series", "main", "Blue River")
+	upstream := filepath.Join(root, "upstream.sqlite")
+	createManagerGallery(t, upstream, "Blue River")
+	src := addManagerSource(t, m, database.MetadataSource{Name: "Catalog", Kind: KindOfflineSQLite, LocalPath: upstream})
+	syncManagerFixture(t, m, src, false, "success")
+
+	const coverURL = "https://cover.example.test/cover.png"
+	if err := store.SaveSeriesMetadata(ctx, database.SeriesMetadata{
+		SeriesID: "series", ExtSourceID: src.ID, ExtEntryID: "102", ExtCoverURL: coverURL, NSFWLock: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	meta := readMetadata(t, store, "series")
+	if meta.IsNSFW || !meta.NSFWLock {
+		t.Fatalf("series fixture did not lock off the NSFW flag: %+v", meta)
+	}
+	allowed := database.WithUserScope(ctx, database.UserScope{UserID: "allowed", AllowNSFW: true})
+	restricted := database.WithUserScope(ctx, database.UserScope{UserID: "restricted"})
+	raw, mediaType, err := m.FetchCover(allowed, meta.ExtSourceID, meta.ExtEntryID, meta.ExtCoverURL)
+	if err != nil || mediaType != "image/png" || !bytes.Equal(raw, png) {
+		t.Fatalf("allowed cover: media type = %q, err = %v", mediaType, err)
+	}
+	for _, entryID := range []string{meta.ExtEntryID, "999"} {
+		raw, mediaType, err := m.FetchCover(restricted, meta.ExtSourceID, entryID, meta.ExtCoverURL)
+		if !errors.Is(err, ErrUnavailable) || raw != nil || mediaType != "" || requests != 1 {
+			t.Fatalf("restricted cover %q: bytes = %x, media type = %q, requests = %d, err = %v", entryID, raw, mediaType, requests, err)
+		}
+	}
+	if _, _, err := m.FetchCover(restricted, src.ID, "101", coverURL); err != nil || requests != 2 {
+		t.Fatalf("safe cover: requests = %d, err = %v", requests, err)
+	}
+}
+
+func TestForceScrapePreservesProtectedBindings(t *testing.T) {
+	ctx := t.Context()
+	store, m, root := newTestManager(t, ManagerOptions{})
+	bgm, err := bangumi.NewService(store, filepath.Join(root, "bangumi"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		m.Close()
+		bgm.Close()
+	})
+	var contents bytes.Buffer
+	archive := zip.NewWriter(&contents)
+	subjects, err := archive.Create("subject.jsonlines")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fmt.Fprintln(subjects, `{"id":100,"type":1,"platform":1001,"name":"Blue River","series":true}`); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dumpPath := filepath.Join(root, "fixture.zip")
+	if err := os.WriteFile(dumpPath, contents.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := bgm.ImportArchiveZip(ctx, dumpPath, "fixture.zip", "2026-11-25T00:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	seedMetadataLibrary(t, store, "main", true)
+	upstream := filepath.Join(root, "upstream.sqlite")
+	createManagerGallery(t, upstream, "Blue River")
+	src := addManagerSource(t, m, database.MetadataSource{Name: "Catalog", Kind: KindOfflineSQLite, LocalPath: upstream})
+	syncManagerFixture(t, m, src, false, "success")
+	if _, err := m.SetLibrarySources(ctx, "main", []string{src.ID}); err != nil {
+		t.Fatal(err)
+	}
+	legacyID := int64(42)
+	protected := []database.SeriesMetadata{
+		{SeriesID: "legacy-bangumi", BgmSubjectID: &legacyID},
+		{SeriesID: "legacy-external", ExtSourceID: src.ID, ExtEntryID: "102"},
+		{SeriesID: "manual", BgmSubjectID: &legacyID, MatchOrigin: "manual"},
+		{SeriesID: "agent", ExtSourceID: src.ID, ExtEntryID: "102", MatchOrigin: "agent"},
+	}
+	assertProtected := func() {
+		t.Helper()
+		for _, want := range protected {
+			got := readMetadata(t, store, want.SeriesID)
+			if got.ExtSourceID != want.ExtSourceID || got.ExtEntryID != want.ExtEntryID || got.MatchOrigin != want.MatchOrigin ||
+				got.ScrapeStatus != database.ScrapeStatusMatched || (want.BgmSubjectID != nil && (got.BgmSubjectID == nil || *got.BgmSubjectID != legacyID)) {
+				t.Fatalf("protected binding changed: %+v", got)
+			}
+		}
+	}
+	for _, meta := range append(slices.Clone(protected), database.SeriesMetadata{SeriesID: "automatic", BgmSubjectID: &legacyID, MatchOrigin: "auto"}) {
+		seedMetadataSeries(t, store, meta.SeriesID, "main", "Blue River")
+		meta.ScrapeStatus = database.ScrapeStatusMatched
+		if err := store.SaveSeriesMetadata(ctx, meta); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	extRun, err := m.StartMultiScrape(ctx, "main", bangumi.ScrapeModeForce, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForManager(t, func() bool { return m.ScrapeRuns()[0].CompletedAt != "" })
+	if done := m.ScrapeRuns()[0]; done.ID != extRun.ID || done.Status != "success" || done.TotalSeries != 1 ||
+		done.Matched != 1 || done.LibraryName != "main" || done.CurrentSeries != "Blue River" {
+		t.Fatalf("external force scrape = %+v", done)
+	}
+	assertProtected()
+	if meta := readMetadata(t, store, "automatic"); meta.ExtSourceID != src.ID || meta.ExtEntryID != "101" || meta.MatchOrigin != "auto" {
+		t.Fatalf("external force scrape did not update automatic binding: %+v", meta)
+	}
+	bgmRun, err := bgm.StartBatchWithMode(ctx, "main", bangumi.ScrapeModeForce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitForManager(t, func() bool {
+		bgmRun, err = bgm.Run(ctx, bgmRun.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bgmRun.CompletedAt != nil
+	})
+	if bgmRun.Status != "success" || bgmRun.SkippedCount != len(protected) || bgmRun.MatchedCount != 1 || bgmRun.FailedCount != 0 {
+		t.Fatalf("Bangumi force scrape = %+v", bgmRun)
+	}
+	assertProtected()
+	if meta := readMetadata(t, store, "automatic"); meta.BgmSubjectID == nil || *meta.BgmSubjectID != 100 || meta.MatchOrigin != "auto" {
+		t.Fatalf("Bangumi force scrape did not update automatic binding: %+v", meta)
+	}
+	cleared, err := m.ClearSeriesExternal(ctx, "automatic")
+	if err != nil || cleared.BgmSubjectID == nil || *cleared.BgmSubjectID != 100 || cleared.ScrapeStatus != database.ScrapeStatusMatched {
+		t.Fatalf("external unbind changed Bangumi metadata: %+v, err = %v", cleared, err)
+	}
+}
+
+func TestManagerCandidateSourceAndTagDisplay(t *testing.T) {
+	ctx := t.Context()
+	client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+		return managerResponse(r, http.StatusOK, strings.NewReader(
+			`{"data":[{"namespace":"topic","data":{"glasses":{"name":"眼镜"}}}]}`)), nil
+	})}
+	store, m, root := newTestManager(t, ManagerOptions{HTTPClient: client})
+	seedMetadataLibrary(t, store, "main", true)
+	seedMetadataSeries(t, store, "series", "main", "Blue River")
+	upstream := filepath.Join(root, "upstream.sqlite")
+	createManagerGallery(t, upstream, "Blue River")
+	dict := addManagerSource(t, m, database.MetadataSource{Name: "Dictionary", Kind: KindTagDictionary, DownloadURL: "https://example.test/tags.json"})
+	src := addManagerSource(t, m, database.MetadataSource{Name: "Catalog", Kind: KindOfflineSQLite, LocalPath: upstream, TagDictSourceID: dict.ID})
+	syncManagerFixture(t, m, dict, false, "success")
+	syncManagerFixture(t, m, src, false, "success")
+	if run := m.Syncs()[0]; run.Phase != "syncing" || run.Indexed != 2 || run.IndexedEntries != run.Indexed {
+		t.Fatalf("sync progress = %+v", run)
+	}
+	for _, tc := range []struct{ query, mode, tag string }{
+		{"101", "zh", "眼镜"},
+		{"Blue River", "bilingual", "眼镜 (topic:glasses)"},
+		{"101", "raw", "topic:glasses"},
+	} {
+		if _, err := m.UpdateSourceConfig(ctx, src.ID, SourceConfig{TagDisplayMode: &tc.mode}); err != nil {
+			t.Fatal(err)
+		}
+		found, err := m.SearchCandidates(ctx, "series", src.ID, tc.query)
+		if err != nil || found.SourceID != src.ID {
+			t.Fatalf("candidate search = %+v, err = %v", found, err)
+		}
+		hits := found.Candidates.([]*Entry)
+		if len(hits) != 1 || hits[0].SourceID != src.ID || !slices.Equal(hits[0].Tags, []string{tc.tag}) {
+			t.Fatalf("candidates for %s = %+v", tc.mode, hits)
+		}
+	}
+}
+
+func TestManagerOnlineEnrichReportsOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		code    int
+		body    string
+		matched int
+		failed  int
+	}{
+		{"matched", http.StatusOK, `{"entryId":"1","title":"Blue River"}`, 1, 0},
+		{"unmatched", http.StatusNoContent, "", 0, 0},
+		{"failed", http.StatusBadGateway, "", 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: managerTransport(func(r *http.Request) (*http.Response, error) {
+				return managerResponse(r, tc.code, strings.NewReader(tc.body)), nil
+			})}
+			store, m, _ := newTestManager(t, ManagerOptions{HTTPClient: client})
+			seedMetadataLibrary(t, store, "main", true)
+			seedMetadataSeries(t, store, "series", "main", "Blue River")
+			addManagerSource(t, m, database.MetadataSource{Name: "Online", Kind: KindOfflineSQLite, OnlineEnabled: true, OnlineAPIURL: "https://source.example.test/suggest"})
+			run, err := m.StartMultiScrape(t.Context(), "main", "force", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForManager(t, func() bool { return m.ScrapeRuns()[0].CompletedAt != "" })
+			status := m.OnlineEnrichStatus()
+			if status.RunID != run.ID || status.Running || status.CircuitOpen || status.Processed != 1 ||
+				status.Matched != tc.matched || status.Failed != tc.failed || (status.LastError != "") != (tc.failed != 0) {
+				t.Fatalf("online status = %+v", status)
+			}
+		})
 	}
 }

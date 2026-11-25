@@ -684,6 +684,7 @@ func (s *Service) AutoScrapeOneDetailed(
 		}
 	}
 	scraped := ToScrapedMetadataWithQuery(series.Name, parsed, best)
+	scraped.MatchOrigin = "auto"
 	meta, err = s.store.ApplyScrapedMetadata(ctx, series, scraped)
 	if err != nil {
 		return false, database.SeriesMetadata{}, nil, err
@@ -886,6 +887,7 @@ func (s *Service) executeBatch(item scrapeJob) {
 		queueKey = "__all__"
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
+	ctx = database.WithAutomaticMetadata(ctx)
 	s.mu.Lock()
 	s.activeRunID = item.runID
 	s.activeStop = cancel
@@ -940,7 +942,8 @@ func (s *Service) executeBatch(item scrapeJob) {
 			}
 			run.ProcessedSeries++
 			run.SkippedCount++
-		} else if shouldSkipByMode(item.mode, target.scrapeStatus) {
+		} else if target.matchOrigin == "manual" || target.matchOrigin == "agent" ||
+			(target.matchOrigin == "" && target.bound) || shouldSkipByMode(item.mode, target.scrapeStatus) {
 			run.ProcessedSeries++
 			run.SkippedCount++
 		} else {
@@ -952,6 +955,8 @@ func (s *Service) executeBatch(item scrapeJob) {
 			}
 			run.ProcessedSeries++
 			switch {
+			case errors.Is(sErr, database.ErrMetadataChanged):
+				run.SkippedCount++
 			case sErr != nil:
 				run.FailedCount++
 				if len(run.Errors) < maxScrapeStoredErrors {
@@ -991,6 +996,8 @@ func (s *Service) executeBatch(item scrapeJob) {
 type scrapeTarget struct {
 	series       database.Series
 	scrapeStatus string
+	matchOrigin  string
+	bound        bool
 }
 
 func shouldSkipByMode(mode string, scrapeStatus string) bool {
@@ -1006,7 +1013,9 @@ func shouldSkipByMode(mode string, scrapeStatus string) bool {
 
 func (s *Service) loadTargetSeries(ctx context.Context, libraryID string) ([]scrapeTarget, error) {
 	query := `
-SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,coalesce(sm.scrape_status,'none')
+SELECT s.id,s.library_id,s.cid,s.name,s.relative_path,s.one_shot,coalesce(sm.scrape_status,'none'),
+       coalesce(sm.match_origin,''),
+       (coalesce(sm.bgm_subject_id,0)>0 OR coalesce(sm.ext_entry_id,'')<>'')
 FROM series s
 JOIN libraries l ON l.id=s.library_id
 LEFT JOIN series_metadata sm ON sm.series_id=s.id`
@@ -1029,7 +1038,7 @@ LEFT JOIN series_metadata sm ON sm.series_id=s.id`
 		var oneShotInt int
 		if err := rows.Scan(
 			&t.series.ID, &t.series.LibraryID, &t.series.CID, &t.series.Name,
-			&t.series.RelativePath, &oneShotInt, &t.scrapeStatus,
+			&t.series.RelativePath, &oneShotInt, &t.scrapeStatus, &t.matchOrigin, &t.bound,
 		); err != nil {
 			return nil, err
 		}

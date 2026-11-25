@@ -99,10 +99,12 @@ func (s *Server) metadataOverview(w http.ResponseWriter, r *http.Request) {
 		s.metadataError(w, err)
 		return
 	}
+	syncs, online := s.metadata.Syncs(), s.metadata.OnlineEnrichStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"repos": repos, "sources": sources, "libraryChains": chains,
-		"syncs": s.metadata.Syncs(), "scrapeRuns": s.metadata.ScrapeRuns(),
-		"onlineEnrich": s.metadata.OnlineEnrichStatus(),
+		"recommendedRepoUrl": extmeta.RecommendedRepoURL,
+		"repos":              repos, "sources": sources, "libraryChains": chains,
+		"syncs": syncs, "activeSyncs": syncs, "scrapeRuns": s.metadata.ScrapeRuns(),
+		"onlineEnrich": online, "onlineEnrichStatus": online,
 	})
 }
 

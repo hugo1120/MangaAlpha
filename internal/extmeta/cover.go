@@ -98,7 +98,7 @@ type CoverService struct {
 }
 
 // NewCoverService creates a CoverService storing thumbnails under
-// <dataDir>/thumbnails/extmeta/<safeSourceID>/<safeEntryID>.<ext>.
+// <dataDir>/thumbnails/extmeta/<safeSourceID>/<safeEntryID>_<urlHash>.<ext>.
 func NewCoverService(cfg CoverConfig) (*CoverService, error) {
 	dataDir := strings.TrimSpace(cfg.DataDir)
 	if dataDir == "" {
@@ -199,8 +199,16 @@ func isCleanSafeSegment(s string) bool {
 // CoverCachePath returns the resolved safe disk path for (sourceID, entryID, ext)
 // guaranteed to stay inside <dataDir>/thumbnails/extmeta.
 func (c *CoverService) CoverCachePath(sourceID, entryID, ext string) (string, error) {
+	return c.coverCachePath(sourceID, SafePathSegment(entryID), ext)
+}
+
+func (c *CoverService) versionedCoverCachePath(sourceID, entryID, coverURL, ext string) (string, error) {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(coverURL)))
+	return c.coverCachePath(sourceID, SafePathSegment(entryID)+"_"+hex.EncodeToString(sum[:6]), ext)
+}
+
+func (c *CoverService) coverCachePath(sourceID, safeEntry, ext string) (string, error) {
 	safeSource := SafePathSegment(sourceID)
-	safeEntry := SafePathSegment(entryID)
 	cleanExt := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(ext)), ".")
 	switch cleanExt {
 	case "jpg", "jpeg":
@@ -225,13 +233,12 @@ func (c *CoverService) GetOrFetch(ctx context.Context, sourceID, entryID, coverU
 	if c == nil {
 		return CoverData{}, errors.New("cover service is nil")
 	}
-	if data, ok := c.readCachedFromDisk(sourceID, entryID); ok {
-		return data, nil
-	}
-
 	coverURL = strings.TrimSpace(coverURL)
 	if _, err := validateHTTPURL(coverURL); err != nil {
 		return CoverData{}, err
+	}
+	if data, ok := c.readCachedFromDisk(sourceID, entryID, coverURL); ok {
+		return data, nil
 	}
 
 	circuitKey := c.circuitKey(sourceID, coverURL)
@@ -246,7 +253,7 @@ func (c *CoverService) GetOrFetch(ctx context.Context, sourceID, entryID, coverU
 
 	flightKey := sourceID + "\x00" + entryID + "\x00" + coverURL
 	val, err, _ := c.flight.Do(flightKey, func() (any, error) {
-		if data, ok := c.readCachedFromDisk(sourceID, entryID); ok {
+		if data, ok := c.readCachedFromDisk(sourceID, entryID, coverURL); ok {
 			return data, nil
 		}
 		if err := c.checkCircuitOpen(circuitKey); err != nil {
@@ -340,7 +347,7 @@ func (c *CoverService) fetchValidateAndCache(
 		return CoverData{}, fmt.Errorf("%w: unrecognized magic bytes", ErrInvalidImage)
 	}
 
-	cachePath, err := c.CoverCachePath(sourceID, entryID, ext)
+	cachePath, err := c.versionedCoverCachePath(sourceID, entryID, coverURL, ext)
 	if err != nil {
 		return CoverData{}, err
 	}
@@ -378,9 +385,9 @@ func DetectImageFormat(data []byte) (ext string, mimeType string, ok bool) {
 	return "", "", false
 }
 
-func (c *CoverService) readCachedFromDisk(sourceID, entryID string) (CoverData, bool) {
+func (c *CoverService) readCachedFromDisk(sourceID, entryID, coverURL string) (CoverData, bool) {
 	for _, ext := range []string{"jpg", "webp", "png", "gif"} {
-		path, err := c.CoverCachePath(sourceID, entryID, ext)
+		path, err := c.versionedCoverCachePath(sourceID, entryID, coverURL, ext)
 		if err != nil {
 			continue
 		}

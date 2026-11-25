@@ -418,14 +418,9 @@ func (s *Store) ApplyScrapedMetadata(
 	if !current.NSFWLock {
 		current.IsNSFW = incoming.IsNSFW
 		if !current.IsNSFW {
-			var hasNSFWSource int
-			if qErr := s.db.QueryRowContext(ctx, `
-SELECT 1
-FROM union_series_sources uss
-JOIN series_metadata ssm ON ssm.series_id=uss.source_series_id
-WHERE uss.union_series_id=? AND ssm.is_nsfw=1
-LIMIT 1`, series.ID).Scan(&hasNSFWSource); qErr == nil && hasNSFWSource == 1 {
-				current.IsNSFW = true
+			current.IsNSFW, err = s.unionHasNSFWSource(ctx, series.ID)
+			if err != nil {
+				return SeriesMetadata{}, err
 			}
 		}
 	}
@@ -433,6 +428,18 @@ LIMIT 1`, series.ID).Scan(&hasNSFWSource); qErr == nil && hasNSFWSource == 1 {
 		return SeriesMetadata{}, err
 	}
 	return s.SeriesMetadataByID(ctx, series)
+}
+
+func (s *Store) unionHasNSFWSource(ctx context.Context, seriesID string) (bool, error) {
+	var hasNSFWSource bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+SELECT 1
+FROM union_series_sources uss
+JOIN series_metadata ssm ON ssm.series_id=uss.source_series_id
+WHERE uss.union_series_id=? AND ssm.is_nsfw=1
+)`, seriesID).Scan(&hasNSFWSource)
+	return hasNSFWSource, err
 }
 
 func (s *Store) MarkSeriesScrapeStatus(
@@ -481,7 +488,10 @@ func (s *Store) ClearSeriesBangumiBinding(ctx context.Context, series Series) (S
 		current.MatchOrigin = ""
 	}
 	if !current.NSFWLock {
-		current.IsNSFW = false
+		current.IsNSFW, err = s.unionHasNSFWSource(ctx, series.ID)
+		if err != nil {
+			return SeriesMetadata{}, err
+		}
 	}
 	if !current.TitleLock {
 		current.Title = series.Name
@@ -713,6 +723,12 @@ func (s *Store) ClearSeriesExternalBinding(ctx context.Context, series Series) (
 		current.ScrapeStatus = ScrapeStatusNone
 		current.ScrapeConfidence = 0
 		current.MatchOrigin = ""
+		if !current.NSFWLock {
+			current.IsNSFW, err = s.unionHasNSFWSource(ctx, series.ID)
+			if err != nil {
+				return SeriesMetadata{}, err
+			}
+		}
 		if !current.TitleLock {
 			current.Title = series.Name
 		}
@@ -751,15 +767,18 @@ func (s *Store) saveSeriesMetadata(ctx context.Context, m SeriesMetadata, now st
 	defer tx.Rollback()
 
 	if automated, _ := ctx.Value(automaticMetadataKey{}).(bool); automated {
-		var origin, updatedAt string
+		var origin, updatedAt, extEntryID string
+		var bgmID int64
 		err := tx.QueryRowContext(ctx, `
-SELECT coalesce(sm.match_origin,''),coalesce(sm.updated_at,'')
+SELECT coalesce(sm.match_origin,''),coalesce(sm.updated_at,''),
+       coalesce(sm.bgm_subject_id,0),coalesce(sm.ext_entry_id,'')
 FROM series s JOIN libraries l ON l.id=s.library_id
 LEFT JOIN series_metadata sm ON sm.series_id=s.id
 WHERE s.id=? AND l.enabled=1 AND NOT EXISTS (
  SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id
-)`, m.SeriesID).Scan(&origin, &updatedAt)
+)`, m.SeriesID).Scan(&origin, &updatedAt, &bgmID, &extEntryID)
 		if errors.Is(err, sql.ErrNoRows) || origin == "manual" || origin == "agent" ||
+			(origin == "" && (bgmID > 0 || extEntryID != "")) ||
 			err == nil && updatedAt != "" && !parseTime(updatedAt).Equal(m.UpdatedAt) {
 			return ErrMetadataChanged
 		}

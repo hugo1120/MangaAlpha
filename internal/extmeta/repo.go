@@ -40,29 +40,54 @@ type RepoManifest struct {
 	Name        string       `json:"name,omitempty"`
 	Description string       `json:"description,omitempty"`
 	Homepage    string       `json:"homepage,omitempty"`
+	Version     string       `json:"version,omitempty"`
 	UpdatedAt   string       `json:"updatedAt,omitempty"`
 	Sources     []RepoSource `json:"sources"`
 }
 
+// AutoUpdatePreference is the default update schedule declared by a source.
+type AutoUpdatePreference string
+
+func (p *AutoUpdatePreference) UnmarshalJSON(data []byte) error {
+	switch strings.TrimSpace(string(data)) {
+	case "true":
+		*p = "weekly"
+	case "false":
+		*p = "manual"
+	default:
+		var value string
+		if err := json.Unmarshal(data, &value); err != nil {
+			return err
+		}
+		switch value = strings.ToLower(strings.TrimSpace(value)); value {
+		case "manual", "weekly", "monthly":
+			*p = AutoUpdatePreference(value)
+		default:
+			return errors.New("autoUpdateDefault must be manual, weekly, or monthly")
+		}
+	}
+	return nil
+}
+
 // RepoSource declares a single external metadata source, tag dictionary, or mapping pack.
 type RepoSource struct {
-	ID                string `json:"id"`
-	Kind              string `json:"kind"`
-	Schema            string `json:"schema,omitempty"`
-	Name              string `json:"name"`
-	Description       string `json:"description,omitempty"`
-	ManifestURL       string `json:"manifestUrl,omitempty"`
-	DownloadURL       string `json:"downloadUrl,omitempty"`
-	ReleaseAPIURL     string `json:"releaseApiUrl,omitempty"`
-	AssetName         string `json:"assetName,omitempty"`
-	Compression       string `json:"compression,omitempty"`
-	SizeHintBytes     int64  `json:"sizeHintBytes,omitempty"`
-	DefaultTagDictID  string `json:"defaultTagDictId,omitempty"`
-	NSFWRule          string `json:"nsfwRule,omitempty"`
-	AutoUpdateDefault bool   `json:"autoUpdateDefault,omitempty"`
-	Homepage          string `json:"homepage,omitempty"`
-	ContributeURL     string `json:"contributeUrl,omitempty"`
-	Default           bool   `json:"default,omitempty"`
+	ID                string               `json:"id"`
+	Kind              string               `json:"kind"`
+	Schema            string               `json:"schema,omitempty"`
+	Name              string               `json:"name"`
+	Description       string               `json:"description,omitempty"`
+	ManifestURL       string               `json:"manifestUrl,omitempty"`
+	DownloadURL       string               `json:"downloadUrl,omitempty"`
+	ReleaseAPIURL     string               `json:"releaseApiUrl,omitempty"`
+	AssetName         string               `json:"assetName,omitempty"`
+	Compression       string               `json:"compression,omitempty"`
+	SizeHintBytes     int64                `json:"sizeHintBytes,omitempty"`
+	DefaultTagDictID  string               `json:"defaultTagDictId,omitempty"`
+	NSFWRule          string               `json:"nsfwRule,omitempty"`
+	AutoUpdateDefault AutoUpdatePreference `json:"autoUpdateDefault,omitempty"`
+	Homepage          string               `json:"homepage,omitempty"`
+	ContributeURL     string               `json:"contributeUrl,omitempty"`
+	Default           bool                 `json:"default,omitempty"`
 }
 
 // ParseRepoManifest parses and validates a mangaalpha-repo-v1 JSON payload.
@@ -85,6 +110,7 @@ func ParseRepoManifest(data []byte) (*RepoManifest, error) {
 	manifest.Name = strings.TrimSpace(manifest.Name)
 	manifest.Description = strings.TrimSpace(manifest.Description)
 	manifest.Homepage = strings.TrimSpace(manifest.Homepage)
+	manifest.Version = strings.TrimSpace(manifest.Version)
 	manifest.UpdatedAt = strings.TrimSpace(manifest.UpdatedAt)
 	if manifest.Homepage != "" {
 		if _, err := validateHTTPURL(manifest.Homepage); err != nil {

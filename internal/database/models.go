@@ -180,7 +180,7 @@ type SeriesMetadata struct {
 	BgmSubjectID        *int64           `json:"bgmSubjectId,omitempty"`
 	ExtSourceID         string           `json:"extSourceId,omitempty"`
 	ExtEntryID          string           `json:"extEntryId,omitempty"`
-	ExtCoverURL         string           `json:"extCoverUrl,omitempty"`
+	ExtCoverURL         string           `json:"-"`
 	ExtCoverPath        string           `json:"-"`
 	MatchOrigin         string           `json:"matchOrigin,omitempty"`
 	ScrapeStatus        string           `json:"scrapeStatus"`

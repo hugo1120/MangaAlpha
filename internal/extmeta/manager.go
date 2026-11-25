@@ -193,7 +193,7 @@ func (m *Manager) fetchRepo(ctx context.Context, repo database.MetadataRepo) (da
 	for _, item := range oldManifest.Sources {
 		oldDownloads[item.ID] = item.DownloadURL
 	}
-	repo.SchemaVersion, repo.RepoVersion, repo.RawJSON = manifest.Schema, manifest.UpdatedAt, string(raw)
+	repo.SchemaVersion, repo.RepoVersion, repo.RawJSON = manifest.Schema, firstNonEmpty(manifest.Version, manifest.UpdatedAt), string(raw)
 	repo.LastSyncedAt, repo.LastError = timestamp(), ""
 	// Declare dictionaries first so manifest-local dictionary keys can be resolved to DB IDs.
 	ordered := slices.Clone(manifest.Sources)
@@ -212,9 +212,7 @@ func (m *Manager) fetchRepo(ctx context.Context, repo database.MetadataRepo) (da
 		var dictionaryKey string
 		if !found {
 			src = database.MetadataSource{RepoID: repo.ID, SourceKey: item.ID, Enabled: item.Default}
-			if item.AutoUpdateDefault {
-				src.AutoUpdate = "weekly"
-			}
+			src.AutoUpdate = firstNonEmpty(string(item.AutoUpdateDefault), "manual")
 			dictionaryKey = item.DefaultTagDictID
 		}
 		// A changed kind would give the same ID incompatible on-disk artifacts and bindings.

@@ -43,6 +43,20 @@ func TestFreshOpenAndIdempotentReopenMetadataTables(t *testing.T) {
 			t.Fatalf("expected series_metadata.%s to exist, ok=%v err=%v", col, ok, err)
 		}
 	}
+	assertPartial := func(store *Store) {
+		t.Helper()
+		var partial bool
+		err := store.DB().QueryRow(`SELECT "partial" FROM pragma_index_list('series_metadata') WHERE name='idx_series_metadata_ext'`).Scan(&partial)
+		if err != nil || !partial {
+			t.Fatalf("expected partial external metadata index, got partial=%v err=%v", partial, err)
+		}
+	}
+	assertPartial(store)
+	if _, err := store.DB().Exec(`
+DROP INDEX idx_series_metadata_ext;
+CREATE INDEX idx_series_metadata_ext ON series_metadata(ext_source_id, ext_entry_id);`); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.Close(); err != nil {
 		t.Fatalf("close first open: %v", err)
 	}
@@ -53,6 +67,7 @@ func TestFreshOpenAndIdempotentReopenMetadataTables(t *testing.T) {
 		t.Fatalf("reopen db: %v", err)
 	}
 	defer reopened.Close()
+	assertPartial(reopened)
 	ok, err := tableExists(reopened.DB(), "metadata_repos")
 	if err != nil || !ok {
 		t.Fatalf("metadata_repos missing after reopen: ok=%v err=%v", ok, err)
@@ -505,8 +520,51 @@ func TestMetadataRepoAndSourceCRUDAndCascadeDelete(t *testing.T) {
 	}
 
 	// Attach all 3 sources to lib_1, then test DeleteMetadataSource & DeleteMetadataRepo cascade cleanup.
+	if err := store.UpsertLibrary(ctx, Library{ID: "lib_1", Name: "Fixture", RootCID: "root", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.SetLibraryMetadataSources(ctx, "lib_1", []string{srcA.ID, srcB.ID, srcKeep.ID}); err != nil {
 		t.Fatalf("SetLibraryMetadataSources: %v", err)
+	}
+	bgmID := int64(42)
+	for _, fixture := range []struct {
+		id, source string
+		subjectID  *int64
+	}{
+		{"source-only", srcB.ID, nil},
+		{"repo-only", srcA.ID, nil},
+		{"repo-with-bangumi", srcA.ID, &bgmID},
+		{"retained", srcKeep.ID, nil},
+	} {
+		now := nowText()
+		if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO series(id,library_id,cid,name,relative_path,created_at,updated_at,seen_scan_id)
+VALUES(?,'lib_1',?,?,?, ?,?,'scan')`, fixture.id, fixture.id, fixture.id, fixture.id, now, now); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.SaveSeriesMetadata(ctx, SeriesMetadata{
+			SeriesID: fixture.id, BgmSubjectID: fixture.subjectID, ExtSourceID: fixture.source, ExtEntryID: "entry",
+			ExtCoverURL: "https://cover.example.test/image.png", ExtCoverPath: "cover.png", MatchOrigin: "manual",
+			ScrapeStatus: ScrapeStatusMatched, ScrapeConfidence: 0.9,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func(id string) SeriesMetadata {
+		t.Helper()
+		meta, err := store.SeriesMetadataByID(ctx, Series{ID: id})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return meta
+	}
+	assertCleared := func(id string) SeriesMetadata {
+		t.Helper()
+		meta := read(id)
+		if meta.ExtSourceID != "" || meta.ExtEntryID != "" || meta.ExtCoverURL != "" || meta.ExtCoverPath != "" {
+			t.Fatalf("external binding remained after deletion: %+v", meta)
+		}
+		return meta
 	}
 	if err := store.DeleteMetadataSource(ctx, srcB.ID); err != nil {
 		t.Fatalf("DeleteMetadataSource(srcB): %v", err)
@@ -517,6 +575,9 @@ func TestMetadataRepoAndSourceCRUDAndCascadeDelete(t *testing.T) {
 	chainAfterSrcDel, err := store.ListLibraryMetadataSources(ctx, "lib_1")
 	if err != nil || len(chainAfterSrcDel) != 2 || chainAfterSrcDel[0].SourceID != srcA.ID || chainAfterSrcDel[1].SourceID != srcKeep.ID {
 		t.Fatalf("expected srcB removed from library chain, got %+v err=%v", chainAfterSrcDel, err)
+	}
+	if meta := assertCleared("source-only"); meta.MatchOrigin != "" || meta.ScrapeStatus != ScrapeStatusNone || meta.ScrapeConfidence != 0 {
+		t.Fatalf("source-only match state remained: %+v", meta)
 	}
 
 	// Deleting repo1 must cascade-delete srcA and its library_metadata_sources link, keeping repo2 & srcKeep.
@@ -532,6 +593,16 @@ func TestMetadataRepoAndSourceCRUDAndCascadeDelete(t *testing.T) {
 	chainAfterRepoDel, err := store.ListLibraryMetadataSources(ctx, "lib_1")
 	if err != nil || len(chainAfterRepoDel) != 1 || chainAfterRepoDel[0].SourceID != srcKeep.ID {
 		t.Fatalf("expected only srcKeep remaining in chain after repo1 delete, got %+v err=%v", chainAfterRepoDel, err)
+	}
+	if meta := assertCleared("repo-only"); meta.MatchOrigin != "" || meta.ScrapeStatus != ScrapeStatusNone || meta.ScrapeConfidence != 0 {
+		t.Fatalf("repo-only match state remained: %+v", meta)
+	}
+	if meta := assertCleared("repo-with-bangumi"); meta.BgmSubjectID == nil || *meta.BgmSubjectID != bgmID ||
+		meta.MatchOrigin != "manual" || meta.ScrapeStatus != ScrapeStatusMatched || meta.ScrapeConfidence != 0.9 {
+		t.Fatalf("Bangumi match state changed: %+v", meta)
+	}
+	if meta := read("retained"); meta.ExtSourceID != srcKeep.ID || meta.ExtEntryID != "entry" {
+		t.Fatalf("unrelated binding changed: %+v", meta)
 	}
 	if err := store.DeleteMetadataRepo(ctx, "nonexistent"); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("expected ErrNoRows deleting missing repo, got %v", err)
@@ -698,19 +769,21 @@ INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,upda
 		t.Fatalf("batch[s2] mismatch: %+v", batch[s2.ID])
 	}
 
-	// Verify JSON serialization omits ExtCoverPath while keeping public camelCase fields.
+	// Verify cover locations stay internal while binding identifiers remain public.
 	rawJSON, err := json.Marshal(batch[s1.ID])
 	if err != nil {
 		t.Fatalf("json.Marshal SeriesMetadata: %v", err)
 	}
 	jsonText := string(rawJSON)
-	for _, want := range []string{`"extSourceId":"src_gallery"`, `"extEntryId":"987654"`, `"extCoverUrl":"https://cdn.example.com/thumb/987654.jpg"`, `"matchOrigin":"auto"`} {
+	for _, want := range []string{`"extSourceId":"src_gallery"`, `"extEntryId":"987654"`, `"matchOrigin":"auto"`} {
 		if !strings.Contains(jsonText, want) {
 			t.Fatalf("expected JSON to contain %s, got %s", want, jsonText)
 		}
 	}
-	if strings.Contains(jsonText, "src_gallery/987654.jpg") || strings.Contains(jsonText, "extCoverPath") {
-		t.Fatalf("ExtCoverPath should not be serialized into JSON: %s", jsonText)
+	for _, private := range []string{"extCoverUrl", "extCoverPath", batch[s1.ID].ExtCoverURL, batch[s1.ID].ExtCoverPath} {
+		if strings.Contains(jsonText, private) {
+			t.Fatalf("external cover location leaked into JSON: %s", jsonText)
+		}
 	}
 
 	// PatchSeriesMetadata updating ExtCoverURL clears stale ExtCoverPath.
@@ -734,6 +807,21 @@ INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,upda
 	}
 	if cleared.ExtSourceID != "" || cleared.ExtEntryID != "" || cleared.ExtCoverURL != "" || cleared.ExtCoverPath != "" || cleared.MatchOrigin != "" || cleared.ScrapeStatus != ScrapeStatusNone {
 		t.Fatalf("expected external binding cleared, got %+v", cleared)
+	}
+	bgmID := int64(42)
+	for _, existing := range []SeriesMetadata{
+		{SeriesID: s1.ID, BgmSubjectID: &bgmID},
+		{SeriesID: s1.ID, ExtSourceID: "legacy", ExtEntryID: "entry"},
+		{SeriesID: s1.ID, BgmSubjectID: &bgmID, MatchOrigin: "manual"},
+		{SeriesID: s1.ID, ExtSourceID: "agent-source", ExtEntryID: "entry", MatchOrigin: "agent"},
+	} {
+		if err := store.SaveSeriesMetadata(ctx, existing); err != nil {
+			t.Fatal(err)
+		}
+		_, err := store.ApplyScrapedMetadata(WithAutomaticMetadata(ctx), s1, ScrapedMetadata{SubjectID: 100, MatchOrigin: "auto"})
+		if !errors.Is(err, ErrMetadataChanged) {
+			t.Errorf("automatic write to binding %+v: got %v, want ErrMetadataChanged", existing, err)
+		}
 	}
 }
 
@@ -873,6 +961,30 @@ INSERT INTO books(id,series_id,library_id,file_id,parent_cid,name,size,pick_code
 	grouped, groupedTotal, err := store.SeriesPage(ctx, SeriesQuery{GroupBangumi: true, Size: 20})
 	if err != nil || groupedTotal != 3 || len(grouped) != 3 {
 		t.Fatalf("expected GroupBangumi NOT to merge series sharing ext_source_id/ext_entry_id without bgm_subject_id: total=%d len=%d err=%v", groupedTotal, len(grouped), err)
+	}
+	exported, err := store.ListSeriesForMappingExport(ctx, MappingExportFilter{})
+	if err != nil || len(exported) != 3 {
+		t.Fatalf("default export included union members: %+v, err = %v", exported, err)
+	}
+	for _, row := range exported {
+		if row.LibraryID != unionLib.ID && row.LibraryID != "lib_sep" {
+			t.Fatalf("default export included member library: %+v", row)
+		}
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE series_metadata SET is_nsfw=1 WHERE series_id='s_bot_both'`); err != nil {
+		t.Fatal(err)
+	}
+	unionSeries := Series{ID: bothMeta.SeriesID, Name: "Both"}
+	extCleared, err := store.ClearSeriesExternalBinding(ctx, unionSeries)
+	if err != nil || extCleared.ExtEntryID != "" || !extCleared.IsNSFW {
+		t.Fatalf("union series after external unbind = %+v, err = %v", extCleared, err)
+	}
+	if _, err := store.ApplyScrapedMetadata(ctx, unionSeries, ScrapedMetadata{SubjectID: 42, MatchOrigin: "manual"}); err != nil {
+		t.Fatal(err)
+	}
+	bgmCleared, err := store.ClearSeriesBangumiBinding(ctx, unionSeries)
+	if err != nil || bgmCleared.BgmSubjectID != nil || !bgmCleared.IsNSFW {
+		t.Fatalf("union series after Bangumi unbind = %+v, err = %v", bgmCleared, err)
 	}
 }
 
@@ -1027,5 +1139,21 @@ INSERT INTO series(id,library_id,cid,name,relative_path,one_shot,created_at,upda
 	emptyRows, err := store.ListSeriesForMappingExport(emptyLibCtx, MappingExportFilter{})
 	if err != nil || len(emptyRows) != 0 {
 		t.Fatalf("expected fail-closed empty slice for user with no allowed libraries, got %+v err=%v", emptyRows, err)
+	}
+	if _, err := store.DB().ExecContext(ctx, `UPDATE libraries SET enabled=0 WHERE id='lib_b'`); err != nil {
+		t.Fatal(err)
+	}
+	rows, err = store.ListSeriesForMappingExport(ctx, MappingExportFilter{})
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("default export with hidden library: %+v, err = %v", rows, err)
+	}
+	for _, row := range rows {
+		if row.LibraryID != "lib_a" {
+			t.Fatalf("default export included hidden library: %+v", row)
+		}
+	}
+	rows, err = store.ListSeriesForMappingExport(ctx, MappingExportFilter{LibraryIDs: []string{"lib_b"}})
+	if err != nil || len(rows) != 1 || rows[0].LibraryID != "lib_b" {
+		t.Fatalf("explicit export of hidden library: %+v, err = %v", rows, err)
 	}
 }

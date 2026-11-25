@@ -480,10 +480,11 @@ func (s *Service) getPreferredCover(ctx context.Context, seriesID string) (data 
 		coverSource                 string
 		coverPath                   string
 		sourceID, entryID, coverURL string
+		isNSFW                      bool
 	)
 	err := s.store.DB().QueryRowContext(ctx, `
-SELECT bgm_subject_id,cover_source,bgm_cover_path,ext_source_id,ext_entry_id,ext_cover_url
-FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverPath, &sourceID, &entryID, &coverURL)
+SELECT sm.bgm_subject_id,sm.cover_source,sm.bgm_cover_path,sm.ext_source_id,sm.ext_entry_id,sm.ext_cover_url,sm.is_nsfw
+FROM series_metadata sm WHERE sm.series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverPath, &sourceID, &entryID, &coverURL, &isNSFW)
 	if err != nil || coverSource == database.CoverSourceBook {
 		return Data{}, false, false, false
 	}
@@ -491,6 +492,9 @@ FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &c
 	fetcher := s.externalFetcher
 	s.externalMu.RUnlock()
 	if fetcher != nil && sourceID != "" && entryID != "" && coverURL != "" {
+		if scope, ok := database.UserScopeFromContext(ctx); ok && !scope.AllowNSFW && isNSFW {
+			return Data{}, false, false, true
+		}
 		raw, mediaType, err := fetcher(ctx, sourceID, entryID, coverURL)
 		if err == nil && len(raw) > 0 {
 			return Data{Bytes: raw, MediaType: mediaType}, true, false, true

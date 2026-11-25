@@ -214,8 +214,15 @@ func validateTargetURL(u *url.URL, allowLoopback bool) error {
 		}
 		return nil
 	}
-	if !allowLoopback && isLoopbackHostname(host) {
-		return fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
+	if !allowLoopback {
+		if !strings.Contains(host, ".") || isLoopbackHostname(host) {
+			return fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
+		}
+		for _, suffix := range []string{"local", "internal", "lan", "home.arpa", "localdomain", "in-addr.arpa", "ip6.arpa"} {
+			if host == suffix || strings.HasSuffix(host, "."+suffix) {
+				return fmt.Errorf("%w: disallowed host %q", ErrSSRFBlocked, host)
+			}
+		}
 	}
 	return nil
 }

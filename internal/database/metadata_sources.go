@@ -333,6 +333,9 @@ DELETE FROM library_metadata_sources
 WHERE source_id IN (SELECT id FROM metadata_sources WHERE repo_id=?)`, id); err != nil {
 		return err
 	}
+	if err := clearMetadataSourceBindings(ctx, tx, "IN (SELECT id FROM metadata_sources WHERE repo_id=?)", id); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM metadata_sources WHERE repo_id=?`, id); err != nil {
 		return err
 	}
@@ -654,6 +657,9 @@ func (s *Store) DeleteMetadataSource(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM library_metadata_sources WHERE source_id=?`, id); err != nil {
 		return err
 	}
+	if err := clearMetadataSourceBindings(ctx, tx, "= ?", id); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM metadata_sources WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -662,6 +668,17 @@ func (s *Store) DeleteMetadataSource(ctx context.Context, id string) error {
 		return sql.ErrNoRows
 	}
 	return tx.Commit()
+}
+
+func clearMetadataSourceBindings(ctx context.Context, tx *sql.Tx, sourceFilter, id string) error {
+	_, err := tx.ExecContext(ctx, `
+UPDATE series_metadata SET ext_source_id='', ext_entry_id='', ext_cover_url='', ext_cover_path='',
+ match_origin=CASE WHEN coalesce(bgm_subject_id,0)<=0 THEN '' ELSE match_origin END,
+ scrape_status=CASE WHEN coalesce(bgm_subject_id,0)<=0 THEN 'none' ELSE scrape_status END,
+ scrape_confidence=CASE WHEN coalesce(bgm_subject_id,0)<=0 THEN 0 ELSE scrape_confidence END,
+ updated_at=?
+WHERE ext_source_id<>'' AND ext_source_id `+sourceFilter, nowText(), id)
+	return err
 }
 
 // ListLibraryMetadataSources returns the ordered metadata fallback chain configured for a library.
@@ -771,6 +788,7 @@ func scanLibraryMetadataSourceRow(scanner interface{ Scan(...any) error }) (Libr
 func (s *Store) ListSeriesForMappingExport(ctx context.Context, filter MappingExportFilter) ([]MappingExportRow, error) {
 	includeNSFW := filter.IncludeNSFW
 	libIDs := cleanStringSliceCaseSensitive(filter.LibraryIDs)
+	defaultLibraries := len(libIDs) == 0
 
 	if scope, hasScope := UserScopeFromContext(ctx); hasScope && !scope.IsAdmin {
 		if !scope.EffectiveShowNSFW() {
@@ -793,6 +811,9 @@ func (s *Store) ListSeriesForMappingExport(ctx context.Context, filter MappingEx
 	if !includeNSFW {
 		clauses = append(clauses, `sm.is_nsfw = 0`)
 	}
+	if defaultLibraries {
+		clauses = append(clauses, `l.enabled=1 AND NOT EXISTS (SELECT 1 FROM union_layers ul WHERE ul.member_library_id=l.id)`)
+	}
 	if len(libIDs) > 0 {
 		clauses = append(clauses, `s.library_id IN `+Placeholders(len(libIDs)))
 		for _, id := range libIDs {
@@ -812,6 +833,7 @@ SELECT s.id, s.library_id, s.name, COALESCE(NULLIF(sm.title,''), s.name),
        sm.authors_json, sm.bgm_subject_id, sm.ext_source_id, sm.ext_entry_id,
        sm.is_nsfw, sm.match_origin
 FROM series s
+JOIN libraries l ON l.id=s.library_id
 JOIN series_metadata sm ON sm.series_id=s.id
 WHERE ` + strings.Join(clauses, " AND ") + `
 ORDER BY s.library_id ASC, s.name COLLATE NOCASE ASC, s.id ASC`

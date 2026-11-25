@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+const createSeriesMetadataExtIndex = `CREATE INDEX IF NOT EXISTS idx_series_metadata_ext ON series_metadata(ext_source_id, ext_entry_id) WHERE ext_source_id <> ''`
+
 func applyMigrations(db *sql.DB) error {
 	if err := ensureClientSettingsTable(db); err != nil {
 		return err
@@ -195,7 +197,7 @@ func ensurePerformanceIndexes(db *sql.DB) error {
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_rank ON series_metadata(bgm_rank ASC, series_id, is_nsfw) WHERE bgm_rank > 0`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_bgm_sub ON series_metadata(bgm_subject_id, series_id, bgm_rank, bgm_score) WHERE bgm_subject_id > 0`,
 			`CREATE INDEX IF NOT EXISTS idx_series_metadata_pub_series ON series_metadata(publisher COLLATE NOCASE, series_id)`,
-			`CREATE INDEX IF NOT EXISTS idx_series_metadata_ext ON series_metadata(ext_source_id, ext_entry_id)`,
+			createSeriesMetadataExtIndex,
 		} {
 			if _, err := db.Exec(stmt); err != nil {
 				return err
@@ -484,7 +486,20 @@ func ensureSeriesMetadataExtColumns(db *sql.DB) error {
 			return err
 		}
 	}
-	if _, err := tx.Exec(`CREATE INDEX IF NOT EXISTS idx_series_metadata_ext ON series_metadata(ext_source_id, ext_entry_id)`); err != nil {
+	// Older databases have a full index under the same name.
+	var partial bool
+	switch err := tx.QueryRow(`SELECT "partial" FROM pragma_index_list('series_metadata') WHERE name='idx_series_metadata_ext'`).Scan(&partial); err {
+	case nil:
+		if !partial {
+			if _, err := tx.Exec(`DROP INDEX idx_series_metadata_ext`); err != nil {
+				return err
+			}
+		}
+	case sql.ErrNoRows:
+	default:
+		return err
+	}
+	if _, err := tx.Exec(createSeriesMetadataExtIndex); err != nil {
 		return err
 	}
 	return tx.Commit()

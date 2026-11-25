@@ -1244,10 +1244,10 @@
               <option value="READ" ${readStatus === 'READ' ? 'selected' : ''}>已读完</option>
             </select>
             <select id="f-scrape">
-              <option value="">BGM：全部</option>
-              <option value="matched" ${scrapeStatus === 'matched' ? 'selected' : ''}>已匹配 Bangumi</option>
+              <option value="">匹配：全部</option>
+              <option value="matched" ${scrapeStatus === 'matched' ? 'selected' : ''}>已匹配</option>
               <option value="manual" ${scrapeStatus === 'manual' ? 'selected' : ''}>手动指定</option>
-              <option value="unmatched" ${scrapeStatus === 'unmatched' ? 'selected' : ''}>自动未命中</option>
+              <option value="unmatched" ${scrapeStatus === 'unmatched' ? 'selected' : ''}>未匹配</option>
               <option value="none" ${(scrapeStatus === 'none' || scrapeStatus === 'pending') ? 'selected' : ''}>尚未刮削</option>
             </select>
             <select id="f-oneshot">
@@ -2612,7 +2612,7 @@
         <div class="stat-box"><div class="k">漫画系列总数</div><div class="v">${Number(st.series || 0).toLocaleString()}${(!st.showNsfw && st.nsfwSeries > 0) ? `<span class="stat-note">已隐藏 NSFW ${Number(st.nsfwSeries).toLocaleString()} 部</span>` : ''}</div></div>
         <div class="stat-box"><div class="k">漫画文件总数</div><div class="v">${Number(st.books || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">漫画总容量</div><div class="v">${fmtBytes(st.comicBytes)}</div></div>
-        <div class="stat-box"><div class="k">Bangumi 已匹配</div><div class="v" style="color:var(--bgm)">${Number(st.bgmMatched || 0).toLocaleString()}</div></div>
+        <div class="stat-box"><div class="k">元数据已匹配</div><div class="v" style="color:var(--bgm)">${Number(st.bgmMatched || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">115 / WebDAV 状态</div><div class="v" style="font-size:15px">${st.configured115 ? '115 已连接' : '115 未配'} · WebDAV ${st.webdavAccounts || 0} 个</div></div>
       </div>
 
@@ -4308,12 +4308,43 @@
         activeSyncBySource.set(job.sourceId, job);
       }
     });
+    const visibleMarketSources = extSources.filter((s) => s.kind !== 'bangumi_archive');
     const sourceByID = new Map(extSources.map((s) => [s.id, s]));
     const tagDictSources = extSources.filter((s) => s.kind === 'tag_dictionary');
-    const chainCandidates = extSources.filter((s) => s.kind === 'offline_sqlite' || s.kind === 'bangumi_archive');
+    const chainCandidates = [
+      { id: 'bangumi', name: '内置 Bangumi 源', kind: 'bangumi_archive', ready: Boolean(arch.ready), enabled: true },
+      ...extSources.filter((s) => s.kind === 'offline_sqlite'),
+    ];
     const topLevelLibs = (libs || []).filter((l) => !l.unionParentId);
     const selectableLibs = (libs || []).filter((l) => l.enabled !== false && !l.unionParentId);
     const libMap = new Map((libs || []).map((l) => [l.id, l]));
+    const mergedRuns = [];
+    const seenRunIDs = new Set();
+    const pushUnifiedRun = (raw, engine) => {
+      if (!raw || typeof raw !== 'object') return;
+      const rid = String(raw.id || raw.runId || '').trim();
+      if (rid) {
+        if (seenRunIDs.has(rid)) return;
+        seenRunIDs.add(rid);
+      }
+      mergedRuns.push(Object.assign({}, raw, { _engine: engine }));
+    };
+    scrapeRuns.forEach((r) => pushUnifiedRun(r, 'extmeta'));
+    (Array.isArray(runs) ? runs : []).forEach((r) => pushUnifiedRun(r, 'bangumi'));
+    const runSortTime = (r) => {
+      const raw = String((r && (r.startedAt || r.createdAt)) || '').trim();
+      if (!raw) return 0;
+      const ts = Date.parse(raw);
+      if (!Number.isNaN(ts)) return ts;
+      const normalized = Date.parse(raw.replace(' ', 'T') + (/[zZ]|[+-]\d{2}:?\d{2}$/.test(raw) ? '' : 'Z'));
+      return Number.isNaN(normalized) ? 0 : normalized;
+    };
+    mergedRuns.sort((a, b) => {
+      const tb = runSortTime(b);
+      const ta = runSortTime(a);
+      if (tb !== ta) return tb - ta;
+      return String((b && (b.startedAt || b.createdAt)) || '').localeCompare(String((a && (a.startedAt || a.createdAt)) || ''));
+    });
     const onlineEnrichRunning = Boolean(onlineEnrich && (onlineEnrich.running || onlineEnrich.status === 'running'));
     const onlineEnrichCooldown = Boolean(onlineEnrich && (onlineEnrich.circuitOpen || onlineEnrich.status === 'cooldown'));
     const onlineTotal = Number((onlineEnrich && onlineEnrich.total) || 0);
@@ -4421,9 +4452,9 @@
     body.innerHTML = `
       <div class="stat-grid">
         <div class="stat-box"><div class="k">总系列数</div><div class="v">${Number(st.totalSeries || 0).toLocaleString()}${(!st.showNsfw && st.nsfwCount > 0) ? `<span class="stat-note">已隐藏 NSFW ${Number(st.nsfwCount).toLocaleString()} 部</span>` : ''}</div></div>
-        <div class="stat-box"><div class="k">已匹配 Bangumi</div><div class="v" style="color:var(--success)">${Number(st.matchedCount || 0).toLocaleString()}</div></div>
+        <div class="stat-box"><div class="k">已匹配</div><div class="v" style="color:var(--success)">${Number(st.matchedCount || 0).toLocaleString()}</div></div>
         <div class="stat-box"><div class="k">待刮削</div><div class="v">${Number(st.pendingCount || 0).toLocaleString()}</div></div>
-        <div class="stat-box"><div class="k">自动未命中</div><div class="v" style="color:var(--warn)">${Number(st.unmatchedCount || 0).toLocaleString()}</div></div>
+        <div class="stat-box"><div class="k">未匹配</div><div class="v" style="color:var(--warn)">${Number(st.unmatchedCount || 0).toLocaleString()}</div></div>
       </div>
 
       <details class="card extmeta-guide-card" id="extmeta-guide-details" ${guideOpen ? 'open' : ''}>
@@ -4436,10 +4467,10 @@
         </summary>
         <div class="extmeta-guide-body">
           <ol class="extmeta-guide-list">
-            <li><strong>内置 Bangumi 源</strong>：在下方「引擎一：Bangumi 离线索引库」拉取中文简介增强镜像或官方原版快照，即可毫秒级完成常规漫画刮削，并支持 <code>api.bgm.tv</code> 实时搜索与 AI Agent 协助。</li>
-            <li><strong>订阅元数据市场 (<code>repo.json</code>)</strong>：在「元数据市场与源管理」输入仓库地址（或点击「填入社区推荐仓库地址」预填，确认后点「订阅仓库」），按需启用并下载扩展离线 SQLite 图库、标签中文翻译词典或社区脱敏映射包。</li>
-            <li><strong>配置书库顺延优先级链</strong>：在「书库多源顺延优先级链」为每个顶层书库（含联合书库）勾选并排序 <code>#1 → #2 → ...</code>；未配置时默认使用内置 Bangumi，所有离线源均未命中时自动由已启用的社区映射包兜底。</li>
-            <li><strong>纯离线默认 + 低速在线补全防封</strong>：多源批量刮削默认仅读取本地离线 SQLite 与映射包（零外部限流风险）；仅当显式开启「允许低速在线补全」时，才对未命中条目启用单线程限速补全与自动熔断冷却。</li>
+            <li><strong>内置 Bangumi 离线索引库</strong>：在下方「Bangumi 离线索引库」拉取中文简介增强镜像或官方原版快照，即可本地毫秒级完成常规漫画匹配，并支持 <code>api.bgm.tv</code> 实时搜索与 AI Agent 协助。</li>
+            <li><strong>启动批量自动刮削</strong>：在右侧「启动批量自动刮削」选择目标书库与刮削范围即可一键执行；默认纯离线极速匹配（零外部限流风险），仅当显式开启「允许低速在线补全」时，才对未命中条目启用单线程限速补全与自动熔断冷却。</li>
+            <li><strong>元数据市场与源管理</strong>：在「元数据市场与源管理」输入仓库 <code>repo.json</code> 地址（或点击「填入社区推荐仓库地址」预填，确认后点「订阅仓库」），按需启用并下载扩展离线 SQLite 图库、标签中文翻译词典或社区脱敏映射包。</li>
+            <li><strong>书库多源顺延优先级链</strong>：在「书库多源顺延优先级链」为每个顶层书库（含联合书库）勾选并排序 <code>#1 → #2 → ...</code>；未配置时默认使用内置 Bangumi 源，所有离线源均未命中时自动由已启用的社区映射包兜底。</li>
           </ol>
         </div>
       </details>
@@ -4476,9 +4507,119 @@
         <div id="bgm-proxy-probe-result" style="margin-top:10px;font-size:12.5px">${state.bgmProxyProbeHTML || ''}</div>
       </div>
 
+      <div class="grid-2">
+        <div class="card">
+          <h3>Bangumi 离线索引库</h3>
+          <p style="font-size:12.5px;color:var(--text-secondary)">
+            支持默认<strong>中文简介增强镜像</strong>（全站非 NSFW 外文简介 AI 翻译为简体中文，与官方 100% 同构）或切换回 <code>bangumi/Archive</code> 官方原版 / 自定义源。拉取快照并校验 SHA256 后流式导入全量书籍主条目，几万部漫画可在本地 SQLite 毫秒级完成匹配，零 API 限流风险。
+          </p>
+          <form id="bgm-arch-source-form" style="margin:10px 0 12px;padding:10px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
+            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">离线快照数据源</div>
+            <div class="inline-action-bar">
+              <select id="bgm-arch-source" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+                <option value="zh_cn" ${srcState.source === 'zh_cn' ? 'selected' : ''}>中文简介增强镜像（默认 · xJogger/bangumi-archive-zh）</option>
+                <option value="official" ${srcState.source === 'official' ? 'selected' : ''}>Bangumi 官方原版（bangumi/Archive）</option>
+                <option value="custom" ${srcState.source === 'custom' ? 'selected' : ''}>自定义兼容源（aux/latest.json）</option>
+              </select>
+              <button type="submit" class="btn btn-sm btn-primary" ${arch.updating ? 'disabled' : ''}>保存源</button>
+            </div>
+            <div id="bgm-arch-custom-wrap" style="margin-top:8px;display:${srcState.source === 'custom' ? '' : 'none'}">
+              <input type="url" id="bgm-arch-custom-url" value="${esc(srcState.customUrl)}" placeholder="https://raw.githubusercontent.com/.../aux/latest.json" style="width:100%;height:34px;padding:0 10px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
+            </div>
+            ${archSrc.metaUrl ? `<div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);word-break:break-all">当前元数据地址：<code>${esc(archSrc.metaUrl)}</code></div>` : ''}
+          </form>
+          <div style="font-size:13px;margin:12px 0;display:grid;gap:4px">
+            <div>状态：${arch.ready ? `<span class="badge badge-success">已就绪 · ${Number(arch.subjectCount || 0).toLocaleString()} 条书籍条目</span>` : `<span class="badge badge-warn">尚未建立离线索引</span>`}</div>
+            ${arch.dumpName ? `<div style="color:var(--text-muted);font-size:12px">快照版本：${esc(arch.dumpName)} · 导入于 ${fmtTime(arch.importedAt)}</div>` : ''}
+            ${(arch.lastCheckAt || sched.lastCheckedAt) ? `<div style="color:var(--text-muted);font-size:12px">最近检查：${fmtTime(arch.lastCheckAt || sched.lastCheckedAt)}${checkResultLabel(arch.lastCheckResult || sched.lastResult) ? ` · ${esc(checkResultLabel(arch.lastCheckResult || sched.lastResult))}` : ''}</div>` : ''}
+            ${arch.lastSyncAt ? `<div style="color:var(--text-muted);font-size:12px">最近元数据自动同步：${fmtTime(arch.lastSyncAt)} · 增量更新 ${Number(arch.lastSyncUpdatedSeries || 0).toLocaleString()} 部作品</div>` : ''}
+            ${arch.updating ? `
+              <div style="margin-top:6px">
+                <div style="font-size:12px;color:var(--accent);margin-bottom:4px">正在更新：${esc(arch.phase || '下载/解析中')} ${arch.totalBytes > 0 ? `(${fmtBytes(arch.downloadedBytes)} / ${fmtBytes(arch.totalBytes)} · ${dlPct}%)` : ''}</div>
+                <div class="progress-track"><span style="width:${dlPct || 35}%"></span></div>
+              </div>` : ''}
+            ${arch.lastError ? `<div style="color:var(--danger);font-size:12px">最近错误：${esc(arch.lastError)}</div>` : ''}
+            ${arch.lastSyncError ? `<div style="color:var(--danger);font-size:12px">最近同步错误：${esc(arch.lastSyncError)}</div>` : ''}
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <button type="button" class="btn btn-primary" id="bgm-arch-update" ${arch.updating ? 'disabled' : ''}>${arch.ready ? '检查并更新离线索引库' : '一键下载并构建离线索引库'}</button>
+            ${arch.updating ? `<button type="button" class="btn btn-danger" id="bgm-arch-cancel">取消下载</button>` : ''}
+          </div>
+
+          <form id="bgm-arch-sched-form" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+              <strong style="font-size:13px">定时检查更新（服务器本机时区）</strong>
+              <label class="check-row" style="font-size:12.5px">
+                <input type="checkbox" id="bgm-arch-sched-enabled" ${schedState.enabled ? 'checked' : ''}>
+                <span>启用定时更新</span>
+              </label>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <select id="bgm-arch-sched-freq" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+                <option value="weekly" ${schedState.frequency === 'weekly' ? 'selected' : ''}>每周</option>
+                <option value="monthly" ${schedState.frequency === 'monthly' ? 'selected' : ''}>每月</option>
+              </select>
+              <select id="bgm-arch-sched-dow" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text);display:${schedState.frequency === 'weekly' ? '' : 'none'}">
+                ${weekdays.map((lbl, idx) => `<option value="${idx}" ${schedState.dayOfWeek === idx ? 'selected' : ''}>${lbl}</option>`).join('')}
+              </select>
+              <select id="bgm-arch-sched-dom" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text);display:${schedState.frequency === 'monthly' ? '' : 'none'}">
+                ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${schedState.dayOfMonth === d ? 'selected' : ''}>每月 ${d} 日</option>`).join('')}
+              </select>
+              <input type="time" id="bgm-arch-sched-time" value="${esc(schedState.timeOfDay)}" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
+              <button type="submit" class="btn btn-sm btn-primary">保存定时</button>
+            </div>
+            <div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);line-height:1.5">
+              ${sched.enabled && sched.nextRunAt ? `下次计划检查：<strong>${fmtTime(sched.nextRunAt)}</strong> · ` : ''}${archSrc.source === 'official'
+                ? '官方原版每周三约 05:04 发布新快照（默认推荐周三 06:00）；'
+                : '上游每周三约 05:04 发布，中文增强镜像于周三上午完成增量翻译发布（默认推荐周四 06:00，切换数据源时若未自定义时间会自动同步对应默认日）；'}快照未更新自动跳过下载，导入新版后自动本地增量同步已匹配作品的未锁定元数据（不重下封面、不覆盖手动锁定字段）。
+            </div>
+          </form>
+        </div>
+
+        <div class="card" id="extmeta-batch-card">
+          <h3>启动批量自动刮削</h3>
+          <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
+            按各书库配置的顺延链依次匹配本地离线索引与社区映射包（默认使用内置 Bangumi 源）；支持 <code>[标题][作者]</code> 与 <code>[作者][标题]</code> 双序识别、通用子目录（如 <code>台版</code>/<code>特别篇</code>）自动回溯父目录、繁简异体字归一与作者交叉打分，不会覆盖已手动绑定或锁定的字段。
+          </p>
+          <div class="field">
+            <label for="extmeta-batch-lib">选择目标书库</label>
+            <select id="extmeta-batch-lib">
+              <option value="" ${batchDraft.libraryId === '' ? 'selected' : ''}>全部未隐藏书库</option>
+              ${selectableLibs.map((l) => `<option value="${esc(l.id)}" ${batchDraft.libraryId === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field">
+            <label for="extmeta-batch-mode">刮削范围模式</label>
+            <select id="extmeta-batch-mode">
+              <option value="incremental" ${batchDraft.mode === 'incremental' ? 'selected' : ''}>增量刮削（仅处理尚未刮削的新作品）</option>
+              <option value="retry_unmatched" ${batchDraft.mode === 'retry_unmatched' ? 'selected' : ''}>重试未匹配（处理“未匹配”与新作品，规则或源更新后推荐）</option>
+              <option value="force" ${batchDraft.mode === 'force' ? 'selected' : ''}>全量强制重刮（重新匹配全部作品，保留手动绑定与锁定字段）</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="check-row">
+              <input type="checkbox" id="extmeta-batch-online" ${batchDraft.allowOnline ? 'checked' : ''}>
+              <span>允许低速在线补全（单线程防封熔断）</span>
+            </label>
+            <div class="field-hint">默认关闭（纯离线极速匹配）；仅当开启后，对离线未命中作品才调用已启用在线 API 的数据源，单线程限速并在 403/429/503 时自动熔断冷却。</div>
+          </div>
+          <button type="button" class="btn btn-primary" id="extmeta-batch-start">开始批量刮削</button>
+          ${showOnlineEnrichBanner ? `
+            <div class="extmeta-enrich-banner">
+              <span class="badge ${onlineEnrichCooldown ? 'badge-danger' : onlineEnrichRunning ? 'badge-accent' : ''}">
+                ${onlineEnrichCooldown ? '在线补全已熔断保护' : onlineEnrichRunning ? '在线补全运行中' : onlineEnrich.status === 'canceled' ? '在线补全已取消' : onlineEnrich.status === 'success' ? '在线补全已完成' : '在线补全状态'}
+              </span>
+              <span>已处理 ${onlineProcessed}${onlineTotal > 0 ? ` / ${onlineTotal}` : ''}${(onlineEnrich.matched != null || onlineEnrich.failed != null) ? ` · 命中 ${onlineMatched} · 失败 ${onlineFailed}` : ''}</span>
+              ${onlineHTTPStatus > 0 ? `<span class="badge badge-warn">HTTP ${onlineHTTPStatus}</span>` : ''}
+              ${onlineEnrich.cooldownUntil ? `<span class="badge badge-warn">冷却至：${fmtTime(onlineEnrich.cooldownUntil)}</span>` : ''}
+              ${onlineEnrich.lastError ? `<span style="color:var(--danger)">${esc(onlineEnrich.lastError)}</span>` : ''}
+            </div>` : ''}
+        </div>
+      </div>
+
       <div class="card" id="extmeta-market-card">
         <div class="section-head" style="margin-bottom:8px">
-          <h3>元数据市场与源管理（Mihon 风格）</h3>
+          <h3>元数据市场与源管理</h3>
           <button type="button" class="btn btn-sm btn-primary" id="extmeta-source-add-btn">+ 手动添加自定义源</button>
         </div>
         <p style="font-size:12.5px;color:var(--text-secondary);margin:0 0 10px">
@@ -4527,13 +4668,13 @@
 
         <div class="extmeta-subdivider" style="margin-bottom:0">
           <div class="section-head" style="margin-bottom:8px">
-            <span style="font-size:13px;font-weight:600">已配置数据源（${extSources.length}）</span>
-            <span class="badge">${extSources.filter((s) => s.ready).length} 个已就绪</span>
+            <span style="font-size:13px;font-weight:600">已配置扩展数据源（${visibleMarketSources.length}）</span>
+            <span class="badge">${visibleMarketSources.filter((s) => s.ready).length} 个已就绪</span>
           </div>
-          ${extSources.length === 0
-            ? `<div class="empty-box" style="padding:18px">暂无数据源，请订阅仓库或点击右上角「+ 手动添加自定义源」。</div>`
+          ${visibleMarketSources.length === 0
+            ? `<div class="empty-box" style="padding:18px">暂无扩展数据源，请订阅仓库或点击右上角「+ 手动添加自定义源」。</div>`
             : `<div class="extmeta-source-list">
-                ${extSources.map((s) => {
+                ${visibleMarketSources.map((s) => {
                   const km = extSourceKindMeta(s.kind);
                   const syncJob = activeSyncBySource.get(s.id);
                   const syncPct = syncJob && syncJob.totalBytes > 0
@@ -4604,109 +4745,73 @@
         </div>
       </div>
 
-      <div class="grid-2">
-        <div class="card" id="extmeta-chains-card">
-          <h3>书库多源顺延优先级链</h3>
-          <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
-            每个顶层书库（含联合书库）默认使用内置 Bangumi 源；可自定义多个离线源按 <code>#1 → #2 → ...</code> 顺序匹配，<strong>离线源全部未命中时自动由已启用的社区映射包兜底</strong>。
-          </p>
-          ${topLevelLibs.length === 0
-            ? `<div class="empty-box" style="padding:18px">暂无顶层书库。</div>`
-            : `<div class="extmeta-chain-list">
-                ${topLevelLibs.map((l) => {
-                  const chainIDs = extNormalizeChain(libraryChains[l.id]);
-                  return `
-                    <div class="extmeta-chain-row">
-                      <div class="extmeta-chain-info">
-                        <div class="extmeta-source-title-row">
-                          <strong>${esc(l.name)}</strong>
-                          <span class="badge">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
-                          ${l.unionParentId ? `<span class="badge">联合子库</span>` : ''}
-                          ${l.enabled === false ? `<span class="badge badge-warn">已隐藏</span>` : ''}
-                        </div>
-                        <div class="extmeta-chain-steps">
-                          ${chainIDs.length === 0
-                            ? `<span class="badge badge-bgm">默认：内置 Bangumi 源</span>`
-                            : chainIDs.map((sid, idx) => {
-                                const src = sourceByID.get(sid);
-                                const label = (src && src.name) || (sid === 'bangumi' ? '内置 Bangumi 源' : sid);
-                                return `${idx > 0 ? `<span class="extmeta-chain-arrow">→</span>` : ''}<span class="badge badge-accent">#${idx + 1} ${esc(label)}</span>`;
-                              }).join('')}
-                        </div>
+      <div class="card" id="extmeta-chains-card">
+        <h3>书库多源顺延优先级链</h3>
+        <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
+          每个顶层书库（含联合书库）默认使用内置 Bangumi 源；可自定义多个离线源按 <code>#1 → #2 → ...</code> 顺序匹配，<strong>离线源全部未命中时自动由已启用的社区映射包兜底</strong>。
+        </p>
+        ${topLevelLibs.length === 0
+          ? `<div class="empty-box" style="padding:18px">暂无顶层书库。</div>`
+          : `<div class="extmeta-chain-list">
+              ${topLevelLibs.map((l) => {
+                const chainIDs = extNormalizeChain(libraryChains[l.id]);
+                return `
+                  <div class="extmeta-chain-row">
+                    <div class="extmeta-chain-info">
+                      <div class="extmeta-source-title-row">
+                        <strong>${esc(l.name)}</strong>
+                        <span class="badge">${esc(providerLabel(l.providerType, l.webdavAccountName))}</span>
+                        ${l.unionParentId ? `<span class="badge">联合子库</span>` : ''}
+                        ${l.enabled === false ? `<span class="badge badge-warn">已隐藏</span>` : ''}
                       </div>
-                      <div class="extmeta-chain-actions">
-                        <button type="button" class="btn btn-sm" data-extmeta-chain-edit="${esc(l.id)}">调整顺延链</button>
+                      <div class="extmeta-chain-steps">
+                        ${chainIDs.length === 0
+                          ? `<span class="badge badge-bgm">默认：内置 Bangumi 源</span>`
+                          : chainIDs.map((sid, idx) => {
+                              const src = sourceByID.get(sid);
+                              const label = (src && src.name) || (sid === 'bangumi' ? '内置 Bangumi 源' : sid);
+                              return `${idx > 0 ? `<span class="extmeta-chain-arrow">→</span>` : ''}<span class="badge badge-accent">#${idx + 1} ${esc(label)}</span>`;
+                            }).join('')}
                       </div>
-                    </div>`;
-                }).join('')}
-              </div>`}
-        </div>
-
-        <div class="card" id="extmeta-batch-card">
-          <h3>多源批量刮削</h3>
-          <p style="font-size:12.5px;color:var(--text-secondary);margin-top:0">
-            按各书库配置的顺延链依次匹配本地离线索引与社区映射包，不会覆盖已手动绑定或锁定的字段。
-          </p>
-          <div class="field">
-            <label for="extmeta-batch-lib">选择目标书库</label>
-            <select id="extmeta-batch-lib">
-              <option value="" ${batchDraft.libraryId === '' ? 'selected' : ''}>全部未隐藏书库</option>
-              ${selectableLibs.map((l) => `<option value="${esc(l.id)}" ${batchDraft.libraryId === l.id ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field">
-            <label for="extmeta-batch-mode">刮削范围模式</label>
-            <select id="extmeta-batch-mode">
-              <option value="incremental" ${batchDraft.mode === 'incremental' ? 'selected' : ''}>增量刮削（仅处理尚未刮削的新作品）</option>
-              <option value="retry_unmatched" ${batchDraft.mode === 'retry_unmatched' ? 'selected' : ''}>重试未命中（处理未命中与新作品）</option>
-              <option value="force" ${batchDraft.mode === 'force' ? 'selected' : ''}>全量强制重刮（保留手动绑定与锁定字段）</option>
-            </select>
-          </div>
-          <div class="field">
-            <label class="check-row">
-              <input type="checkbox" id="extmeta-batch-online" ${batchDraft.allowOnline ? 'checked' : ''}>
-              <span>允许低速在线补全（单线程防封熔断）</span>
-            </label>
-            <div class="field-hint">默认关闭（纯离线极速匹配）；仅当开启后，对离线未命中作品才调用已启用在线 API 的数据源，单线程限速并在 403/429/503 时自动熔断冷却。</div>
-          </div>
-          <button type="button" class="btn btn-primary" id="extmeta-batch-start">开始多源批量刮削</button>
-          ${showOnlineEnrichBanner ? `
-            <div class="extmeta-enrich-banner">
-              <span class="badge ${onlineEnrichCooldown ? 'badge-danger' : onlineEnrichRunning ? 'badge-accent' : ''}">
-                ${onlineEnrichCooldown ? '在线补全已熔断保护' : onlineEnrichRunning ? '在线补全运行中' : onlineEnrich.status === 'canceled' ? '在线补全已取消' : onlineEnrich.status === 'success' ? '在线补全已完成' : '在线补全状态'}
-              </span>
-              <span>已处理 ${onlineProcessed}${onlineTotal > 0 ? ` / ${onlineTotal}` : ''}${(onlineEnrich.matched != null || onlineEnrich.failed != null) ? ` · 命中 ${onlineMatched} · 失败 ${onlineFailed}` : ''}</span>
-              ${onlineHTTPStatus > 0 ? `<span class="badge badge-warn">HTTP ${onlineHTTPStatus}</span>` : ''}
-              ${onlineEnrich.cooldownUntil ? `<span class="badge badge-warn">冷却至：${fmtTime(onlineEnrich.cooldownUntil)}</span>` : ''}
-              ${onlineEnrich.lastError ? `<span style="color:var(--danger)">${esc(onlineEnrich.lastError)}</span>` : ''}
-            </div>` : ''}
-        </div>
+                    </div>
+                    <div class="extmeta-chain-actions">
+                      <button type="button" class="btn btn-sm" data-extmeta-chain-edit="${esc(l.id)}">调整顺延链</button>
+                    </div>
+                  </div>`;
+              }).join('')}
+            </div>`}
       </div>
 
       <div class="card" id="extmeta-runs-card">
         <div class="section-head">
-          <h3>多源刮削任务记录</h3>
+          <h3>刮削任务记录</h3>
           <button type="button" class="btn btn-sm" id="extmeta-runs-refresh">刷新</button>
         </div>
-        ${scrapeRuns.length === 0
-          ? `<div class="empty-box">暂无多源批量刮削任务记录。</div>`
+        ${mergedRuns.length === 0
+          ? `<div class="empty-box">暂无刮削任务记录。</div>`
           : `<div class="table-wrap"><table class="data-table">
-              <thead><tr><th>目标</th><th>模式 / 网络</th><th>状态</th><th>进度</th><th>命中 / 未命中 / 跳过</th><th>当前处理 / 开始时间</th><th>操作</th></tr></thead>
+              <thead><tr><th>目标</th><th>模式 / 引擎</th><th>状态</th><th>进度</th><th>命中 / 未匹配 / 跳过</th><th>当前处理 / 开始时间</th><th>操作</th></tr></thead>
               <tbody>
-                ${scrapeRuns.map((r) => {
+                ${mergedRuns.map((r) => {
                   const rid = r.id || r.runId || '';
                   const total = Number(r.totalSeries || 0);
                   const proc = Number(r.processedSeries || 0);
                   const pct = total > 0 ? Math.min(100, Math.round((proc / total) * 100)) : 0;
                   const active = r.status === 'queued' || r.status === 'running';
                   const errText = r.error || (Array.isArray(r.errors) && r.errors[0]) || '';
-                  const targetName = (libMap.get(r.libraryId) && libMap.get(r.libraryId).name) || r.libraryName || r.libraryId || '全部未隐藏书库';
+                  const targetName = (r.libraryId && libMap.get(r.libraryId) && libMap.get(r.libraryId).name) || r.libraryName || r.libraryId || '全部未隐藏书库';
+                  const engineBadge = r._engine === 'bangumi'
+                    ? `<span class="badge badge-bgm">Bangumi</span>`
+                    : (r.allowOnline
+                      ? `<span class="badge badge-warn">多源 · 含在线补全</span>`
+                      : `<span class="badge">多源 · 纯离线</span>`);
+                  const cancelAttr = r._engine === 'bangumi' ? 'data-cancel-bgm-run' : 'data-cancel-extmeta-run';
                   return `
                     <tr>
                       <td><strong>${esc(targetName)}</strong></td>
                       <td>
                         <span class="badge">${esc(r.mode || 'incremental')}</span>
-                        ${r.allowOnline ? `<span class="badge badge-warn">含在线补全</span>` : `<span class="badge">纯离线</span>`}
+                        ${engineBadge}
                       </td>
                       <td><span class="badge ${(r.status === 'completed' || r.status === 'success') ? 'badge-success' : r.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(r.status)}</span></td>
                       <td style="min-width:140px">
@@ -4718,7 +4823,7 @@
                         <div>${esc(r.currentSeries || fmtTime(r.startedAt || r.createdAt))}</div>
                         ${errText ? `<div style="color:var(--danger)">${esc(errText)}</div>` : ''}
                       </td>
-                      <td>${active && rid ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-extmeta-run="${esc(rid)}">取消</button>` : ''}</td>
+                      <td>${active && rid ? `<button type="button" class="btn btn-sm btn-danger" ${cancelAttr}="${esc(rid)}">取消</button>` : ''}</td>
                     </tr>`;
                 }).join('')}
               </tbody>
@@ -4765,99 +4870,6 @@
         <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center">
           <button type="button" class="btn btn-primary" id="extmeta-export-preview-btn">预览脱敏结果</button>
           <span class="field-hint">将先在弹窗展示脱敏条数、已排除 NSFW 数与前 30 条样本，确认无误后再下载 <code>.ndjson</code>。</span>
-        </div>
-      </div>
-
-      <div class="grid-2">
-        <div class="card">
-          <h3>引擎一：Bangumi 离线索引库（推荐大规模书库使用）</h3>
-          <p style="font-size:12.5px;color:var(--text-secondary)">
-            支持默认<strong>中文简介增强镜像</strong>（全站非 NSFW 外文简介 AI 翻译为简体中文，与官方 100% 同构）或切换回 <code>bangumi/Archive</code> 官方原版 / 自定义源。拉取快照并校验 SHA256 后流式导入全量书籍主条目，几万部漫画可在本地 SQLite 毫秒级完成匹配，零 API 限流风险。
-          </p>
-          <form id="bgm-arch-source-form" style="margin:10px 0 12px;padding:10px 12px;border-radius:8px;background:var(--bg-input);border:1px solid var(--border)">
-            <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">离线快照数据源</div>
-            <div class="inline-action-bar">
-              <select id="bgm-arch-source" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
-                <option value="zh_cn" ${srcState.source === 'zh_cn' ? 'selected' : ''}>中文简介增强镜像（默认 · xJogger/bangumi-archive-zh）</option>
-                <option value="official" ${srcState.source === 'official' ? 'selected' : ''}>Bangumi 官方原版（bangumi/Archive）</option>
-                <option value="custom" ${srcState.source === 'custom' ? 'selected' : ''}>自定义兼容源（aux/latest.json）</option>
-              </select>
-              <button type="submit" class="btn btn-sm btn-primary" ${arch.updating ? 'disabled' : ''}>保存源</button>
-            </div>
-            <div id="bgm-arch-custom-wrap" style="margin-top:8px;display:${srcState.source === 'custom' ? '' : 'none'}">
-              <input type="url" id="bgm-arch-custom-url" value="${esc(srcState.customUrl)}" placeholder="https://raw.githubusercontent.com/.../aux/latest.json" style="width:100%;height:34px;padding:0 10px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-card);color:var(--text)">
-            </div>
-            ${archSrc.metaUrl ? `<div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);word-break:break-all">当前元数据地址：<code>${esc(archSrc.metaUrl)}</code></div>` : ''}
-          </form>
-          <div style="font-size:13px;margin:12px 0;display:grid;gap:4px">
-            <div>状态：${arch.ready ? `<span class="badge badge-success">已就绪 · ${Number(arch.subjectCount || 0).toLocaleString()} 条书籍条目</span>` : `<span class="badge badge-warn">尚未建立离线索引</span>`}</div>
-            ${arch.dumpName ? `<div style="color:var(--text-muted);font-size:12px">快照版本：${esc(arch.dumpName)} · 导入于 ${fmtTime(arch.importedAt)}</div>` : ''}
-            ${(arch.lastCheckAt || sched.lastCheckedAt) ? `<div style="color:var(--text-muted);font-size:12px">最近检查：${fmtTime(arch.lastCheckAt || sched.lastCheckedAt)}${checkResultLabel(arch.lastCheckResult || sched.lastResult) ? ` · ${esc(checkResultLabel(arch.lastCheckResult || sched.lastResult))}` : ''}</div>` : ''}
-            ${arch.lastSyncAt ? `<div style="color:var(--text-muted);font-size:12px">最近元数据自动同步：${fmtTime(arch.lastSyncAt)} · 增量更新 ${Number(arch.lastSyncUpdatedSeries || 0).toLocaleString()} 部作品</div>` : ''}
-            ${arch.updating ? `
-              <div style="margin-top:6px">
-                <div style="font-size:12px;color:var(--accent);margin-bottom:4px">正在更新：${esc(arch.phase || '下载/解析中')} ${arch.totalBytes > 0 ? `(${fmtBytes(arch.downloadedBytes)} / ${fmtBytes(arch.totalBytes)} · ${dlPct}%)` : ''}</div>
-                <div class="progress-track"><span style="width:${dlPct || 35}%"></span></div>
-              </div>` : ''}
-            ${arch.lastError ? `<div style="color:var(--danger);font-size:12px">最近错误：${esc(arch.lastError)}</div>` : ''}
-            ${arch.lastSyncError ? `<div style="color:var(--danger);font-size:12px">最近同步错误：${esc(arch.lastSyncError)}</div>` : ''}
-          </div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button type="button" class="btn btn-primary" id="bgm-arch-update" ${arch.updating ? 'disabled' : ''}>${arch.ready ? '检查并更新离线索引库' : '一键下载并构建离线索引库'}</button>
-            ${arch.updating ? `<button type="button" class="btn btn-danger" id="bgm-arch-cancel">取消下载</button>` : ''}
-          </div>
-
-          <form id="bgm-arch-sched-form" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-              <strong style="font-size:13px">定时检查更新（服务器本机时区）</strong>
-              <label class="check-row" style="font-size:12.5px">
-                <input type="checkbox" id="bgm-arch-sched-enabled" ${schedState.enabled ? 'checked' : ''}>
-                <span>启用定时更新</span>
-              </label>
-            </div>
-            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-              <select id="bgm-arch-sched-freq" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
-                <option value="weekly" ${schedState.frequency === 'weekly' ? 'selected' : ''}>每周</option>
-                <option value="monthly" ${schedState.frequency === 'monthly' ? 'selected' : ''}>每月</option>
-              </select>
-              <select id="bgm-arch-sched-dow" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text);display:${schedState.frequency === 'weekly' ? '' : 'none'}">
-                ${weekdays.map((lbl, idx) => `<option value="${idx}" ${schedState.dayOfWeek === idx ? 'selected' : ''}>${lbl}</option>`).join('')}
-              </select>
-              <select id="bgm-arch-sched-dom" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text);display:${schedState.frequency === 'monthly' ? '' : 'none'}">
-                ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${schedState.dayOfMonth === d ? 'selected' : ''}>每月 ${d} 日</option>`).join('')}
-              </select>
-              <input type="time" id="bgm-arch-sched-time" value="${esc(schedState.timeOfDay)}" style="height:34px;padding:0 8px;border-radius:7px;border:1px solid var(--border-strong);background:var(--bg-input);color:var(--text)">
-              <button type="submit" class="btn btn-sm btn-primary">保存定时</button>
-            </div>
-            <div style="margin-top:6px;font-size:11.5px;color:var(--text-muted);line-height:1.5">
-              ${sched.enabled && sched.nextRunAt ? `下次计划检查：<strong>${fmtTime(sched.nextRunAt)}</strong> · ` : ''}${archSrc.source === 'official'
-                ? '官方原版每周三约 05:04 发布新快照（默认推荐周三 06:00）；'
-                : '上游每周三约 05:04 发布，中文增强镜像于周三上午完成增量翻译发布（默认推荐周四 06:00，切换数据源时若未自定义时间会自动同步对应默认日）；'}快照未更新自动跳过下载，导入新版后自动本地增量同步已匹配作品的未锁定元数据（不重下封面、不覆盖手动锁定字段）。
-            </div>
-          </form>
-        </div>
-
-        <div class="card">
-          <h3>启动 Bangumi 批量自动刮削</h3>
-          <p style="font-size:12.5px;color:var(--text-secondary)">
-            支持 <code>[标题][作者]</code> 与 <code>[作者][标题]</code> 双序识别、通用子目录（如 <code>台版</code>/<code>特别篇</code>）自动回溯父目录并追加后缀、繁简异体字归一与作者交叉打分，不会覆盖已手动绑定或锁定的字段。
-          </p>
-          <div class="field">
-            <label>选择目标书库</label>
-            <select id="bgm-batch-lib">
-              <option value="">全部未隐藏书库</option>
-              ${selectableLibs.map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field">
-            <label>刮削范围模式</label>
-            <select id="bgm-batch-mode">
-              <option value="incremental">增量刮削（仅处理尚未刮削的新作品）</option>
-              <option value="retry_unmatched">重试未命中（处理“自动未命中”与新作品，规则升级后推荐）</option>
-              <option value="force">全量强制重刮（重新匹配全部作品，保留手动绑定与锁定字段）</option>
-            </select>
-          </div>
-          <button type="button" class="btn btn-bgm" id="bgm-batch-start">开始批量刮削</button>
         </div>
       </div>
 
@@ -4908,36 +4920,6 @@
             ${tr.usingCustomOAuthApp ? `<button type="button" class="btn btn-sm" id="bgm-tracker-oauth-app-reset">恢复默认内置 App</button>` : ''}
           </div>
         </div>
-      </div>
-
-      <div class="card">
-        <div class="section-head">
-          <h3>Bangumi 刮削任务记录</h3>
-          <button type="button" class="btn btn-sm" id="bgm-refresh-btn">刷新</button>
-        </div>
-        ${runs.length === 0
-          ? `<div class="empty-box">暂无批量刮削任务记录。</div>`
-          : `<div class="table-wrap"><table class="data-table">
-              <thead><tr><th>目标</th><th>模式</th><th>状态</th><th>进度</th><th>命中 / 未命中 / 跳过</th><th>当前处理 / 开始时间</th><th>操作</th></tr></thead>
-              <tbody>
-                ${runs.map((r) => {
-                  const pct = r.totalSeries > 0 ? Math.min(100, Math.round((r.processedSeries / r.totalSeries) * 100)) : 0;
-                  return `
-                    <tr>
-                      <td><strong>${esc(r.libraryName || '全部未隐藏书库')}</strong></td>
-                      <td><span class="badge">${esc(r.mode)}</span></td>
-                      <td><span class="badge ${(r.status === 'completed' || r.status === 'success') ? 'badge-success' : r.status === 'failed' ? 'badge-danger' : 'badge-accent'}">${esc(r.status)}</span></td>
-                      <td style="min-width:140px">
-                        <div style="font-size:12px">${r.processedSeries} / ${r.totalSeries} (${pct}%)</div>
-                        <div class="progress-track" style="margin-top:3px"><span style="width:${pct}%"></span></div>
-                      </td>
-                      <td><span style="color:var(--success)">${r.matchedCount}</span> / <span style="color:var(--warn)">${r.unmatchedCount}</span> / ${r.skippedCount}</td>
-                      <td class="cell-wrap" style="font-size:12px;color:var(--text-muted)">${esc(r.currentSeries || fmtTime(r.startedAt || r.createdAt))}</td>
-                      <td>${(r.status === 'queued' || r.status === 'running') ? `<button type="button" class="btn btn-sm btn-danger" data-cancel-bgm-run="${esc(r.id)}">取消</button>` : ''}</td>
-                    </tr>`;
-                }).join('')}
-              </tbody>
-            </table></div>`}
       </div>
     `;
 
@@ -5355,21 +5337,6 @@
         catch (err) { toast(err.message, 'error'); }
       };
     }
-    document.getElementById('bgm-batch-start').onclick = async () => {
-      try {
-        const mode = document.getElementById('bgm-batch-mode').value;
-        await api('/admin/api/bangumi/runs', {
-          method: 'POST',
-          body: {
-            libraryId: document.getElementById('bgm-batch-lib').value,
-            mode,
-            force: mode === 'force',
-          },
-        });
-        toast('批量刮削任务已启动');
-        renderAdminBangumi(body);
-      } catch (err) { toast(err.message, 'error'); }
-    };
     const copyTextSafe = async (txt) => {
       if (navigator.clipboard && window.isSecureContext) {
         try { await navigator.clipboard.writeText(txt); return true; } catch (_) {}
@@ -5436,13 +5403,18 @@
       };
     }
 
-    document.getElementById('bgm-refresh-btn').onclick = () => renderAdminBangumi(body);
     body.querySelectorAll('button[data-cancel-bgm-run]').forEach((btn) => {
       btn.onclick = async () => {
+        const rid = btn.getAttribute('data-cancel-bgm-run');
+        btn.disabled = true;
         try {
-          await api(`/admin/api/bangumi/runs/${encodeURIComponent(btn.getAttribute('data-cancel-bgm-run'))}/cancel`, { method: 'POST' });
+          await api(`/admin/api/bangumi/runs/${encodeURIComponent(rid)}/cancel`, { method: 'POST' });
+          toast('已发送取消请求');
           renderAdminBangumi(body);
-        } catch (err) { toast(err.message, 'error'); }
+        } catch (err) {
+          btn.disabled = false;
+          toast(err.message, 'error');
+        }
       };
     });
 

@@ -5,6 +5,7 @@ const vm = require('node:vm');
 
 const appSource = readFileSync('internal/httpserver/static/ui/app.js', 'utf8');
 const cssSource = readFileSync('internal/httpserver/static/ui/app.css', 'utf8');
+const htmlSource = readFileSync('internal/httpserver/static/ui/app.html', 'utf8');
 
 function decodeHTML(str) {
   return String(str)
@@ -656,13 +657,15 @@ test('library priority chain modal reorders sources and saves ordered sourceIds'
   assert.ok(editChainBtn);
   editChainBtn.onclick();
 
-  // Currently selected: ['src-sqlite-1']. Check 'src-bgm-zh' then move it up to #1.
-  const bgmCb = h.modalBody.querySelector('input[data-mchain-id="src-bgm-zh"]');
+  // Currently selected: ['src-sqlite-1']. Check 'bangumi' then move it up to #1.
+  // Duplicate bangumi_archive market sources like 'src-bgm-zh' must NOT appear in the chain modal.
+  assert.equal(h.modalBody.querySelector('input[data-mchain-id="src-bgm-zh"]'), null);
+  const bgmCb = h.modalBody.querySelector('input[data-mchain-id="bangumi"]');
   assert.ok(bgmCb);
   bgmCb.checked = true;
   bgmCb.onchange();
 
-  const moveUpBtn = h.modalBody.querySelectorAll('button[data-mchain-move="src-bgm-zh"]')
+  const moveUpBtn = h.modalBody.querySelectorAll('button[data-mchain-move="bangumi"]')
     .find((b) => b.getAttribute('data-dir') === '-1');
   assert.ok(moveUpBtn);
   moveUpBtn.onclick();
@@ -671,7 +674,7 @@ test('library priority chain modal reorders sources and saves ordered sourceIds'
   assert.deepEqual(requests[0], [
     '/admin/api/libraries/lib-1/metadata-sources',
     'PUT',
-    { sourceIds: ['src-bgm-zh', 'src-sqlite-1'] },
+    { sourceIds: ['bangumi', 'src-sqlite-1'] },
   ]);
 });
 
@@ -1066,4 +1069,257 @@ test('app.css external metadata classes use theme variables without hardcoded co
   assert.ok(idx >= 0, 'expected new CSS section in app.css');
   const addedCSS = cssSource.slice(idx);
   assert.doesNotMatch(addedCSS, /#[0-9a-fA-F]{3,8}\b|rgb\(|rgba\(/);
+});
+
+test('footer separator renders pure CSS circle using currentColor without middle-dot glyph', () => {
+  assert.match(
+    htmlSource,
+    /<span id="site-footer-sep" class="site-footer-sep" hidden aria-hidden="true"><\/span>/,
+  );
+  assert.doesNotMatch(htmlSource, /id="site-footer-sep"[^>]*>·</);
+
+  const sepRuleMatch = cssSource.match(/\.site-footer-sep\s*\{([^}]*)\}/);
+  assert.ok(sepRuleMatch, 'expected .site-footer-sep rule in app.css');
+  const ruleBody = sepRuleMatch[1];
+  assert.match(ruleBody, /width:\s*3px/);
+  assert.match(ruleBody, /height:\s*3px/);
+  assert.match(ruleBody, /border-radius:\s*50%/);
+  assert.match(ruleBody, /background:\s*currentColor/);
+  assert.match(ruleBody, /opacity:\s*0\.72/);
+});
+
+test('copy unification removes engine-one and Mihon-style phrasing and orders scraper cards properly', () => {
+  const h = loadAdminScraperContext({
+    apiImpl: async () => ({}),
+  });
+
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, sampleOverview(), []);
+  const html = h.body.innerHTML;
+
+  // Forbidden legacy strings
+  assert.doesNotMatch(html, /引擎一：/);
+  assert.doesNotMatch(html, /Mihon\s*风格/);
+  assert.doesNotMatch(appSource, /引擎一：/);
+  assert.doesNotMatch(appSource, /Mihon\s*风格/);
+
+  // Stat cards & filter dropdown unification
+  assert.match(html, /<div class="k">已匹配<\/div>/);
+  assert.match(html, /<div class="k">未匹配<\/div>/);
+  assert.doesNotMatch(html, /<div class="k">已匹配 Bangumi<\/div>/);
+  assert.doesNotMatch(html, /<div class="k">自动未命中<\/div>/);
+  assert.match(appSource, /<option value="matched"[^>]*>已匹配<\/option>/);
+  assert.match(appSource, /<option value="unmatched"[^>]*>未匹配<\/option>/);
+  assert.match(appSource, /<div class="k">元数据已匹配<\/div>/);
+
+  // Docs retain Mihon client links while removing Mihon-style market phrasing
+  for (const docPath of ['README.md', 'docs/ARCHITECTURE.md', 'docs/METADATA_SOURCES.md']) {
+    const docText = readFileSync(docPath, 'utf8');
+    assert.doesNotMatch(docText, /Mihon\s*风格/, `${docPath} must not contain Mihon 风格`);
+  }
+  const readmeText = readFileSync('README.md', 'utf8');
+  assert.match(readmeText, /https:\/\/mihon\.app\//);
+
+  // Strict card order
+  const posStats = html.indexOf('总系列数');
+  const posGuide = html.indexOf('id="extmeta-guide-details"');
+  const posNsfw = html.indexOf('NSFW 作品前台显示开关');
+  const posProxy = html.indexOf('网络代理设置');
+  const posBgmArch = html.indexOf('<h3>Bangumi 离线索引库</h3>');
+  const posBatch = html.indexOf('id="extmeta-batch-card"');
+  const posMarket = html.indexOf('id="extmeta-market-card"');
+  const posChains = html.indexOf('id="extmeta-chains-card"');
+  const posRuns = html.indexOf('id="extmeta-runs-card"');
+  const posExport = html.indexOf('id="extmeta-export-card"');
+  const posAgent = html.indexOf('使用 AI Agent 协助匹配未命中作品');
+  const posTracker = html.indexOf('id="bgm-oauth-app-box"');
+
+  assert.ok(posStats >= 0 && posGuide > posStats && posNsfw > posGuide && posProxy > posNsfw);
+  assert.ok(posBgmArch > posProxy && posBatch > posBgmArch && posMarket > posBatch);
+  assert.ok(posChains > posMarket && posRuns > posChains && posExport > posRuns);
+  assert.ok(posAgent > posExport && posTracker > posAgent);
+
+  // Unique batch scrape card and unique runs table
+  assert.equal((html.match(/<h3>启动批量自动刮削<\/h3>/g) || []).length, 1);
+  assert.equal((html.match(/<h3>刮削任务记录<\/h3>/g) || []).length, 1);
+  assert.equal(h.doc.getElementById('bgm-batch-start'), null);
+  assert.equal(h.doc.getElementById('bgm-refresh-btn'), null);
+  assert.equal(h.doc.getElementById('extmeta-batch-start').getAttribute('type'), 'button');
+  assert.match(html, /重试未匹配（处理“未匹配”与新作品，规则或源更新后推荐）/);
+  assert.match(html, />开始批量刮削</);
+});
+
+test('market hides duplicate bangumi_archive sources and chain modal collapses Bangumi into single option', () => {
+  const h = loadAdminScraperContext({
+    apiImpl: async () => ({}),
+  });
+
+  const twoBgmOverview = sampleOverview({
+    sources: [
+      ...sampleOverview().sources,
+      {
+        id: 'src-bgm-official',
+        repoId: 'repo-1',
+        sourceKey: 'bgm-official',
+        kind: 'bangumi_archive',
+        schemaType: 'bangumi_archive',
+        name: 'Bangumi 官方归档源',
+        enabled: true,
+        ready: true,
+        entryCount: 50000,
+      },
+    ],
+  });
+
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), [], sampleLibraries, {}, twoBgmOverview, []);
+
+  const marketCardHTML = h.doc.getElementById('extmeta-market-card')
+    ? h.body.innerHTML.slice(
+      h.body.innerHTML.indexOf('id="extmeta-market-card"'),
+      h.body.innerHTML.indexOf('id="extmeta-chains-card"'),
+    )
+    : '';
+  assert.match(marketCardHTML, /已配置扩展数据源（2）/);
+  assert.match(marketCardHTML, /2 个已就绪/);
+  assert.doesNotMatch(marketCardHTML, /Bangumi 中文增强库/);
+  assert.doesNotMatch(marketCardHTML, /Bangumi 官方归档源/);
+  assert.match(marketCardHTML, /中文标签词典/);
+  assert.match(marketCardHTML, /通用离线图库 A/);
+
+  // Priority chain edit modal only shows single 'bangumi' + offline_sqlite sources
+  const editChainBtn = h.body.querySelector('button[data-extmeta-chain-edit="lib-1"]');
+  assert.ok(editChainBtn);
+  editChainBtn.onclick();
+
+  const chainCheckboxes = h.modalBody.querySelectorAll('input[data-mchain-id]');
+  assert.deepEqual(
+    chainCheckboxes.map((c) => c.getAttribute('data-mchain-id')),
+    ['src-sqlite-1', 'bangumi'],
+  );
+  assert.match(h.modalBody.innerHTML, /内置 Bangumi 源/);
+  assert.doesNotMatch(h.modalBody.innerHTML, /Bangumi 中文增强库/);
+  assert.doesNotMatch(h.modalBody.innerHTML, /Bangumi 官方归档源/);
+});
+
+test('unified scrape runs table merges, deduplicates, sorts descending, and cancels both engines', async () => {
+  const requests = [];
+  const h = loadAdminScraperContext({
+    apiImpl: async (url, opts = {}) => {
+      requests.push([url, opts.method || 'GET']);
+      if (url === '/admin/api/bangumi/status') return sampleBangumiStatus();
+      if (url.startsWith('/admin/api/bangumi/runs')) return [];
+      if (url === '/admin/api/libraries') return sampleLibraries;
+      if (url.startsWith('/admin/api/bangumi/tracker')) return {};
+      if (url === '/admin/api/metadata/overview') return sampleOverview();
+      if (url === '/admin/api/metadata/scrape-runs') return [];
+      return {};
+    },
+  });
+
+  const extRuns = [
+    {
+      id: 'ext-run-online',
+      libraryId: 'lib-1',
+      mode: 'retry_unmatched',
+      allowOnline: true,
+      status: 'running',
+      totalSeries: 20,
+      processedSeries: 5,
+      matchedCount: 4,
+      unmatchedCount: 1,
+      skippedCount: 0,
+      currentSeries: '正在刮削作品 A',
+      startedAt: '2026-11-25T11:00:00Z',
+    },
+    {
+      id: 'dup-run-id',
+      libraryId: 'lib-2',
+      mode: 'incremental',
+      allowOnline: false,
+      status: 'success',
+      totalSeries: 10,
+      processedSeries: 10,
+      matchedCount: 8,
+      unmatchedCount: 2,
+      skippedCount: 0,
+      startedAt: '2026-11-25T09:00:00Z',
+    },
+  ];
+  const bgmRuns = [
+    {
+      id: 'bgm-run-active',
+      libraryId: '',
+      libraryName: '',
+      mode: 'incremental',
+      status: 'running',
+      totalSeries: 40,
+      processedSeries: 10,
+      matchedCount: 9,
+      unmatchedCount: 1,
+      skippedCount: 0,
+      currentSeries: '历史 Bangumi 作品 B',
+      startedAt: '2026-11-25T10:00:00Z',
+    },
+    {
+      id: 'dup-run-id',
+      libraryId: 'lib-2',
+      mode: 'force',
+      status: 'failed',
+      totalSeries: 10,
+      processedSeries: 1,
+      matchedCount: 0,
+      unmatchedCount: 0,
+      skippedCount: 0,
+      startedAt: '2026-11-25T09:00:00Z',
+    },
+    {
+      id: 'bgm-run-queued',
+      libraryId: 'lib-1',
+      mode: 'incremental',
+      status: 'completed',
+      totalSeries: 5,
+      processedSeries: 5,
+      matchedCount: 5,
+      unmatchedCount: 0,
+      skippedCount: 0,
+      startedAt: null,
+      createdAt: '2026-11-25T08:00:00Z',
+    },
+  ];
+
+  h.paintAdminBangumi(h.body, sampleBangumiStatus(), bgmRuns, sampleLibraries, {}, sampleOverview(), extRuns);
+
+  const runsHTML = h.body.innerHTML.slice(
+    h.body.innerHTML.indexOf('id="extmeta-runs-card"'),
+    h.body.innerHTML.indexOf('id="extmeta-export-card"'),
+  );
+
+  // Deduplicated by id (4 unique runs total, extmeta wins on dup-run-id)
+  assert.equal((runsHTML.match(/<tr>/g) || []).length, 5); // 1 header + 4 rows
+  assert.doesNotMatch(runsHTML, /badge-danger">failed</);
+
+  // Sorted descending by startedAt || createdAt:
+  // ext-run-online (11:00) -> bgm-run-active (10:00) -> dup-run-id (09:00) -> bgm-run-queued (08:00)
+  const p1 = runsHTML.indexOf('正在刮削作品 A');
+  const p2 = runsHTML.indexOf('历史 Bangumi 作品 B');
+  const p3 = runsHTML.indexOf('WebDAV 书库');
+  const p4 = runsHTML.indexOf('2026-11-25T08:00:00Z');
+  assert.ok(p1 > 0 && p2 > p1 && p3 > p2 && p4 > p3, 'runs must be sorted newest first');
+
+  // Engine badges
+  assert.match(runsHTML, /多源 · 含在线补全/);
+  assert.match(runsHTML, /多源 · 纯离线/);
+  assert.match(runsHTML, /<span class="badge badge-bgm">Bangumi<\/span>/);
+
+  // Cancel buttons trigger corresponding endpoints
+  const extCancelBtn = h.body.querySelector('button[data-cancel-extmeta-run="ext-run-online"]');
+  const bgmCancelBtn = h.body.querySelector('button[data-cancel-bgm-run="bgm-run-active"]');
+  assert.ok(extCancelBtn);
+  assert.ok(bgmCancelBtn);
+
+  await extCancelBtn.onclick();
+  assert.deepEqual(requests[0], ['/admin/api/metadata/scrape-runs/ext-run-online/cancel', 'POST']);
+
+  requests.length = 0;
+  await bgmCancelBtn.onclick();
+  assert.deepEqual(requests[0], ['/admin/api/bangumi/runs/bgm-run-active/cancel', 'POST']);
 });

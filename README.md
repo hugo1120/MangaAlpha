@@ -67,7 +67,7 @@
 
 ### 4. 多源元数据刮削中心、Bangumi 授权检索与 NSFW 隔离
 
-- **Mihon 风格声明式元数据市场与离线 Sidecar 引擎（v3.2 新增）**：
+- **声明式元数据市场与离线 Sidecar 引擎（v3.2 新增）**：
   - 支持订阅标准 `mangaalpha-repo-v1`（`repo.json`）元数据市场或手动接入本地 SQLite 源，通过纯 Go 流式解压（`.zst` / `.gz` / `.zip`）导入 `mangaalpha_meta_v1` 单表或 `gallery_v1` 通用四表离线图库，并在旁构建只读 Sidecar 索引（FTS5 + SHA-1 指纹召回）；同时支持解析归档内嵌的 `ComicInfo.xml` 与 `galleryinfo.txt` 元数据。
   - 内置中文标签翻译词典（`tag_translation_text_v1`，支持纯中文 `zh` / 双语 `bilingual` / 原文 `raw` 展示模式）；每个顶层书库（含联合书库）可自定义 `#1 → #2 → ...` **多源顺延优先级链**。
   - 所有离线源均未命中时自动由已启用的**社区脱敏映射包（`mangaalpha_mapping_v1`）**兜底，后台支持预览并导出严格剥离本地路径、私有 IP、凭据与 URL 的 `.ndjson` 映射包（默认严格排除 NSFW）；默认纯离线极速匹配，仅在显式开启时才允许单线程防封熔断低速在线补全。详见 [docs/METADATA_SOURCES.md](docs/METADATA_SOURCES.md)。

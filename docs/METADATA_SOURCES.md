@@ -15,7 +15,7 @@
 
 ## 2. 仓库清单规范：`mangaalpha-repo-v1`
 
-MangaAlpha 采用与 Mihon 仓库清单类似的声明式 `repo.json` 规范。管理后台提供「填入社区推荐仓库地址」快捷预填功能（默认指向 `https://raw.githubusercontent.com/BlackMuseCode/mangaalpha-metadata-repo/main/repo.json`），需管理员确认后才会订阅拉取。
+MangaAlpha 采用声明式元数据市场 `repo.json` 规范。管理后台提供「填入社区推荐仓库地址」快捷预填功能（默认指向 `https://raw.githubusercontent.com/BlackMuseCode/mangaalpha-metadata-repo/main/repo.json`），需管理员确认后才会订阅拉取。
 
 - **体积上限**：`4 MiB`（`4194304` 字节）
 - **JSON 编码**：UTF-8，`Content-Type: application/json`

@@ -188,10 +188,13 @@ button, input, select, textarea {
 }
 
 .site-footer-sep {
-  color: var(--text-secondary);
-  font-size: 15px;
-  font-weight: 700;
-  line-height: 1;
+  display: inline-block;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.72;
+  flex-shrink: 0;
   user-select: none;
 }
 

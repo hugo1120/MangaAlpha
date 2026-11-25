@@ -1,6 +1,15 @@
 (() => {
   'use strict';
 
+  if (typeof navigator !== 'undefined' && navigator.serviceWorker && typeof navigator.serviceWorker.getRegistrations === 'function') {
+    navigator.serviceWorker.getRegistrations().then((regs) => {
+      regs.forEach((r) => {
+        const update = typeof r.update === 'function' ? r.update() : Promise.reject();
+        Promise.resolve(update).catch(() => r.unregister().catch(() => {}));
+      });
+    }).catch(() => {});
+  }
+
   const THEME_MODE_KEY = 'fk115_theme_mode';
   const darkMediaQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
 

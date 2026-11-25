@@ -214,21 +214,19 @@ func showStartupErrorDialog(err error, port int, shelfURL, logPath string) {
 	if err == nil {
 		return
 	}
-	msg := err.Error()
-	lower := strings.ToLower(msg)
-	if strings.Contains(lower, "only one usage of each socket address") ||
-		strings.Contains(lower, "address already in use") ||
-		strings.Contains(lower, "bind") {
-		text := fmt.Sprintf(
-			"端口 %d 已被占用，MangaAlpha 可能已在系统托盘运行。\n\n是否立即在浏览器中打开网页书架（%s）？",
-			port, shelfURL,
-		)
-		if showMessageBox("MangaAlpha 已在运行或端口被占用", text, mbYesNo|mbIconInformation) == idYes {
-			openWindowsURL(shelfURL)
+	if isAddressInUseError(err) {
+		isMangaAlpha := probeMangaAlphaHealth(context.Background(), shelfURL, nil)
+		title, text, offerOpen := formatPortConflictDialog(isMangaAlpha, port, shelfURL)
+		if offerOpen {
+			if showMessageBox(title, text, mbYesNo|mbIconInformation) == idYes {
+				openWindowsURL(shelfURL)
+			}
+		} else {
+			showMessageBox(title, text, mbOK|mbIconError)
 		}
 		return
 	}
-	text := fmt.Sprintf("MangaAlpha 启动失败：\n\n%s", msg)
+	text := fmt.Sprintf("MangaAlpha 启动失败：\n\n%s", err)
 	if logPath != "" {
 		text += fmt.Sprintf("\n\n详情请查看日志文件：\n%s", logPath)
 	}

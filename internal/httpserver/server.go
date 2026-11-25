@@ -153,16 +153,62 @@ func (s *Server) WithUpdater(u *updater.Service) *Server {
 
 func (s *Server) Handler() http.Handler { return s.router }
 
+const staleServiceWorkerScript = `self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => {
+  event.waitUntil((async () => {
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k).catch(() => false)));
+    } catch (_) {}
+    try {
+      await self.registration.unregister();
+    } catch (_) {}
+    try {
+      const clients = await self.clients.matchAll({ type: 'window' });
+      await Promise.all(clients.map((c) => {
+        try {
+          return typeof c.navigate === 'function' ? c.navigate('/').catch(() => null) : null;
+        } catch (_) {
+          return null;
+        }
+      }));
+    } catch (_) {}
+  })());
+});
+`
+
+func staleServiceWorkerMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if (r.Method != http.MethodGet && r.Method != http.MethodHead) ||
+			!strings.EqualFold(strings.TrimSpace(r.Header.Get("Service-Worker")), "script") ||
+			isAPIRequestPath(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		h := w.Header()
+		h.Set("Content-Type", "application/javascript; charset=utf-8")
+		h.Set("Cache-Control", "no-store")
+		h.Set("Service-Worker-Allowed", "/")
+		h.Add("Vary", "Service-Worker")
+		w.WriteHeader(http.StatusOK)
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, staleServiceWorkerScript)
+		}
+	})
+}
+
 func (s *Server) routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(s.requestLogger)
 	r.Use(securityHeadersMiddleware)
+	r.Use(staleServiceWorkerMiddleware)
 	r.Use(gzipMiddleware)
 	r.Use(s.authMiddleware)
 
 	r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "mangaalpha"})
 	})
 	r.Get("/favicon.ico", s.serveFavicon)
 

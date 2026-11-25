@@ -1592,7 +1592,7 @@ func (s *Server) bangumiSubjectCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	coverURL := strings.TrimSpace(r.URL.Query().Get("u"))
-	if !bangumi.IsAllowedBangumiCoverURL(coverURL) {
+	if coverURL == bangumi.CoverEndpointURL(subjectID) || !bangumi.IsAllowedBangumiCoverURL(coverURL) {
 		coverURL = ""
 	}
 	data, err := s.thumbs.GetOrFetchBangumiCover(r.Context(), subjectID, coverURL)
@@ -1689,7 +1689,7 @@ func (s *Server) searchSeriesBangumi(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
 		return
 	}
-	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	series, err := s.store.SeriesByIDAny(r.Context(), chi.URLParam(r, "seriesID"), false)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return
@@ -1714,7 +1714,7 @@ func (s *Server) bindSeriesBangumi(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
 		return
 	}
-	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	series, err := s.store.SeriesByIDAny(r.Context(), chi.URLParam(r, "seriesID"), false)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return
@@ -1746,7 +1746,7 @@ func (s *Server) autoMatchSeriesBangumi(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusServiceUnavailable, "BANGUMI_UNAVAILABLE", "Bangumi service is not initialized.")
 		return
 	}
-	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
+	series, err := s.store.SeriesByIDAny(r.Context(), chi.URLParam(r, "seriesID"), false)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return

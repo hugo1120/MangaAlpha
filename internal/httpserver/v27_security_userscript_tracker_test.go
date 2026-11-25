@@ -456,7 +456,7 @@ func TestV27BangumiTrackerHTTPIntegration(t *testing.T) {
 
 	const pat = "pat-e2e-secret"
 	var pushed atomic.Int32
-	mockBgm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mockBgm := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+pat {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -473,10 +473,12 @@ func TestV27BangumiTrackerHTTPIntegration(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
+	})
+	bgmSvc.SetAPITransportForTest(bangumiTestTransport(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		mockBgm.ServeHTTP(rec, r)
+		return rec.Result(), nil
 	}))
-	defer mockBgm.Close()
-
-	bgmSvc.SetAPIBaseURLForTest(mockBgm.URL)
 	bgmSvc.SetTrackerDebounceForTest(25 * time.Millisecond)
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)

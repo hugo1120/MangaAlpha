@@ -606,10 +606,12 @@ func (s *Store) PatchSeriesMetadata(
 	return s.SeriesMetadataByID(ctx, series)
 }
 
-func (s *Store) SetSeriesBgmCoverPath(ctx context.Context, seriesID, fileName string) error {
+func (s *Store) SetSeriesBgmCoverPath(ctx context.Context, seriesID string, subjectID int64, fileName string) error {
+	fileName = strings.TrimSpace(fileName)
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE series_metadata SET bgm_cover_path=?,updated_at=? WHERE series_id=?`,
-		strings.TrimSpace(fileName), nowText(), seriesID)
+		`UPDATE series_metadata SET bgm_cover_path=?,updated_at=?
+WHERE series_id=? AND bgm_subject_id=? AND bgm_cover_path<>?`,
+		fileName, nowText(), seriesID, subjectID, fileName)
 	return err
 }
 

@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -59,10 +61,11 @@ type Service struct {
 	schedDone chan struct{}
 	nowFunc   func() time.Time
 
-	mu          sync.Mutex
-	queued      map[string]string
-	activeRunID string
-	activeStop  context.CancelFunc
+	mu               sync.Mutex
+	queued           map[string]string
+	activeRunID      string
+	activeStop       context.CancelFunc
+	coverInvalidator func()
 }
 
 type scrapeJob struct {
@@ -138,6 +141,7 @@ WHERE status IN ('queued','running')`, now)
 	go svc.archiveScheduleLoop()
 	go svc.worker()
 	svc.tracker = newTrackerManager(svc)
+	svc.live.readToken = svc.tracker.catalogToken
 	return svc, nil
 }
 
@@ -241,6 +245,13 @@ func (s *Service) SetAPIBaseURLForTest(baseURL string) {
 	}
 }
 
+// SetAPITransportForTest lets tests mock HTTPS requests without changing the API origin.
+func (s *Service) SetAPITransportForTest(transport http.RoundTripper) {
+	s.live.clientMu.Lock()
+	defer s.live.clientMu.Unlock()
+	s.live.http = newLiveHTTPClient(transport)
+}
+
 // SetOAuthBaseURLForTest overrides the Bangumi OAuth base URL (https://bgm.tv) in automated tests.
 func (s *Service) SetOAuthBaseURLForTest(baseURL string) {
 	if s != nil && s.tracker != nil {
@@ -294,6 +305,21 @@ func (s *Service) ImportArchiveZip(ctx context.Context, zipPath, dumpName, creat
 
 func (s *Service) FetchCoverBytes(ctx context.Context, coverURL string, subjectID int64) ([]byte, error) {
 	return s.live.FetchCoverBytes(ctx, coverURL, subjectID)
+}
+
+func (s *Service) SetCoverCacheInvalidator(invalidate func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.coverInvalidator = invalidate
+}
+
+func (s *Service) invalidateCoverFailures() {
+	s.mu.Lock()
+	invalidate := s.coverInvalidator
+	s.mu.Unlock()
+	if invalidate != nil {
+		invalidate()
+	}
 }
 
 func (s *Service) RedactedProxyURL(ctx context.Context) string {
@@ -371,6 +397,10 @@ func (s *Service) SearchCandidates(
 	series database.Series,
 	queryText string,
 ) ([]SubjectCandidate, ParsedQuery, error) {
+	ctx, err := s.catalogContext(ctx, series.ID)
+	if err != nil {
+		return nil, ParsedQuery{}, err
+	}
 	queryText = strings.TrimSpace(queryText)
 	useSeriesName := queryText == "" || queryText == series.Name
 	var parsed ParsedQuery
@@ -386,7 +416,7 @@ func (s *Service) SearchCandidates(
 		if err == nil {
 			return []SubjectCandidate{cand}, parsed, nil
 		}
-		if localCand, ok, lErr := s.archive.SubjectByID(ctx, id); lErr == nil && ok {
+		if localCand, ok, lErr := s.archive.SubjectByID(ctx, id); lErr == nil && ok && (!localCand.NSFW || showLiveNSFW(ctx)) {
 			return []SubjectCandidate{localCand}, parsed, nil
 		}
 	}
@@ -421,7 +451,7 @@ func (s *Service) SearchCandidates(
 	if s.archive.Ready() {
 		if localResults, err := s.archive.Search(ctx, parsed, series.OneShot, 15); err == nil {
 			for _, item := range localResults {
-				if !seen[item.ID] {
+				if !seen[item.ID] && (!item.NSFW || showLiveNSFW(ctx)) {
 					seen[item.ID] = true
 					merged = append(merged, item)
 				}
@@ -431,12 +461,41 @@ func (s *Service) SearchCandidates(
 	return merged, parsed, nil
 }
 
+// catalogContext checks the target series before Bangumi reads. Administrator
+// management and background scraping can see NSFW regardless of shelf preferences.
+func (s *Service) catalogContext(ctx context.Context, seriesID string) (context.Context, error) {
+	scope, ok := database.UserScopeFromContext(ctx)
+	if ok && s.store != nil {
+		var err error
+		if scope.IsAdmin {
+			_, err = s.store.SeriesByIDAny(ctx, seriesID, false)
+		} else {
+			_, err = s.store.SeriesByID(ctx, seriesID)
+		}
+		if err != nil {
+			return ctx, err
+		}
+	}
+	if !ok {
+		scope = database.UserScope{UserID: database.PrimaryAdminUserID, IsAdmin: true}
+	}
+	if scope.IsAdmin {
+		scope.AllowNSFW, scope.ShowNSFW = true, true
+		ctx = database.WithUserScope(ctx, scope)
+	}
+	return ctx, nil
+}
+
 // BindSubject binds a specific Bangumi Subject ID to a Series (preferring live API details, falling back to local archive).
 func (s *Service) BindSubject(
 	ctx context.Context,
 	series database.Series,
 	subjectID int64,
 ) (database.SeriesMetadata, error) {
+	ctx, err := s.catalogContext(ctx, series.ID)
+	if err != nil {
+		return database.SeriesMetadata{}, err
+	}
 	cand, err := s.live.SubjectByID(ctx, subjectID)
 	if err != nil {
 		localCand, ok, localErr := s.archive.SubjectByID(ctx, subjectID)
@@ -445,10 +504,17 @@ func (s *Service) BindSubject(
 		}
 		cand = localCand
 	}
+	if cand.NSFW && !showLiveNSFW(ctx) {
+		return database.SeriesMetadata{}, ErrSubjectNotFound
+	}
 	cand.Confidence = 1.0
 	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
 	scraped := ToScrapedMetadataWithQuery(series.Name, parsed, cand)
-	return s.store.ApplyScrapedMetadata(ctx, series, scraped)
+	meta, err := s.store.ApplyScrapedMetadata(ctx, series, scraped)
+	if err == nil {
+		s.invalidateCoverFailures()
+	}
+	return meta, err
 }
 
 // AutoScrapeOne runs automatic title parsing & matching on a single Series.
@@ -466,12 +532,19 @@ func (s *Service) AutoScrapeOneDetailed(
 	ctx context.Context,
 	series database.Series,
 ) (matched bool, meta database.SeriesMetadata, candidates []SubjectCandidate, err error) {
+	ctx, err = s.catalogContext(ctx, series.ID)
+	if err != nil {
+		return false, database.SeriesMetadata{}, nil, err
+	}
 	parsed := ParseSeriesWithPath(series.Name, series.RelativePath)
 	terms := parsed.lookupTitles()
 	if s.archive.Ready() {
 		candidates, err = s.archive.Search(ctx, parsed, series.OneShot, 10)
 		if err != nil {
 			return false, database.SeriesMetadata{}, nil, err
+		}
+		if !showLiveNSFW(ctx) {
+			candidates = slices.DeleteFunc(candidates, func(candidate SubjectCandidate) bool { return candidate.NSFW })
 		}
 	} else if len(terms) > 0 {
 		maxTries := min(2, len(terms))

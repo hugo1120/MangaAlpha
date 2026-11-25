@@ -143,7 +143,7 @@ func TestBangumiTrackerOAuthExchangeRefreshAnd401Retry(t *testing.T) {
 	}))
 	defer mockBgm.Close()
 
-	svc.SetAPIBaseURLForTest(mockBgm.URL)
+	svc.SetAPITransportForTest(trackerTestTransport(t, mockBgm.URL))
 	svc.SetOAuthBaseURLForTest(mockBgm.URL)
 
 	// 1. Build authorize URL with builtin app

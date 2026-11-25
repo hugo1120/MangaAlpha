@@ -128,7 +128,7 @@ func IsAllowedBangumiCoverURL(rawURL string) bool {
 		return false
 	}
 	u, err := url.Parse(rawURL)
-	if err != nil || u.Hostname() == "" {
+	if err != nil || u.Hostname() == "" || u.User != nil {
 		return false
 	}
 	scheme := strings.ToLower(u.Scheme)

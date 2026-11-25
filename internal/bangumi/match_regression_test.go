@@ -37,6 +37,57 @@ func TestExactShortTitleIsNotPenalized(t *testing.T) {
 	}
 }
 
+func TestSeriesNameReleaseSuffixes(t *testing.T) {
+	for _, tc := range []struct {
+		name, title string
+	}{
+		{"银色列车 [未整理", "银色列车"},
+		{"银色列车 (未补齐", "银色列车"},
+		{"银色列车（连载中", "银色列车"},
+		{"银色列车【出版信息", "银色列车"},
+		{"银色列车 [138未)", "银色列车"},
+		{"[银色列车][138未", "银色列车"},
+		{"银色列车[138未]", "银色列车"},
+		{"银色列车[28完+2]", "银色列车"},
+		{"银色列车[全一冊]", "银色列车"},
+		{"银色列车[全一册]", "银色列车"},
+		{"银色列车[全1册]", "银色列车"},
+		{"银色列车[1-12完]", "银色列车"},
+		{"银色列车[138未][28完+2][全一冊][全一册][全1册][1-12完]", "银色列车"},
+		{"银色列车(1-5未完)", "银色列车"},
+		{"银色列车 Vol.01-12", "银色列车"},
+		{"银色列车 第01-10卷", "银色列车"},
+		{"银色列车[xxx][yyy][zzz]", "银色列车"},
+		{"银色列车[DL版][白杨汉化][1600px][JPG][月面上传]", "银色列车"},
+		{"银色列车[DL版][白杨汉化][1600px][JPG]", "银色列车"},
+		{"《20世纪少年》[22完]", "20世纪少年"},
+		{"[86][138未]", "86"},
+		{"《86》第01-10卷", "86"},
+		{"《3月的狮子》[1-12完]", "3月的狮子"},
+		{"《Re:0》[28完+2]", "Re:0"},
+		{"《1/2》 Vol.01-12", "1/2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ParseSeriesName(tc.name)
+			if !slices.Equal(got.Candidates, []string{tc.title}) || len(got.Authors) > 0 && !slices.Equal(got.Authors, []string{tc.title}) {
+				t.Fatalf("candidates/authors = %q / %q, want title %q and no release credits", got.Candidates, got.Authors, tc.title)
+			}
+			if got.Raw != tc.name {
+				t.Fatalf("raw name = %q, want %q", got.Raw, tc.name)
+			}
+		})
+	}
+	parsed := ParseSeriesName("[田中凛][银色列车][xxx][yyy][zzz][JPG]")
+	if !slices.Equal(parsed.Candidates, []string{"田中凛", "银色列车"}) ||
+		!slices.Equal(parsed.Authors, []string{"田中凛", "银色列车"}) {
+		t.Fatalf("bracket-only title or author lost: %+v", parsed)
+	}
+	parsed = ParseSeriesName("猎魔战记（大剑）[DL版][1600px][JPG]")
+	if !slices.Contains(parsed.Candidates, "猎魔战记") || !slices.Contains(parsed.Candidates, "大剑") {
+		t.Fatalf("legitimate alternate title lost: %+v", parsed)
+	}
+}
+
 func TestShortTitleAndNovelCategory(t *testing.T) {
 	for _, name := range []string{"H2 [田中凛][小学馆]", "86 [田中凛][小学馆]", "Rev [田中凛][小学馆]"} {
 		want := strings.Fields(name)[0]

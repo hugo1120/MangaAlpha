@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"path"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,8 +22,9 @@ import (
 )
 
 var (
-	ErrNSFWBlocked     = errors.New("NSFW Bangumi subjects are disabled")
-	ErrSubjectNotFound = errors.New("Bangumi subject not found")
+	ErrNSFWBlocked      = errors.New("NSFW Bangumi subjects are disabled")
+	ErrSubjectNotFound  = errors.New("Bangumi subject not found")
+	ErrCoverUnavailable = errors.New("Bangumi cover unavailable")
 )
 
 type LiveClient struct {
@@ -31,13 +34,14 @@ type LiveClient struct {
 	proxyRaw     string
 	limiter      *rate.Limiter
 	coverLimiter *rate.Limiter
+	readToken    func(context.Context) string
 }
 
 func NewLiveClient() *LiveClient {
 	tr, _ := NewBangumiTransport("", 20*time.Second)
 	return &LiveClient{
 		baseURL:      "https://api.bgm.tv",
-		http:         &http.Client{Timeout: 25 * time.Second, Transport: tr},
+		http:         newLiveHTTPClient(tr),
 		limiter:      rate.NewLimiter(rate.Limit(2.0), 2),
 		coverLimiter: rate.NewLimiter(rate.Limit(12.0), 8),
 	}
@@ -49,10 +53,84 @@ func (c *LiveClient) SetProxyURL(proxyURL string) error {
 		return err
 	}
 	c.clientMu.Lock()
-	c.http = &http.Client{Timeout: 25 * time.Second, Transport: tr}
+	c.http = newLiveHTTPClient(tr)
 	c.proxyRaw = proxyURL
 	c.clientMu.Unlock()
 	return nil
+}
+
+func trustedBangumiAPI(u *url.URL) bool {
+	return u.Scheme == "https" && u.Hostname() == "api.bgm.tv" && u.User == nil &&
+		(u.Port() == "" || u.Port() == "443")
+}
+
+func newLiveHTTPClient(transport http.RoundTripper) *http.Client {
+	return &http.Client{
+		Timeout: 25 * time.Second, Transport: transport, CheckRedirect: checkBangumiRedirect,
+	}
+}
+
+func checkBangumiRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return http.ErrUseLastResponse
+	}
+	for _, previous := range via {
+		if req.URL.Host != previous.URL.Host || req.URL.Scheme != previous.URL.Scheme {
+			req.Header.Del("Authorization")
+			req.Header.Del("Cookie")
+			// OAuth POST bodies can carry refresh tokens and client secrets.
+			if strings.HasPrefix(via[0].URL.Path, "/oauth/") {
+				return http.ErrUseLastResponse
+			}
+			break
+		}
+	}
+	if !trustedBangumiAPI(req.URL) {
+		req.Header.Del("Authorization")
+	}
+	return nil
+}
+
+func setBangumiBearer(req *http.Request, token string) {
+	if token != "" && trustedBangumiAPI(req.URL) {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+func showLiveNSFW(ctx context.Context) bool {
+	scope, ok := database.UserScopeFromContext(ctx)
+	return ok && scope.EffectiveShowNSFW()
+}
+
+func (c *LiveClient) bearer(ctx context.Context, target *url.URL) string {
+	if c.readToken != nil && trustedBangumiAPI(target) && showLiveNSFW(ctx) {
+		return c.readToken(ctx)
+	}
+	return ""
+}
+
+func (c *LiveClient) doRead(req *http.Request, token string, cover bool) (*http.Response, error) {
+	setBangumiBearer(req, token)
+	client, _ := c.httpClient()
+	if cover {
+		coverClient := *client
+		coverClient.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+			if !IsAllowedBangumiCoverURL(next.URL.String()) {
+				return http.ErrUseLastResponse
+			}
+			return checkBangumiRedirect(next, via)
+		}
+		client = &coverClient
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		if req.Context().Err() != nil {
+			return nil, req.Context().Err()
+		}
+		// Redirect and transport errors can include arbitrary upstream strings.
+		return nil, errors.New("Bangumi request failed")
+	}
+	return resp, nil
 }
 
 func (c *LiveClient) httpClient() (*http.Client, string) {
@@ -68,7 +146,7 @@ type apiSubjectResponse struct {
 	Name     string     `json:"name"`
 	NameCN   string     `json:"name_cn"`
 	Summary  string     `json:"summary"`
-	NSFW     bool       `json:"nsfw"`
+	NSFW     *bool      `json:"nsfw"`
 	Series   bool       `json:"series"`
 	Date     string     `json:"date"`
 	Volumes  int        `json:"volumes"`
@@ -116,10 +194,16 @@ func (c *LiveClient) Search(
 	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
+	allowNSFW := showLiveNSFW(ctx)
+	var nsfwFilter any // null includes both classifications for authorized Bangumi accounts.
+	if !allowNSFW {
+		nsfwFilter = false
+	}
 	reqBody, _ := json.Marshal(map[string]any{
 		"keyword": keyword,
 		"filter": map[string]any{
 			"type": []int{1},
+			"nsfw": nsfwFilter,
 		},
 	})
 	url := fmt.Sprintf("%s/v0/search/subjects?limit=%d", strings.TrimRight(c.baseURL, "/"), limit)
@@ -131,10 +215,9 @@ func (c *LiveClient) Search(
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 
-	client, proxyRaw := c.httpClient()
-	resp, err := client.Do(req)
+	resp, err := c.doRead(req, c.bearer(ctx, req.URL), false)
 	if err != nil {
-		return nil, errors.New(SanitizeProxyError(err, proxyRaw))
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -144,14 +227,14 @@ func (c *LiveClient) Search(
 		Data []apiSubjectResponse `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&payload); err != nil {
-		return nil, err
+		return nil, errors.New("invalid Bangumi search response")
 	}
 	if len(parsed.Candidates) == 0 {
 		parsed = ParseSeriesName(keyword)
 	}
 	out := make([]SubjectCandidate, 0, len(payload.Data))
 	for _, item := range payload.Data {
-		if item.Type != 1 {
+		if item.Type != 1 || !allowNSFW && (item.NSFW == nil || *item.NSFW) {
 			continue
 		}
 		cand := mapAPISubject(item, nil)
@@ -176,43 +259,58 @@ func (c *LiveClient) Search(
 }
 
 func (c *LiveClient) SubjectByID(ctx context.Context, subjectID int64) (SubjectCandidate, error) {
-	if subjectID <= 0 {
-		return SubjectCandidate{}, ErrSubjectNotFound
-	}
-	if err := c.limiter.Wait(ctx); err != nil {
-		return SubjectCandidate{}, err
-	}
-	url := fmt.Sprintf("%s/v0/subjects/%d", strings.TrimRight(c.baseURL, "/"), subjectID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	item, token, err := c.subject(ctx, subjectID)
 	if err != nil {
 		return SubjectCandidate{}, err
 	}
-	req.Header.Set("User-Agent", archiveUserAgent)
-	req.Header.Set("Accept", "application/json")
-
-	client, proxyRaw := c.httpClient()
-	resp, err := client.Do(req)
-	if err != nil {
-		return SubjectCandidate{}, errors.New(SanitizeProxyError(err, proxyRaw))
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusNotFound {
-		return SubjectCandidate{}, ErrSubjectNotFound
-	}
-	if resp.StatusCode != http.StatusOK {
-		return SubjectCandidate{}, fmt.Errorf("Bangumi subject API returned HTTP %d", resp.StatusCode)
-	}
-	var item apiSubjectResponse
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&item); err != nil {
-		return SubjectCandidate{}, err
-	}
-	persons, _ := c.fetchSubjectPersons(ctx, subjectID)
+	persons, _ := c.fetchSubjectPersons(ctx, subjectID, token)
 	cand := mapAPISubject(item, persons)
 	cand.Confidence = 1.0
 	return cand, nil
 }
 
-func (c *LiveClient) fetchSubjectPersons(ctx context.Context, subjectID int64) ([]apiPersonRelation, error) {
+func (c *LiveClient) subject(ctx context.Context, subjectID int64) (apiSubjectResponse, string, error) {
+	if subjectID <= 0 {
+		return apiSubjectResponse{}, "", ErrSubjectNotFound
+	}
+	if err := c.limiter.Wait(ctx); err != nil {
+		return apiSubjectResponse{}, "", err
+	}
+	url := fmt.Sprintf("%s/v0/subjects/%d", strings.TrimRight(c.baseURL, "/"), subjectID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return apiSubjectResponse{}, "", err
+	}
+	req.Header.Set("User-Agent", archiveUserAgent)
+	req.Header.Set("Accept", "application/json")
+
+	token := c.bearer(ctx, req.URL)
+	resp, err := c.doRead(req, token, false)
+	if err != nil {
+		return apiSubjectResponse{}, "", err
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound:
+		return apiSubjectResponse{}, "", ErrSubjectNotFound
+	case http.StatusOK:
+	default:
+		return apiSubjectResponse{}, "", fmt.Errorf("Bangumi subject API returned HTTP %d", resp.StatusCode)
+	}
+	var item apiSubjectResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&item); err != nil {
+		return apiSubjectResponse{}, "", errors.New("invalid Bangumi subject response")
+	}
+	if item.ID != subjectID {
+		return apiSubjectResponse{}, "", ErrSubjectNotFound
+	}
+	if !showLiveNSFW(ctx) && (item.NSFW == nil || *item.NSFW) {
+		return apiSubjectResponse{}, "", ErrNSFWBlocked
+	}
+	return item, token, nil
+}
+
+func (c *LiveClient) fetchSubjectPersons(ctx context.Context, subjectID int64, token string) ([]apiPersonRelation, error) {
 	if err := c.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
@@ -223,10 +321,9 @@ func (c *LiveClient) fetchSubjectPersons(ctx context.Context, subjectID int64) (
 	}
 	req.Header.Set("User-Agent", archiveUserAgent)
 	req.Header.Set("Accept", "application/json")
-	client, proxyRaw := c.httpClient()
-	resp, err := client.Do(req)
+	resp, err := c.doRead(req, token, false)
 	if err != nil {
-		return nil, errors.New(SanitizeProxyError(err, proxyRaw))
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -240,39 +337,65 @@ func (c *LiveClient) fetchSubjectPersons(ctx context.Context, subjectID int64) (
 }
 
 func (c *LiveClient) FetchCoverBytes(ctx context.Context, coverURL string, subjectID int64) ([]byte, error) {
-	if err := c.coverLimiter.Wait(ctx); err != nil {
-		return nil, err
-	}
 	target := strings.TrimSpace(coverURL)
-	if target != "" && !IsAllowedBangumiCoverURL(target) {
+	if !showLiveNSFW(ctx) {
+		// A local NSFW lock can override the upstream flag. Verify public
+		// visibility anonymously before downloading an image for this scope.
+		item, _, err := c.subject(ctx, subjectID)
+		switch {
+		case errors.Is(err, ErrSubjectNotFound), errors.Is(err, ErrNSFWBlocked):
+			return nil, ErrCoverUnavailable
+		case err != nil:
+			return nil, err
+		}
+		target = item.Images.Common
+		if target == "" {
+			target = item.Images.Medium
+		}
+	}
+	if !IsAllowedBangumiCoverURL(target) {
 		target = ""
 	}
+	imageEndpoint := strings.TrimRight(c.baseURL, "/") + fmt.Sprintf("/v0/subjects/%d/image?type=common", subjectID)
 	if target == "" && subjectID > 0 {
-		target = CoverEndpointURL(subjectID)
+		target = imageEndpoint
 	}
 	if target == "" {
-		return nil, errors.New("empty Bangumi cover URL")
+		return nil, ErrCoverUnavailable
+	}
+	if err := c.coverLimiter.Wait(ctx); err != nil {
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", archiveUserAgent)
-	client, proxyRaw := c.httpClient()
-	resp, err := client.Do(req)
+	token := ""
+	if target == imageEndpoint {
+		token = c.bearer(ctx, req.URL)
+	}
+	resp, err := c.doRead(req, token, true)
 	if err != nil {
-		return nil, errors.New(SanitizeProxyError(err, proxyRaw))
+		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusNoContent, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return nil, ErrCoverUnavailable
+	case http.StatusOK:
+	default:
 		return nil, fmt.Errorf("Bangumi cover download returned HTTP %d", resp.StatusCode)
+	}
+	if resp.Request != nil && strings.HasPrefix(path.Base(resp.Request.URL.Path), "no_icon_subject") {
+		return nil, ErrCoverUnavailable
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
 	if err != nil {
 		return nil, err
 	}
 	if len(data) == 0 {
-		return nil, errors.New("Bangumi cover download returned empty body")
+		return nil, ErrCoverUnavailable
 	}
 	return data, nil
 }
@@ -361,7 +484,7 @@ func mapAPISubject(item apiSubjectResponse, persons []apiPersonRelation) Subject
 		Platform:        platformCode,
 		PlatformLabel:   PlatformName(platformCode),
 		IsSeries:        item.Series,
-		NSFW:            item.NSFW,
+		NSFW:            item.NSFW != nil && *item.NSFW,
 		Name:            strings.TrimSpace(item.Name),
 		NameCN:          nameCN,
 		Summary:         strings.TrimSpace(item.Summary),

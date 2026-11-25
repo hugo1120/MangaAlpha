@@ -3,6 +3,7 @@ package thumbnail
 import (
 	"bytes"
 	"context"
+	"errors"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -10,11 +11,85 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
+
+func TestBangumiCoverFailureExpiryAndDiskReuse(t *testing.T) {
+	store, first, _ := thumbnailTestStore(t)
+	root := filepath.Join(t.TempDir(), "thumbnails", "series")
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	service, err := New(store, root, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := database.WithUserScope(t.Context(), database.UserScope{
+		UserID: "fixture-reader", AllowNSFW: true, ShowNSFW: true, AllowedLibraryIDs: []string{first.LibraryID},
+	})
+	if _, err := store.DB().ExecContext(ctx, `
+INSERT INTO series_metadata(series_id,bgm_subject_id,is_nsfw,cover_source,updated_at)
+VALUES(?,42,1,'bangumi',?)`, first.SeriesID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	imageBytes := testPNG(t, 42, 24)
+	service.SetBangumiCoverFetcher(func(got context.Context, _ string, _ int64) ([]byte, error) {
+		scope, _ := database.UserScopeFromContext(got)
+		if scope.UserID != "fixture-reader" || !scope.EffectiveShowNSFW() || !scope.AllowsLibrary(first.LibraryID) {
+			t.Error("cover worker lost caller scope")
+		}
+		switch calls.Add(1) {
+		case 1:
+			return nil, errors.New("fixture upstream HTTP 403")
+		case 2:
+			return []byte("fixture missing image"), nil
+		default:
+			return imageBytes, nil
+		}
+	})
+	miss := func(wantCalls int32) {
+		t.Helper()
+		if _, ok, err := service.Get(ctx, first.SeriesID); err != nil || ok || calls.Load() != wantCalls {
+			t.Fatalf("cover miss returned ok=%v, err=%v, requests=%d want %d", ok, err, calls.Load(), wantCalls)
+		}
+	}
+	miss(1)
+	miss(1)
+	service.bgmMu.Lock()
+	if len(service.bgmFailures) != 1 {
+		t.Errorf("negative entries = %d, want 1", len(service.bgmFailures))
+	}
+	for key, until := range service.bgmFailures {
+		if remaining := time.Until(until); remaining <= 0 || remaining > bgmFailureTTL {
+			t.Errorf("negative cache expiry = %v", remaining)
+		}
+		service.bgmFailures[key] = time.Now().Add(-time.Second)
+	}
+	service.bgmMu.Unlock()
+	miss(2)
+	miss(2)
+	service.InvalidateBangumiCoverFailures()
+	data, ok, err := service.Get(ctx, first.SeriesID)
+	if err != nil || !ok || calls.Load() != 3 {
+		t.Fatalf("cover after invalidation = %v, %v, requests=%d", ok, err, calls.Load())
+	}
+	file, err := os.ReadFile(filepath.Join(filepath.Dir(root), "bangumi", "bgm_42.jpg"))
+	if err != nil || !bytes.Equal(file, data.Bytes) {
+		t.Fatalf("canonical disk cover differs from response: %v", err)
+	}
+	reopened, err := New(store, root, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, ok, err = reopened.Get(ctx, first.SeriesID)
+	if err != nil || !ok || !bytes.Equal(file, data.Bytes) {
+		t.Fatalf("cover after service restart = %v, %v", ok, err)
+	}
+}
 
 func TestGenerateFirstBookSeriesThumbnail(t *testing.T) {
 	store, first, second := thumbnailTestStore(t)

@@ -287,12 +287,17 @@ func normalizeTrackerNSFWMode(raw string) (string, error) {
 }
 
 func (tm *trackerManager) loadConfig(ctx context.Context) trackerConfig {
+	cfg, _ := tm.loadConfigForOwner(ctx)
+	return cfg
+}
+
+func (tm *trackerManager) loadConfigForOwner(ctx context.Context) (trackerConfig, error) {
 	s := tm.svc.store
 	if s == nil {
-		return trackerConfig{NSFWMode: TrackerNSFWModeSkip}
+		return trackerConfig{NSFWMode: TrackerNSFWModeSkip}, nil
 	}
 	userID := database.UserIDFromContext(ctx)
-	row, _ := s.UserBangumiTrackerConfig(ctx, userID)
+	row, loadErr := s.UserBangumiTrackerConfig(ctx, userID)
 	customClientID, _ := s.GetSetting(ctx, SettingTrackerOAuthClientID)
 	customClientSecret, _ := s.GetSetting(ctx, SettingTrackerOAuthClientSecret)
 
@@ -321,7 +326,32 @@ func (tm *trackerManager) loadConfig(ctx context.Context) trackerConfig {
 		UserID:                  strings.TrimSpace(row.BgmUserID),
 		NSFWMode:                nsfwMode,
 		PrivateDefault:          row.PrivateDefault,
+	}, loadErr
+}
+
+// catalogToken selects credentials for read-only Bangumi requests. The owner
+// context is confined to tracker storage and OAuth refresh.
+func (tm *trackerManager) catalogToken(ctx context.Context) string {
+	ownerCtx := ctx
+	cfg, err := tm.loadConfigForOwner(ownerCtx)
+	if err != nil {
+		return ""
 	}
+	if cfg.Token == "" && cfg.RefreshToken == "" && database.UserIDFromContext(ctx) != database.PrimaryAdminUserID {
+		ownerCtx = database.WithUserID(ctx, database.PrimaryAdminUserID)
+		cfg, err = tm.loadConfigForOwner(ownerCtx)
+		if err != nil {
+			return ""
+		}
+	}
+	if updated, err := tm.ensureFreshOAuthToken(ownerCtx, cfg); err == nil {
+		return updated.Token
+	}
+	// A failed proactive refresh can leave a still-valid access token.
+	if exp, err := time.Parse(time.RFC3339, cfg.ExpiresAt); err == nil && tm.svc.now().Before(exp) {
+		return cfg.Token
+	}
+	return ""
 }
 
 func (tm *trackerManager) saveUserConfig(ctx context.Context, cfg trackerConfig) error {
@@ -420,7 +450,10 @@ func (tm *trackerManager) SeriesSummary(ctx context.Context, subjectID int64) *S
 }
 
 func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpdate) (TrackerStatus, error) {
+	tm.refreshMu.Lock()
+	defer tm.refreshMu.Unlock()
 	cfg := tm.loadConfig(ctx)
+	previousToken, previousRefreshToken := cfg.Token, cfg.RefreshToken
 	scope, hasScope := database.UserScopeFromContext(ctx)
 	canEditGlobalApp := !hasScope || scope.IsAdmin
 
@@ -491,6 +524,9 @@ func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpd
 		if err := tm.saveUserConfig(ctx, cfg); err != nil {
 			return TrackerStatus{}, err
 		}
+		if previousToken != "" || previousRefreshToken != "" {
+			tm.svc.invalidateCoverFailures()
+		}
 		return tm.Status(ctx, 30)
 	}
 
@@ -527,6 +563,9 @@ func (tm *trackerManager) UpdateConfig(ctx context.Context, upd TrackerConfigUpd
 
 	if err := tm.saveUserConfig(ctx, cfg); err != nil {
 		return TrackerStatus{}, err
+	}
+	if previousToken != cfg.Token || previousRefreshToken != cfg.RefreshToken {
+		tm.svc.invalidateCoverFailures()
 	}
 	return tm.Status(ctx, 30)
 }
@@ -585,7 +624,7 @@ func (tm *trackerManager) VerifyToken(ctx context.Context, token string) (Tracke
 	if err != nil {
 		return TrackerUser{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	setBangumiBearer(req, token)
 	req.Header.Set("User-Agent", archiveUserAgent)
 	req.Header.Set("Accept", "application/json")
 
@@ -907,7 +946,7 @@ func (tm *trackerManager) fetchRemoteCollection(
 	if err != nil {
 		return remoteCollectionState{}, false, err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	setBangumiBearer(req, token)
 	req.Header.Set("User-Agent", archiveUserAgent)
 	req.Header.Set("Accept", "application/json")
 
@@ -952,7 +991,7 @@ func (tm *trackerManager) pushCollection(
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	setBangumiBearer(req, token)
 	req.Header.Set("User-Agent", archiveUserAgent)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -16,6 +17,21 @@ import (
 
 	"github.com/xJogger/fake-komga-115/internal/database"
 )
+
+func trackerTestTransport(t *testing.T, upstream string) http.RoundTripper {
+	t.Helper()
+	target, err := url.Parse(upstream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return matchingTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == "api.bgm.tv" {
+			r = r.Clone(r.Context())
+			r.URL.Scheme, r.URL.Host, r.Host = target.Scheme, target.Host, target.Host
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})
+}
 
 type mockBgmCollection struct {
 	Type      int    `json:"type"`
@@ -121,7 +137,7 @@ func TestBangumiTrackerOneWaySyncRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer svc.Close()
-	svc.SetAPIBaseURLForTest(mockAPI.URL)
+	svc.SetAPITransportForTest(trackerTestTransport(t, mockAPI.URL))
 	svc.SetTrackerDebounceForTest(25 * time.Millisecond)
 
 	ctx := context.Background()

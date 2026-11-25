@@ -35,10 +35,12 @@ var (
 	trailingVolRe          = regexp.MustCompile(`(?i)(?:[\s_\-]*(?:第?\s*\d+(?:\s*[-~～]\s*\d+)?\s*[卷册冊话話集部篇期巻](?:全|完|未完)?|(?:vol|chap|ch|episode|ep)\.?\s*\d+(?:\s*[-~～]\s*\d+)?|v\d+(?:\s*[-~～]\s*v?\d+)?|全\s*\d+\s*[卷册冊话話集巻]?|全[一1][卷册冊]|\d+(?:\s*\+\s*\d+\s*[完未全]?)+|\d+\s*[-~～]\s*\d+\s*(?:完|未|全|未完|卷全|册全)?|\d+\s*(?:完|未|全|未完|卷全|册全)(?:\s*\+\s*\d+\s*[完未全]?)*|上下[卷册冊]?|上中下)|[\s_\-]+(?:完结|已完结|连载中|未完))\s*$`)
 	revisionAfterBracketRe = regexp.MustCompile(`(?i)([\]】])[\s_-]*rev\d*\s*$`)
 	bareNumericTitleRe     = regexp.MustCompile(`^[0-9]{1,4}$`)
+	numericPunctuationRe   = regexp.MustCompile(`(?:^\d+[/／]\d+$|[:：]\d+$)`)
 	editionRe              = regexp.MustCompile(`(?i)(数码全彩版?|全彩汉化版|全彩版?|彩色版|彩版|复刻爱藏版|复刻版|完全版|爱藏版|爱蔵版|新装再编版|新装版|盒装版|文库版|豪华版|珍藏版|典藏版|特装版|限定版|纪念版|大全集|杰作集|总集篇|画业\d+周年|单行本|合集|短篇集|外传|漫画版|コミカライズ|[@＠]\s*comic)`)
 	novelHintRe            = regexp.MustCompile(`(?:\[\s*轻?小说\s*\]|【\s*轻?小说\s*】)`)
 	noiseWordRe            = regexp.MustCompile(`(?i)^(?:一般コミック|成年コミック|少年コミック|青年コミック|少女コミック|女性コミック|ボーイズラブ|漫画|コミック|comic|comics|manga|汉化|中文|繁体|繁中|简体|简中|港版|台版|日版|韩版|美版|英文版|境外版|电子版|数码版|高清|扫图|自扫|自购|无水印|有水印|双页|单页|digital|dl版|epub|mobi|pdf|zip|cbz|cbr|rar|raw|raws|scan|scans|chn|jpn|eng|enu|esp|kor|cht|chs|cs|连载中?|未完|完结?|已完结|全\d+[卷册话巻]?|\d+[-~～]\d+.*|\d+卷?(?:完|未|全)?|(?:vol|chap|ch)\.?\s*\d+.*|v\d+.*|\d{4}(?:[.\-/年]\d{1,2})?年?|\d{3,4}[px]|\d+x\d+)$`)
 	scanlatorSuffixRe      = regexp.MustCompile(`(?i)(?:汉化组|汉化社|翻译组|制作组|扫图组|数码组|个人汉化|联合汉化|自扫|自购|手打|出品|压制|收集|整理|补档)$`)
+	releaseTagRe           = regexp.MustCompile(`(?i)(?:^(?:jpe?g|png|webp|avif|\d{3,5}\s*px)$|(?:汉化|翻译|扫图|压制|上传|发布)(?:组|版)?$|^(?:扫图|压制|上传|发布)[:：])`)
 	coAuthorSplitRe        = regexp.MustCompile(`\s*[×✕xX]\s*`)
 	numberedSubfolder      = regexp.MustCompile(`(?i)^\s*(?:\d{1,2}\s*[._\- ]+\s*)?(第一部|第二部|第三部|第四部|第\d+部|前篇|后篇|本篇|正篇|外传|番外|番外篇|特别篇|短篇|短篇集|新版|旧版|新系列|r系列|sp|ova|oad|oped|特典|单行本|非单行本|连载|连载汉化|台版|港版|日版|完全版|爱藏版|新装版|文库版|全彩版|彩版|合集|公式书|设定集|画集)\s*$`)
 	r18BoundaryRe          = regexp.MustCompile(`(?i)(?:^|[^a-z0-9])(r-?18|18\+|18禁|18rin)(?:$|[^a-z0-9])`)
@@ -143,22 +145,26 @@ func hasNovelHint(rawName, relativePath string) bool {
 
 func parseCoreName(rawName string) ParsedQuery {
 	simp := preprocessSurface(ToSimplified(rawName))
+	simp = stripUnclosedTail(simp)
 	simp = revisionAfterBracketRe.ReplaceAllString(simp, "$1")
 
 	var (
 		brackets     []string
+		bracketSpans [][]int
 		authors      []string
 		publisher    string
 		editionHints []string
 	)
 
-	for _, m := range squareBracketRe.FindAllStringSubmatch(simp, -1) {
-		token := strings.TrimSpace(m[1])
-		if token == "" {
-			token = strings.TrimSpace(m[2])
+	for _, m := range squareBracketRe.FindAllStringSubmatchIndex(simp, -1) {
+		start, end := m[2], m[3]
+		if start < 0 {
+			start, end = m[4], m[5]
 		}
+		token := strings.TrimSpace(simp[start:end])
 		if token != "" {
 			brackets = append(brackets, token)
+			bracketSpans = append(bracketSpans, m)
 		}
 	}
 	for _, m := range parenGroupRe.FindAllStringSubmatch(simp, -1) {
@@ -186,6 +192,27 @@ func parseCoreName(rawName string) ParsedQuery {
 		coAuthorAtZero  string
 		ambiguousAtZero string
 	)
+	// A trailing run of three unknown labels is probably release credits.
+	// Bracket-only layouts reserve their first two groups for title and author.
+	releaseTail, end, unknownTail := len(brackets), len(simp), 0
+	firstPossibleCredit := 0
+	if outside == "" {
+		firstPossibleCredit = 2
+	}
+	for i := len(brackets) - 1; i >= firstPossibleCredit; i-- {
+		token := brackets[i]
+		if strings.TrimSpace(simp[bracketSpans[i][1]:end]) != "" ||
+			matchPublisher(token) != "" || editionRe.MatchString(token) || isCoAuthorBracket(token) {
+			break
+		}
+		end = bracketSpans[i][0]
+		if !isNoiseBracket(token) {
+			unknownTail++
+		}
+		if unknownTail >= 3 {
+			releaseTail = i
+		}
+	}
 	for idx, token := range brackets {
 		if pub := matchPublisher(token); pub != "" {
 			if publisher == "" {
@@ -196,7 +223,8 @@ func parseCoreName(rawName string) ParsedQuery {
 		if ed := editionRe.FindString(token); ed != "" {
 			editionHints = appendUniqueText(editionHints, ed)
 		}
-		if isNoiseBracket(token) {
+		numericTitle := outside == "" && idx == 0 && bareNumericTitleRe.MatchString(token)
+		if !numericTitle && isNoiseBracket(token) {
 			continue
 		}
 		lowerTok := strings.ToLower(strings.TrimSpace(token))
@@ -211,6 +239,9 @@ func parseCoreName(rawName string) ParsedQuery {
 				ambiguousAtZero = token
 				continue
 			}
+		}
+		if idx >= releaseTail {
+			continue
 		}
 		if isCoAuthorBracket(token) {
 			if outside == "" && idx == 0 {
@@ -270,7 +301,7 @@ func parseCoreName(rawName string) ParsedQuery {
 		if cleaned == "" {
 			cleaned = cleanTitleSurface(rawVal)
 		}
-		if len([]rune(cleaned)) > 0 && !isNoiseBracket(cleaned) {
+		if cleaned != "" && (!isNoiseBracket(cleaned) || bareNumericTitleRe.MatchString(cleaned)) {
 			candidates = appendUniqueText(candidates, cleaned)
 			if parts := splitCompoundTitle(cleaned); len(parts) > 1 {
 				// A component can help retrieve a candidate, but is not a title
@@ -290,6 +321,9 @@ func parseCoreName(rawName string) ParsedQuery {
 				bases = append(bases, strippedEd)
 			}
 			for _, base := range bases {
+				if numericPunctuationRe.MatchString(base) {
+					continue
+				}
 				for _, sep := range []string{"_", "／", "/", " - ", " — ", " ─ ", "※", "：", ":", "～", "~", "-"} {
 					if strings.Contains(base, sep) {
 						parts := strings.Split(base, sep)
@@ -399,6 +433,31 @@ func preprocessSurface(s string) string {
 	return strings.TrimSpace(s)
 }
 
+func stripUnclosedTail(s string) string {
+	type bracket struct {
+		offset int
+		close  rune
+	}
+	var open []bracket
+	closers := map[rune]rune{'[': ']', '【': '】', '(': ')', '（': '）'}
+	for offset, r := range s {
+		switch r {
+		case '[', '【', '(', '（':
+			open = append(open, bracket{offset, closers[r]})
+		case ']', '】', ')', '）':
+			if n := len(open); n > 0 && r == open[n-1].close {
+				open = open[:n-1]
+			}
+		}
+	}
+	if len(open) > 0 {
+		if title := strings.TrimSpace(s[:open[0].offset]); title != "" {
+			return title
+		}
+	}
+	return s
+}
+
 func cleanTitleSurface(s string) string {
 	s = strings.TrimSpace(s)
 	s = leadingDateRe.ReplaceAllString(s, "")
@@ -413,6 +472,9 @@ func cleanTitleSurface(s string) string {
 		s = next
 	}
 	s = strings.Trim(s, " \t\r\n-–—─+_·•・:：/\\|[]【】")
+	if strings.HasPrefix(s, "《") && strings.HasSuffix(s, "》") {
+		s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, "《"), "》"))
+	}
 	s = strings.Join(strings.Fields(s), " ")
 	return s
 }
@@ -533,7 +595,7 @@ func isNoiseBracket(token string) bool {
 	if unambiguousScanlators[lower] {
 		return true
 	}
-	if noiseWordRe.MatchString(lower) {
+	if noiseWordRe.MatchString(lower) || releaseTagRe.MatchString(lower) {
 		return true
 	}
 	if len([]rune(lower)) <= 9 && scanlatorSuffixRe.MatchString(lower) {

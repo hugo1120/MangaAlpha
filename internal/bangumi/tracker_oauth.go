@@ -178,6 +178,7 @@ func (tm *trackerManager) ExchangeOAuthCode(ctx context.Context, code, redirectU
 	if err := tm.saveUserConfig(ctx, latest); err != nil {
 		return TrackerStatus{}, err
 	}
+	tm.svc.invalidateCoverFailures()
 
 	diagnostics.Default().Record(diagnostics.Event{
 		Level:     diagnostics.LevelInfo,
@@ -192,17 +193,24 @@ func (tm *trackerManager) ExchangeOAuthCode(ctx context.Context, code, redirectU
 // RefreshOAuthToken rotates the OAuth access_token and refresh_token under a mutex so concurrent
 // requests never double-spend the same refresh_token.
 func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (TrackerStatus, error) {
+	if err := tm.refreshOAuthToken(ctx, force, oauthBackgroundRefreshWindow); err != nil {
+		return TrackerStatus{}, err
+	}
+	return tm.Status(ctx, 30)
+}
+
+func (tm *trackerManager) refreshOAuthToken(ctx context.Context, force bool, window time.Duration) error {
 	tm.refreshMu.Lock()
 	defer tm.refreshMu.Unlock()
 
 	cfg := tm.loadConfig(ctx)
 	if cfg.AuthMode != TrackerAuthModeOAuth || strings.TrimSpace(cfg.RefreshToken) == "" {
-		return TrackerStatus{}, ErrOAuthNotConfigured
+		return ErrOAuthNotConfigured
 	}
 	if !force && cfg.ExpiresAt != "" {
 		if exp, err := time.Parse(time.RFC3339, cfg.ExpiresAt); err == nil {
-			if exp.Sub(tm.svc.now().UTC()) > oauthBackgroundRefreshWindow {
-				return tm.Status(ctx, 30)
+			if cfg.Token != "" && exp.Sub(tm.svc.now().UTC()) > window {
+				return nil
 			}
 		}
 	}
@@ -239,6 +247,11 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 	if err != nil {
 		_, proxyRaw := tm.svc.live.httpClient()
 		cleanErr := SanitizeProxyError(err, proxyRaw)
+		for _, secret := range []string{cfg.Token, prevRefreshToken, clientSecret} {
+			if secret != "" {
+				cleanErr = strings.ReplaceAll(cleanErr, secret, "xxxxx")
+			}
+		}
 		cfg.LastRefreshError = cleanErr
 		_, _ = saveRefreshConditionally(cfg)
 		diagnostics.Default().Record(diagnostics.Event{
@@ -249,13 +262,13 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 			Code:      diagnostics.ClassifyError(err),
 			Detail:    cleanErr,
 		})
-		return TrackerStatus{}, errors.New(cleanErr)
+		return errors.New(cleanErr)
 	}
 	if strings.TrimSpace(tokResp.AccessToken) == "" {
 		errMsg := "Bangumi OAuth refresh returned empty access_token"
 		cfg.LastRefreshError = errMsg
 		_, _ = saveRefreshConditionally(cfg)
-		return TrackerStatus{}, errors.New(errMsg)
+		return errors.New(errMsg)
 	}
 
 	now := tm.svc.now().UTC()
@@ -284,12 +297,13 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 	}
 	updated, err := saveRefreshConditionally(cfg)
 	if err != nil {
-		return TrackerStatus{}, err
+		return err
 	}
 	if !updated {
-		return TrackerStatus{}, ErrOAuthNotConfigured
+		return ErrOAuthNotConfigured
 	}
 
+	tm.svc.invalidateCoverFailures()
 	diagnostics.Default().RecordVerbose(diagnostics.Event{
 		Level:     diagnostics.LevelInfo,
 		Component: "bangumi",
@@ -297,7 +311,7 @@ func (tm *trackerManager) RefreshOAuthToken(ctx context.Context, force bool) (Tr
 		Action:    "refreshed",
 		Detail:    "Bangumi OAuth access_token refreshed",
 	})
-	return tm.Status(ctx, 30)
+	return nil
 }
 
 func (tm *trackerManager) postOAuthToken(ctx context.Context, form url.Values) (oauthTokenResponse, error) {
@@ -374,18 +388,11 @@ func (tm *trackerManager) ensureFreshOAuthToken(ctx context.Context, cfg tracker
 	if cfg.AuthMode != TrackerAuthModeOAuth || strings.TrimSpace(cfg.RefreshToken) == "" {
 		return cfg, nil
 	}
-	needsRefresh := false
-	if cfg.ExpiresAt == "" {
-		needsRefresh = true
-	} else if exp, err := time.Parse(time.RFC3339, cfg.ExpiresAt); err == nil {
-		if exp.Sub(tm.svc.now().UTC()) <= oauthSyncRefreshWindow {
-			needsRefresh = true
-		}
-	}
-	if !needsRefresh {
+	if exp, err := time.Parse(time.RFC3339, cfg.ExpiresAt); err == nil && cfg.Token != "" &&
+		exp.Sub(tm.svc.now().UTC()) > oauthSyncRefreshWindow {
 		return cfg, nil
 	}
-	if _, err := tm.RefreshOAuthToken(ctx, true); err != nil {
+	if err := tm.refreshOAuthToken(ctx, false, oauthSyncRefreshWindow); err != nil {
 		return cfg, err
 	}
 	return tm.loadConfig(ctx), nil

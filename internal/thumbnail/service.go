@@ -35,7 +35,11 @@ const (
 	defaultMaxEdge = 300
 	jpegQuality    = 75
 	maxImagePixels = 100_000_000
+	bgmFailureTTL  = 5 * time.Minute
+	maxBgmFailures = 2048
 )
+
+var errBangumiCoverUnavailable = errors.New("Bangumi cover unavailable")
 
 type Data struct {
 	Bytes     []byte
@@ -66,9 +70,12 @@ type Service struct {
 	bgmDir string
 	logger *slog.Logger
 
-	bgmFetcher CoverFetcher
-	bgmFlight  singleflight.Group
-	bgmSem     chan struct{}
+	bgmFetcher  CoverFetcher
+	bgmFlight   singleflight.Group
+	bgmSem      chan struct{}
+	bgmMu       sync.RWMutex
+	bgmFailures map[string]time.Time
+	bgmEpoch    uint64
 
 	operationMu sync.RWMutex
 	inflightMu  sync.Mutex
@@ -85,8 +92,9 @@ func New(store *database.Store, root string, logger *slog.Logger) (*Service, err
 	}
 	service := &Service{
 		store: store, root: root, bgmDir: bgmDir, logger: logger,
-		bgmSem:   make(chan struct{}, 6),
-		inflight: make(map[string]struct{}),
+		bgmSem:      make(chan struct{}, 6),
+		bgmFailures: make(map[string]time.Time),
+		inflight:    make(map[string]struct{}),
 	}
 	if err := service.cleanupOrphans(context.Background()); err != nil {
 		logger.Warn("clean orphan series thumbnails", "error", err)
@@ -190,6 +198,11 @@ UPDATE series_thumbnails SET generation_duration_ns=? WHERE series_id=?`,
 }
 
 func (s *Service) Get(ctx context.Context, seriesID string) (Data, bool, error) {
+	series, err := s.store.SeriesByID(ctx, seriesID)
+	if err != nil {
+		return Data{}, false, err
+	}
+	seriesID = series.ID
 	if data, ok, preferOnlyBgm := s.getBangumiCoverIfPreferred(ctx, seriesID); ok {
 		return data, true, nil
 	} else if preferOnlyBgm {
@@ -251,41 +264,87 @@ func (s *Service) getOwnBookCover(ctx context.Context, seriesID string, includeH
 }
 
 func (s *Service) GetOrFetchBangumiCover(ctx context.Context, subjectID int64, coverURL string) (Data, error) {
+	scope, ok := database.UserScopeFromContext(ctx)
+	if !ok || !scope.IsAdmin {
+		return Data{}, sql.ErrNoRows
+	}
+	scope.AllowNSFW, scope.ShowNSFW = true, true
+	return s.getOrFetchBangumiCover(database.WithUserScope(ctx, scope), subjectID, coverURL)
+}
+
+func (s *Service) getOrFetchBangumiCover(ctx context.Context, subjectID int64, previewURL string) (Data, error) {
 	if subjectID <= 0 {
 		return Data{}, errors.New("invalid Bangumi subject ID")
 	}
 	expectedFile := fmt.Sprintf("bgm_%d.jpg", subjectID)
 	diskFull := filepath.Join(s.bgmDir, expectedFile)
-	if raw, err := os.ReadFile(diskFull); err == nil && len(raw) > 0 {
+	if previewURL != "" {
+		// A preview URL supplied by the caller must never replace the canonical
+		// image subsequently served from a series thumbnail endpoint.
+		sum := sha256.Sum256([]byte(previewURL))
+		diskFull = filepath.Join(s.bgmDir, fmt.Sprintf("preview_%d_%x.jpg", subjectID, sum))
+	}
+	scope, _ := database.UserScopeFromContext(ctx)
+	publicOnly := !scope.EffectiveShowNSFW()
+	if raw := s.readBangumiCover(diskFull, publicOnly); len(raw) > 0 {
 		return Data{Bytes: raw, MediaType: "image/jpeg"}, nil
 	}
 	if s.bgmFetcher == nil {
 		return Data{}, errors.New("Bangumi cover fetcher is not configured")
 	}
-	flightKey := fmt.Sprintf("%d", subjectID)
+	flightKey := fmt.Sprintf("%s:%t:%s", scope.UserID, publicOnly, filepath.Base(diskFull))
 	val, fetchErr, _ := s.bgmFlight.Do(flightKey, func() (any, error) {
+		s.bgmMu.Lock()
+		failureUntil, epoch := s.bgmFailures[flightKey], s.bgmEpoch
+		s.bgmMu.Unlock()
+		if raw := s.readBangumiCover(diskFull, publicOnly); len(raw) > 0 {
+			return raw, nil
+		}
+		if time.Now().Before(failureUntil) {
+			return nil, errBangumiCoverUnavailable
+		}
 		select {
 		case s.bgmSem <- struct{}{}:
 			defer func() { <-s.bgmSem }()
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
-		if raw, err := os.ReadFile(diskFull); err == nil && len(raw) > 0 {
+		if raw := s.readBangumiCover(diskFull, publicOnly); len(raw) > 0 {
 			return raw, nil
 		}
-		dlCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		dlCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer cancel()
-		fetched, err := s.bgmFetcher(dlCtx, coverURL, subjectID)
+		fetched, err := s.bgmFetcher(dlCtx, previewURL, subjectID)
 		if err != nil {
+			if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				s.cacheBangumiCoverFailure(flightKey, epoch)
+			}
 			return nil, err
 		}
 		compressed, _, _, err := compressWithMaxEdge(fetched, 420)
 		if err != nil {
+			s.cacheBangumiCoverFailure(flightKey, epoch)
 			return nil, err
+		}
+		s.bgmMu.Lock()
+		defer s.bgmMu.Unlock()
+		if raw := readBangumiCoverFile(diskFull, publicOnly); len(raw) > 0 {
+			return raw, nil
+		}
+		if !publicOnly {
+			if err := os.Remove(diskFull + ".public"); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, err
+			}
 		}
 		if err := writeAtomic(diskFull, compressed); err != nil {
 			return nil, err
 		}
+		if publicOnly {
+			if err := writeAtomic(diskFull+".public", nil); err != nil {
+				return nil, err
+			}
+		}
+		delete(s.bgmFailures, flightKey)
 		return compressed, nil
 	})
 	if fetchErr != nil || val == nil {
@@ -297,16 +356,61 @@ func (s *Service) GetOrFetchBangumiCover(ctx context.Context, subjectID int64, c
 	return Data{Bytes: val.([]byte), MediaType: "image/jpeg"}, nil
 }
 
+func (s *Service) readBangumiCover(path string, publicOnly bool) []byte {
+	s.bgmMu.RLock()
+	defer s.bgmMu.RUnlock()
+	return readBangumiCoverFile(path, publicOnly)
+}
+
+func readBangumiCoverFile(path string, publicOnly bool) []byte {
+	if publicOnly {
+		if _, err := os.Stat(path + ".public"); err != nil {
+			return nil
+		}
+	}
+	raw, _ := os.ReadFile(path)
+	return raw
+}
+
+func (s *Service) cacheBangumiCoverFailure(key string, epoch uint64) {
+	s.bgmMu.Lock()
+	defer s.bgmMu.Unlock()
+	if epoch != s.bgmEpoch {
+		return
+	}
+	now := time.Now()
+	if len(s.bgmFailures) >= maxBgmFailures {
+		for existing, until := range s.bgmFailures {
+			if !now.Before(until) {
+				delete(s.bgmFailures, existing)
+			}
+		}
+		if len(s.bgmFailures) >= maxBgmFailures {
+			for existing := range s.bgmFailures {
+				delete(s.bgmFailures, existing)
+				break
+			}
+		}
+	}
+	s.bgmFailures[key] = now.Add(bgmFailureTTL)
+}
+
+func (s *Service) InvalidateBangumiCoverFailures() {
+	s.bgmMu.Lock()
+	defer s.bgmMu.Unlock()
+	clear(s.bgmFailures)
+	s.bgmEpoch++
+}
+
 func (s *Service) getBangumiCoverIfPreferred(ctx context.Context, seriesID string) (Data, bool, bool) {
 	var (
 		bgmID       sql.NullInt64
 		coverSource string
-		coverURL    string
 		coverPath   string
 	)
 	err := s.store.DB().QueryRowContext(ctx, `
-SELECT bgm_subject_id,cover_source,bgm_cover_url,bgm_cover_path
-FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverURL, &coverPath)
+SELECT bgm_subject_id,cover_source,bgm_cover_path
+FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &coverPath)
 	if err != nil || !bgmID.Valid || bgmID.Int64 <= 0 {
 		return Data{}, false, false
 	}
@@ -316,19 +420,21 @@ FROM series_metadata WHERE series_id=?`, seriesID).Scan(&bgmID, &coverSource, &c
 	forceOnlyBgm := coverSource == database.CoverSourceBangumi
 	subjectID := bgmID.Int64
 	expectedFile := fmt.Sprintf("bgm_%d.jpg", subjectID)
-	if coverPath != "" {
-		if raw, err := os.ReadFile(filepath.Join(s.bgmDir, filepath.Base(coverPath))); err == nil && len(raw) > 0 {
-			return Data{Bytes: raw, MediaType: "image/jpeg"}, true, forceOnlyBgm
-		}
+	if _, ok := database.UserScopeFromContext(ctx); !ok {
+		ctx = database.WithUserScope(ctx, database.UserScope{
+			UserID: database.PrimaryAdminUserID, AllowNSFW: true, ShowNSFW: s.store.ShowNSFW(ctx),
+		})
 	}
-	data, fetchErr := s.GetOrFetchBangumiCover(ctx, subjectID, coverURL)
+	data, fetchErr := s.getOrFetchBangumiCover(ctx, subjectID, "")
 	if fetchErr != nil {
-		if s.logger != nil {
+		if s.logger != nil && !errors.Is(fetchErr, errBangumiCoverUnavailable) {
 			s.logger.Debug("lazy fetch Bangumi cover failed", "series", seriesID, "subject", subjectID, "error", fetchErr)
 		}
 		return Data{}, false, forceOnlyBgm
 	}
-	_ = s.store.SetSeriesBgmCoverPath(ctx, seriesID, expectedFile)
+	if coverPath != expectedFile {
+		_ = s.store.SetSeriesBgmCoverPath(ctx, seriesID, subjectID, expectedFile)
+	}
 	return data, true, forceOnlyBgm
 }
 
@@ -342,7 +448,7 @@ func (s *Service) BangumiStats(ctx context.Context) (Stats, error) {
 		return st, err
 	}
 	for _, entry := range entries {
-		if entry.IsDir() {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".jpg" {
 			continue
 		}
 		if info, err := entry.Info(); err == nil {
@@ -354,6 +460,10 @@ func (s *Service) BangumiStats(ctx context.Context) (Stats, error) {
 }
 
 func (s *Service) ClearBangumiCovers(ctx context.Context) error {
+	s.bgmMu.Lock()
+	defer s.bgmMu.Unlock()
+	clear(s.bgmFailures)
+	s.bgmEpoch++
 	if err := os.RemoveAll(s.bgmDir); err != nil {
 		return err
 	}

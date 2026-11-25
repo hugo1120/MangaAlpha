@@ -697,16 +697,11 @@ func (s *Server) komgaBookPlaceholderThumbnail(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) komgaSeriesThumbnail(w http.ResponseWriter, r *http.Request) {
-	series, err := s.store.SeriesByID(r.Context(), chi.URLParam(r, "seriesID"))
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
-			return
-		}
-		s.writeDBError(w, r, err)
+	data, ok, err := s.thumbs.Get(r.Context(), chi.URLParam(r, "seriesID"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Series not found.")
 		return
 	}
-	data, ok, err := s.thumbs.Get(r.Context(), series.ID)
 	if err != nil {
 		s.logger.Error("series thumbnail", "error", err)
 		s.writeUncachedPlaceholder(w)

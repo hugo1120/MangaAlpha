@@ -17,6 +17,8 @@ const helpersSource = [
   extractSlice('  function renderHome(', '  // --- Series Detail View (/series/:id) ---'),
 ].join('\n');
 
+const apiSource = extractSlice('  async function api(url, opts = {}) {', '  let modalScroll = null;');
+
 function extractTagInnerHTML(html, openEndIndex, tagName) {
   const openTag = new RegExp(`<${tagName}\\b[^>]*>`, 'gi');
   const closeTag = new RegExp(`</${tagName}>`, 'gi');
@@ -254,6 +256,30 @@ function createShelfHarness({
 
   vm.runInContext(helpersSource, ctx);
   return { ctx, doc, win, observers, replacedURLs, navigated };
+}
+
+function createApiHarness({ status, body, onJson }) {
+  const navigated = [];
+  const routed = [];
+  const ctx = vm.createContext({
+    state: { auth: { authenticated: true, userId: 'u1' } },
+    location: { pathname: '/libraries', search: '' },
+    navigate: (url) => navigated.push(url),
+    route: () => routed.push(true),
+    fetch: async () => ({
+      status,
+      ok: status >= 200 && status < 300,
+      headers: { get: () => 'application/json' },
+      clone() { return this; },
+      async json() {
+        if (onJson) onJson();
+        return body;
+      },
+      async text() { return ''; },
+    }),
+  });
+  vm.runInContext(apiSource, ctx);
+  return { ctx, navigated, routed };
 }
 
 test('initial library load error removes skeleton and reveals retry UI', async () => {
@@ -561,4 +587,194 @@ test('shared shelf styling still fits a 360px viewport', () => {
   assert.match(css, /\.section-head \{\s*display: flex;[\s\S]*?flex-wrap: wrap;/);
   assert.match(css, /\.pagination \{[\s\S]*?flex-wrap: wrap;/);
   assert.match(css, /\.chip \{[\s\S]*?max-width: 100%;/);
+});
+
+test('every shelf read carries X-FK115-User-Id, including load-more pages', async () => {
+  const calls = [];
+  const h = createShelfHarness({
+    userId: 'u1',
+    infinite: true,
+    pageSize: 1,
+    apiHandler: async (path, opts) => {
+      calls.push({ path, opts });
+      if (path === '/api/v1/libraries') return [];
+      if (path.startsWith('/api/v1/series')) {
+        const p = Number(new URL(path, 'http://test.invalid').searchParams.get('page'));
+        return { content: [{ id: `s${p}`, name: `S${p}` }], totalElements: 2, totalPages: 2 };
+      }
+      return [];
+    },
+  });
+
+  await h.ctx.renderLibraries('lib1');
+  h.observers[0].trigger(true);
+  await new Promise((r) => setTimeout(r, 40));
+
+  const seriesCalls = calls.filter((c) => c.path.startsWith('/api/v1/series'));
+  assert.equal(seriesCalls.length, 2, 'expected both the initial page and the appended page');
+  assert.deepEqual(seriesCalls.map((c) => Number(new URL(c.path, 'http://test.invalid').searchParams.get('page'))), [0, 1]);
+  assert.ok(calls.some((c) => c.path === '/api/v1/libraries'));
+  for (const call of calls) {
+    assert.equal(
+      call.opts && call.opts.headers && call.opts.headers['X-FK115-User-Id'],
+      'u1',
+      `${call.path} must identify the active account`,
+    );
+  }
+});
+
+for (const search of ['?sort=Random', '?sort=random,desc', '?sort=%20random%20']) {
+  test(`sort variant ${search} uses plain pagination and selects random`, async () => {
+    const requestedPages = [];
+    const h = createShelfHarness({
+      search,
+      infinite: true,
+      pageSize: 2,
+      apiHandler: async (path) => {
+        if (path === '/api/v1/libraries') return [];
+        if (path.startsWith('/api/v1/series')) {
+          const p = Number(new URL(path, 'http://test.invalid').searchParams.get('page'));
+          requestedPages.push(p);
+          return { content: [{ id: `s${p}`, name: `S${p}` }], totalElements: 10, totalPages: 5 };
+        }
+        return [];
+      },
+    });
+
+    await h.ctx.renderLibraries('lib1');
+    // One request only — no infinite-scroll append can silently drop sampled works.
+    assert.deepEqual(requestedPages, [0]);
+    assert.equal(h.doc.getElementById('shelf-sentinel'), null);
+    assert.equal(h.doc.getElementById('shelf-load-status'), null);
+    const sortSelect = h.doc.getElementById('f-sort');
+    assert.ok(sortSelect);
+    assert.match(sortSelect.innerHTML, /<option value="random" selected>/);
+    assert.match(h.doc.getElementById('page-content').innerHTML, /随机漫游 · 分页浏览/);
+  });
+}
+
+test('empty userId never reuses a stale data-user-id="" card grid', async () => {
+  const h = createShelfHarness({
+    userId: '',
+    apiHandler: async (path) => {
+      if (path === '/api/v1/libraries') return [];
+      if (path.startsWith('/api/v1/series')) {
+        return { content: [{ id: 's1', name: 'Work 1' }], totalElements: 1, totalPages: 1 };
+      }
+      return [];
+    },
+  });
+
+  await h.ctx.renderLibraries('lib1');
+  const cards = h.doc.getElementById('library-cards');
+  assert.ok(cards);
+  assert.equal(cards.getAttribute('data-user-id'), '');
+
+  const resolvers = [];
+  h.ctx.api = () => new Promise((r) => { resolvers.push(r); });
+  const pending = h.ctx.renderLibraries('lib1');
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(h.doc.getElementById('library-updating'), null);
+  assert.ok(h.doc.getElementById('library-skeleton'));
+  resolvers.forEach((resolve) => resolve([]));
+  await pending;
+});
+
+test('a stale route observer cannot clear the new route shelf observer', async () => {
+  const h = createShelfHarness({
+    infinite: true,
+    pageSize: 1,
+    apiHandler: async (path) => {
+      if (path === '/api/v1/libraries') return [];
+      if (path.startsWith('/api/v1/series')) {
+        return { content: [{ id: 's1', name: 'S1' }], totalElements: 3, totalPages: 3 };
+      }
+      return [];
+    },
+  });
+
+  await h.ctx.renderLibraries('lib1');
+  const oldObserver = h.observers[0];
+  assert.ok(oldObserver);
+  assert.equal(h.ctx.state.shelfObserver, oldObserver);
+
+  // A newer route has already installed its own observer before the old
+  // IntersectionObserver callback is delivered.
+  const newObserver = { disconnect() {} };
+  h.ctx.state.shelfObserver = newObserver;
+  h.ctx.routeSeq = 2;
+  oldObserver.cb([{ isIntersecting: true }]);
+
+  assert.equal(h.ctx.state.shelfObserver, newObserver);
+  assert.equal(oldObserver.disconnected, true);
+});
+
+for (const [status, body] of [[401, { error: 'UNAUTHORIZED' }], [409, { error: 'USER_CONTEXT_MISMATCH' }]]) {
+  test(`api() rejects an already-aborted signal before handling ${status}`, async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const h = createApiHarness({ status, body });
+    await assert.rejects(h.ctx.api('/x', { signal: controller.signal }), (err) => err.name === 'AbortError');
+    assert.deepEqual(h.navigated, []);
+    assert.deepEqual(h.routed, []);
+  });
+}
+
+test('api() does not navigate on a 401 whose body read races an abort', async () => {
+  const controller = new AbortController();
+  const h = createApiHarness({
+    status: 401,
+    body: { error: 'UNAUTHORIZED' },
+    onJson: () => controller.abort(),
+  });
+  await assert.rejects(h.ctx.api('/x', { signal: controller.signal }), (err) => err.name === 'AbortError');
+  assert.deepEqual(h.navigated, []);
+  assert.deepEqual(h.routed, []);
+});
+
+test('api() does not route on a 409 whose body read races an abort', async () => {
+  const controller = new AbortController();
+  const h = createApiHarness({
+    status: 409,
+    body: { error: 'USER_CONTEXT_MISMATCH' },
+    onJson: () => controller.abort(),
+  });
+  await assert.rejects(h.ctx.api('/x', { signal: controller.signal }), (err) => err.name === 'AbortError');
+  assert.deepEqual(h.navigated, []);
+  assert.deepEqual(h.routed, []);
+});
+
+test('filter chips never render inherited prototype values as function source', () => {
+  const h = createShelfHarness({ apiHandler: async () => [] });
+  const html = h.ctx.filterChipsHTML(new URLSearchParams('scrape_status=constructor'));
+  assert.match(html, /匹配<strong>constructor<\/strong>/);
+  assert.doesNotMatch(html, /\[native code\]/);
+});
+
+test('inline merge toggle keeps a transparent hover background and compact hint', () => {
+  // Strip comments so the `(0,2,0)` notes cannot be mistaken for selector commas.
+  const css = readFileSync('internal/httpserver/static/ui/app.css', 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+  let hoverBlock = null;
+  for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selectors = m[1].split(',').map((s) => s.trim());
+    if (selectors.includes('.filter-foot .pref-toggle-inline:hover')) {
+      hoverBlock = m[2];
+      break;
+    }
+  }
+  assert.ok(hoverBlock, 'missing .filter-foot .pref-toggle-inline:hover override');
+  assert.match(hoverBlock, /background:\s*transparent/);
+  assert.match(hoverBlock, /border-color:\s*transparent/);
+
+  // Three classes (0,3,0) beat `.pref-toggle:hover` (0,2,0) regardless of order.
+  const genericHover = css.match(/(^|\n)\s*\.pref-toggle:hover\s*\{([^}]*)\}/);
+  assert.ok(genericHover);
+  assert.match(genericHover[2], /background:\s*var\(--bg-elevated\)/);
+
+  const hintRules = [...css.matchAll(/\.filter-foot \.pref-toggle-inline \.filter-merge-hint\s*\{([^}]*)\}/g)];
+  assert.ok(hintRules.some((m) => /line-height:\s*1\.4/.test(m[1])), 'hint line-height must beat .pref-toggle-text span');
+
+  const posterSource = css.match(/\.poster-source\s*\{([^}]*)\}/);
+  assert.ok(posterSource);
+  assert.doesNotMatch(posterSource[1], /margin-top/, '.poster-body gap already spaces the source line');
 });

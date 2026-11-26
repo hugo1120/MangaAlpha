@@ -616,6 +616,13 @@
   });
 
   async function api(url, opts = {}) {
+    const throwIfAborted = () => {
+      if (opts.signal && opts.signal.aborted) {
+        const err = new Error('Aborted');
+        err.name = 'AbortError';
+        throw err;
+      }
+    };
     const method = (opts.method || 'GET').toUpperCase();
     const headers = Object.assign({ 'X-FK115-UI': '1' }, opts.headers || {});
     if (
@@ -638,9 +645,13 @@
     }
     if (opts.signal) fetchOpts.signal = opts.signal;
     const resp = await fetch(url, fetchOpts);
+    // A stale shelf request may abort while the response is already in flight;
+    // never let its body reach a route change or the caller's render path.
+    throwIfAborted();
     if (resp.status === 409) {
       let errData = {};
       try { errData = await resp.clone().json(); } catch (_) {}
+      throwIfAborted();
       if (errData && errData.error === 'USER_CONTEXT_MISMATCH') {
         route();
         throw new Error('登录账号已切换，页面已刷新，请重试');
@@ -649,6 +660,8 @@
     if (resp.status === 401 && !opts.allow401 && !(opts.signal && opts.signal.aborted)) {
       let errData = {};
       try { errData = await resp.json(); } catch (_) {}
+      // The signal can abort during body parsing; re-check before redirecting.
+      throwIfAborted();
       if (errData.error === 'SETUP_REQUIRED') {
         navigate('/setup', true);
       } else if (location.pathname !== '/login') {
@@ -988,7 +1001,11 @@
     for (const def of FILTER_CHIP_DEFS) {
       const raw = (sp.get(def.key) || '').trim();
       if (!raw) continue;
-      const text = def.values ? (def.values[raw] || raw) : raw;
+      // Own-property lookup only: values such as `constructor`/`toString` must
+      // render as the raw filter value, never as inherited function source.
+      const text = def.values && Object.prototype.hasOwnProperty.call(def.values, raw)
+        ? def.values[raw]
+        : raw;
       chips.push(`<button type="button" class="chip chip-removable" data-filter-clear="${esc(def.key)}" title="移除该筛选条件">${esc(def.label)}<strong>${esc(text)}</strong><span class="chip-x" aria-hidden="true">×</span></button>`);
     }
     if (chips.length > 1) chips.push('<button type="button" class="chip chip-clear" id="f-clear-all">清除全部</button>');
@@ -1293,11 +1310,14 @@
     const publisher = sp.get('publisher') || '';
     const author = sp.get('author') || '';
     const sort = sp.get('sort') || 'lastModifiedDate,desc';
-    // `sort=random` reshuffles `ORDER BY RANDOM()` on every request, so appending
-    // pages would silently drop works that were never sampled while the footer
-    // still claimed "loaded everything". Random roaming stays on plain pagination.
+    // Match the backend (`strings.Contains(strings.ToLower(strings.TrimSpace(sort)), "random")`)
+    // so variants like `Random` or `random,desc` also use `ORDER BY RANDOM()`.
+    // Such sorts reshuffle on every request, so appending pages would silently
+    // drop works that were never sampled while the footer still claimed
+    // "loaded everything". Random roaming stays on plain pagination.
+    const isRandomSort = sort.trim().toLowerCase().includes('random');
     const infiniteEnabled = Boolean(displayPref('shelfInfiniteScroll'));
-    const infinite = infiniteEnabled && sort !== 'random';
+    const infinite = infiniteEnabled && !isRandomSort;
     const rawPage = Math.max(0, parseInt(sp.get('page') || '0', 10) || 0);
     const page = infinite ? 0 : rawPage;
     const size = displayPref('shelfPageSize');
@@ -1324,7 +1344,9 @@
     const oldList = document.getElementById('library-cards');
     const staleList = document.getElementById('library-updating');
     const cardsOwner = oldList?.getAttribute('data-user-id') ?? staleList?.getAttribute('data-user-id') ?? null;
-    const currentCards = cardsOwner === shelfUserId
+    // Fail closed on an empty userId: an old `data-user-id=""` grid is not a
+    // safe preview for any account.
+    const currentCards = Boolean(shelfUserId) && cardsOwner === shelfUserId
       ? (oldList?.innerHTML || staleList?.innerHTML || '')
       : '';
     renderShell('libraries', currentCards
@@ -1336,7 +1358,13 @@
     // user has already navigated away.
     const shelfAbort = typeof AbortController === 'function' ? new AbortController() : null;
     if (shelfAbort) state.shelfAbort = shelfAbort;
-    const apiOpts = shelfAbort ? { signal: shelfAbort.signal } : {};
+    // Always build the opts object (even without AbortController) so every shelf
+    // read carries the current user id. auth.go rejects a stale X-FK115-User-Id
+    // with 409 USER_CONTEXT_MISMATCH after a cross-tab account switch instead of
+    // letting another account's titles land in this DOM.
+    const apiOpts = {};
+    if (shelfAbort) apiOpts.signal = shelfAbort.signal;
+    if (shelfUserId) apiOpts.headers = { 'X-FK115-User-Id': shelfUserId };
 
     try {
       const apiParams = new URLSearchParams();
@@ -1389,7 +1417,7 @@
       const libraryTitle = activeLib ? activeLib.name : '浏览书库';
       const modeLabel = infinite
         ? '无限滚动'
-        : (infiniteEnabled ? '随机漫游 · 分页浏览' : '分页浏览');
+        : (isRandomSort && infiniteEnabled ? '随机漫游 · 分页浏览' : '分页浏览');
       content.innerHTML = `
         <div class="browse-head">
           <div class="browse-heading">
@@ -1397,7 +1425,7 @@
               <h1 class="browse-title">${esc(libraryTitle)}</h1>
               <span class="browse-count" id="shelf-count">共 <strong>${totalElements.toLocaleString()}</strong> 部作品</span>
             </div>
-            <p class="browse-sub">${activeLib ? '当前书库内的全部作品' : '全部已启用书库'} · 每页 ${size} 部 · ${modeLabel}</p>
+            <p class="browse-sub">${chipsHTML ? (activeLib ? '当前书库筛选结果' : '全部书库筛选结果') : (activeLib ? '当前书库内的全部作品' : '全部已启用书库')} · 每页 ${size} 部 · ${modeLabel}</p>
           </div>
           <div class="lib-strip" role="navigation" aria-label="书库切换">
             <a href="${esc(buildURL({ libraryID: '' }))}" data-nav class="lib-pill ${!libraryID ? 'active' : ''}">全部书库</a>
@@ -1416,7 +1444,7 @@
               <span class="filter-search-icon" aria-hidden="true">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
               </span>
-              <input type="search" id="f-q" class="filter-search-input" placeholder="搜索书名、原文件夹名、别名或作者…" value="${esc(q)}" autocomplete="off">
+              <input type="search" id="f-q" class="filter-search-input" aria-label="搜索书名、原文件夹名、别名或作者" placeholder="搜索书名、原文件夹名、别名或作者…" value="${esc(q)}" autocomplete="off">
             </label>
             <label class="filter-field filter-field-sort">
               <span class="filter-label">排序</span>
@@ -1426,7 +1454,7 @@
                 <option value="metadata.titleSort,asc" ${sort === 'metadata.titleSort,asc' ? 'selected' : ''}>标题 A-Z</option>
                 <option value="bgmRank,asc" ${sort === 'bgmRank,asc' ? 'selected' : ''}>Bangumi 排名</option>
                 <option value="bgmScore,desc" ${sort === 'bgmScore,desc' ? 'selected' : ''}>Bangumi 评分</option>
-                <option value="random" ${sort === 'random' ? 'selected' : ''}>随机漫游</option>
+                <option value="random" ${isRandomSort ? 'selected' : ''}>随机漫游</option>
               </select>
             </label>
             <div class="filter-actions">
@@ -1630,11 +1658,12 @@
         };
 
         const stopObserver = () => {
-          if (observer) {
-            try { observer.disconnect(); } catch (_) {}
-            observer = null;
-          }
-          if (state.shelfObserver) state.shelfObserver = null;
+          if (!observer) return;
+          // Only clear the shared reference if it is still ours: a delayed
+          // callback from an old route must not blank the new route's observer.
+          if (state.shelfObserver === observer) state.shelfObserver = null;
+          try { observer.disconnect(); } catch (_) {}
+          observer = null;
         };
 
         const pauseObserver = () => {

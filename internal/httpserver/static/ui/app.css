@@ -807,7 +807,6 @@ button, input, select, textarea {
 }
 
 .poster-source {
-  margin-top: 3px;
   font-size: 11px;
   color: var(--text-muted);
   opacity: 0.88;
@@ -956,7 +955,15 @@ button, input, select, textarea {
   color: var(--text);
   font-size: 13.5px;
   outline: none;
+  -webkit-appearance: none;
+  appearance: none;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+
+/* Safari renders its own cancel/decoration glyph inside type=search, which
+   stacks on top of our rounded field; strip it along with the native chrome. */
+.filter-search-box .filter-search-input::-webkit-search-decoration {
+  -webkit-appearance: none;
 }
 
 .filter-search-box .filter-search-input:focus {
@@ -1074,10 +1081,24 @@ button, input, select, textarea {
   background: transparent;
 }
 
+/* Higher specificity than `.pref-toggle:hover` (0,2,0) so the inline merge
+   toggle does not gain the padded highlight block on desktop hover. */
+.filter-foot .pref-toggle-inline:hover,
+.filter-foot .pref-toggle-inline:focus-visible {
+  background: transparent;
+  border-color: transparent;
+}
+
 .filter-foot .pref-toggle-inline .pref-toggle-text strong {
   font-size: 12.5px;
   font-weight: 600;
   color: var(--text-secondary);
+}
+
+/* Beats `.pref-toggle-text span` (0,1,1, line-height 1.5) so the hint stays
+   compact inside the filter footer. */
+.filter-foot .pref-toggle-inline .filter-merge-hint {
+  line-height: 1.4;
 }
 
 .filter-merge-hint {

@@ -549,3 +549,16 @@ test('mobile filter search input stays at 16px so iOS does not zoom on focus', (
     'expected the 780px media block to pin the search input at 16px',
   );
 });
+
+test('shared shelf styling still fits a 360px viewport', () => {
+  const css = readFileSync('internal/httpserver/static/ui/app.css', 'utf8');
+  const mobileStart = css.indexOf('@media (max-width: 780px)');
+  assert.ok(mobileStart >= 0, 'missing mobile breakpoint');
+  const mobile = css.slice(mobileStart);
+  assert.match(mobile, /\.poster-grid \{\s*grid-template-columns: repeat\(auto-fill, minmax\(132px, 1fr\)\)/);
+  assert.match(mobile, /\.filter-grid \{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  // Shared components touched by the redesign keep their wrapping behaviour.
+  assert.match(css, /\.section-head \{\s*display: flex;[\s\S]*?flex-wrap: wrap;/);
+  assert.match(css, /\.pagination \{[\s\S]*?flex-wrap: wrap;/);
+  assert.match(css, /\.chip \{[\s\S]*?max-width: 100%;/);
+});
